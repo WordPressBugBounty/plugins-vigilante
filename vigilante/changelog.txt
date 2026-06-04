@@ -1,0 +1,414 @@
+Vigilant — Full changelog
+
+For each release, see the entries below. The latest version is always at the top.
+The current release notes also live in readme.txt under "== Changelog ==".
+
+= 2.6.3 =
+* Improved: The Requests per Minute firewall setting now explains what counts as a request (PHP hits, not static assets) and when to whitelist an IP, instead of raising the limit.
+
+= 2.6.2 =
+* Fix: "Hide login errors" was replacing the registration, lost-password and reset-password screens with the login-only message "Invalid username or password." That mask hooks the `login_errors` filter, which login_header() fires on every wp-login.php screen, while the locale-safe detector that whitelists Vigilant's own messages hooks `wp_login_errors`, which only fires on the login action. So a failed registration ("Please type your email address", "This username is already registered") or a lost-password validation error showed a meaningless "Invalid username or password" instead of the real reason. The mask is now scoped to the login action only; register, lost-password and reset-password show their genuine errors again.
+
+= 2.6.1 =
+* Improved: new optional "Remove WordPress version from script/style URLs" toggle under WP Hardening > Header Cleanup. Strips ?ver=X.Y.Z from enqueued assets only when it matches the current WordPress version, leaving plugin/theme versions intact for legitimate cache busting. The Security Check "WordPress version in assets" finding now links directly to this toggle so the fix is one click away.
+* Improved: every define() Vigilant writes into wp-config.php is now wrapped in `if ( ! defined() )`. Standard WordPress installs were unaffected, but non-standard setups that pre-define WordPress constants before wp-config.php is parsed (custom bootstraps, .env-driven configs, drop-ins under wp-content/, auto_prepend_file, etc.) hit a fatal "Constant already defined" when wp-config.php reached our block. The block is now safe on every layout. Upgrades automatically rewrite the existing block via a 2.6.1 migration; sites already crashing because of this need a manual recovery (see Upgrade Notice).
+* Improved: Security Check category breakdown is easier to read at a glance. The quality pill now absorbs the test counter, so "Good" becomes "Good · 11/14 tests" right in the pill (passed over total scoring tests, info-only checks excluded). Every per-check row shows "pts" after the score so points aren't confused with check counts.
+* Fix: Security Check "Internal Checks" category showed wrong totals (scores like 28/22) because the catalog's declared maximum had not been updated after recent checks were added, and the merge between the scan's "fast" and "slow" phases preserved the stale max from the previous run no matter how many times you re-scanned. The global maximum is now computed dynamically from the categories (no more silent desync when adding checks), the per-category max is reset on every merge from the declared meta, and the 2.6.1 migration drops the cached scan and triggers an immediate background re-scan so the dashboard self-heals after the upgrade.
+* Fix: settings import was failing silently for any export containing `<` or `>` characters (custom htaccess rules, email templates, etc.). The raw JSON payload was being run through sanitize_text_field(), which calls wp_strip_all_tags() internally, corrupting it before json_decode could parse it. Sanitization now happens after parsing, on the structured array.
+* Fix: settings import now reports a specific error message ("Could not import settings. Check the file and try again.") on network failures or server-side rejections, instead of the generic "Error saving settings" or no message at all.
+* Fix: removed dead `ajax_export_settings` / `ajax_import_settings` handlers from class-admin-ajax.php. They were never registered and referenced non-existent methods on the Settings class.
+
+= 2.6.0 =
+* New: closed plugins detection. Once a day, Vigilant queries the WordPress.org plugin API for the slug of every installed plugin (active and inactive) and flags any one listed as closed by the repository team. Closures usually mean an active malware finding, an unpatched vulnerability, a guideline violation, or a supply chain compromise — the site keeps running the affected code until you uninstall it. Closed plugins appear in a dedicated "Closed + Removed Plugins" subsection of the File Integrity tab with their closure date, reason and detected-on date; events are logged in Security Audit (type `plugin`, action `closed_detected`, critical severity); the slug is rolled into the file integrity scan email so it keeps appearing in every digest until uninstalled or ignored. The daily cron also produces an immediate first-detection alert so a weekly integrity scan doesn't delay urgent news. Reopens are picked up automatically. Plugins that have never been in the WordPress.org repository (premium, custom) are ignored silently. New "Closed plugins" toggle in Scan Scope, on by default.
+* New: per-slug Ignore for closed/removed plugins. Some installs intentionally keep a legacy plugin running that wp.org has already closed (dependency, scheduled replacement, internal fork). Ignored plugins are excluded from the main list and from email digests but remain visible in a dedicated "Ignored Closed + Removed Plugins" subsection as a constant reminder, and stay tracked in the Security Audit log. Automatic cleanup: if a previously-ignored slug stops being closed in wp.org (the plugin reopened), the ignore is dropped silently so a future re-closure alerts normally instead of staying silenced forever.
+* New: closed plugins surfaced in the Dashboard recommendations and in Security Check. A dedicated critical recommendation lists the affected plugin names with a direct link to the File Integrity tab. The Security Analyzer gains a new exclusive internal check (14 internal checks now) that reads the cached state with no extra HTTP call and lowers the score for every closed/removed plugin still present.
+* Improved: detection by state tracking, not just by metadata. Some closures (especially the ones triggered by a Security Issue) cause WordPress.org to hide the plugin's public metadata entirely — the API just returns 404. Vigilant remembers which slugs it has previously seen alive, so a 404 on a slug that used to respond normally is treated as a hard "removed from repository" signal with the same severity as an explicit closure. Slugs that were never observed alive are kept as `not_in_repo` and don't generate noise.
+* Improved: fewer false positives in File Integrity. Translation files (`.po`, `.mo`, `.pot`) and binary images (`.jpg`, `.jpeg`, `.png`, `.gif`, `.ico`, `.webp`, `.avif`) are now excluded from the scan by default. PHP error logs dropped in the WordPress root by managed hosts (SiteGround, Hostinger, cPanel) — files named `php_errorlog` or `error_log` — are reported as "additional" instead of "suspicious"; they are server diagnostics, not executable code. Harmless `index.php` placeholders (the empty file or the classic `<?php // Silence is golden.` one-liner used by WordPress core and many plugins to block directory listings) are no longer reported as extra files. All whitelists are by content where possible, so an attacker can't bypass the rule with a payload named `index.php`. The `excluded_extensions` field remains editable for strict-mode users.
+* Fix: the "Approve" button in the Critical Config Files results no longer relies on DOM ordering to remove its diff row. It now targets the diff row by the id the PHP renders for that specific file, removing any chance of visual confusion between wp-config.php and .htaccess when both have a pending change.
+
+= 2.5.1 =
+* Fix: adding a user to the Password Expiration exclusion list duplicated the chip on a single click, and silently saved the same user as excluded from 2FA too. The results dropdown and the chip container reused the 2FA picker's CSS classes for styling, but those classes are also used as jQuery delegated event selectors, so both modules' handlers fired on the same click. The shared classes have been dropped from the pwexp picker (HTML and dynamically rendered chips) and the visual styles are now reused via combined CSS selectors instead. Side effect of the same fix: users excluded in Password Expiration no longer disappear from the 2FA search dropdown's results.
+
+= 2.5.0 =
+* New: Per-user exclusion list for Password Expiration. Below the affected roles you'll find an instant search picker (same UX as the 2FA exclusion), so you can keep, say, a service account or a long-tenure editor out of the rotation policy without having to remove their entire role from the affected list.
+* Improved: the controlled login rejection while a forced reset is pending is now logged to the Activity Log (event type `force_reset_login_blocked`) so it's clearly distinguishable from a regular wrong-password attempt, and the login form now shakes on this error code so the user notices the form rejected their input for a specific reason.
+* Fix: forced password reset by admin had two compounding failures — the email link arrived already expired (the flow ran `wp_set_password()` after `get_password_reset_key()`, and that clears `user_activation_key` in the same UPDATE) and a user who remembered their original password could keep logging in because the login interception hook only fired on incorrect-password errors. Now the reset key isn't touched (link works on first try), the pending-reset flag blocks login regardless of credential correctness, and all active sessions are destroyed the moment an admin triggers the reset.
+* Fix: reset loop after a forced password change. After the user finally set a new password, `after_password_reset` cleared the force-reset flag — but never updated `vigilante_password_changed`, so on the very next login the password expiration module flagged the brand-new password as expired and bounced the user back to `profile.php` indefinitely. Clearing the force-reset flag now also resets the expiration tracking metas, so the just-reset password is treated as fresh.
+* Fix: a stale "must change password" flag would survive after the admin removed the user's role from the affected list (or added them to the new exclusion list). The redirect and the admin notice now re-validate the user against the current rules and clear the stale flag instead of looping forever to the profile page.
+* Fix: requesting a password reset on a site with a custom login URL returned a 404. WordPress core redirects to `wp-login.php?checkemail=confirm` after a successful lost-password submission, but the hidden-login guard only allowed requests with a known `action=` parameter, so the confirmation page hit the 404 fallback. There's now a `lostpassword_redirect` filter that sends the user back to the custom login URL with the same query string, plus a defensive whitelist for `?checkemail` and `?password=changed`.
+* Fix: "Hide login errors" was masking every Vigilant-specific message (lockout, 2FA challenge, pending approval, force-reset…) on translated sites. The filter matched the rendered message against English patterns, but `__()` returns the translation, so on Spanish/French/etc. installs the patterns never hit and the user always saw the generic "Invalid username or password". Detection now hooks `wp_login_errors` and matches by error code, which is locale-independent; the legacy string fallback stays for third-party plugins that filter `login_errors` directly.
+
+= 2.4.1 =
+* New: Score trend sparkline now shows the score on hover for every plotted point, not just the last one. Quick way to read the exact value of any past scan without expanding the breakdown.
+* Improved: "Disable Debug Mode" hardening setting renamed to "Hide PHP errors from visitors" with clearer copy. The double-negative label confused users who weren't sure whether checking the box disabled the option or the debug mode itself. The description now also explains that hiding errors prevents a public `debug.log` file from leaking paths.
+* Improved: Security Check titles reworded from positive affirmations to neutral descriptive labels (e.g. "HTTPS active" → "HTTPS status", "readme.html removed" → "readme.html presence"). The previous wording made a failing check read as a positive statement next to its red icon.
+* Improved: Pass-state detail messages rewritten in factual terms instead of restating that the configuration is correct ("All active plugins are at their latest version" → "All active plugins on their latest version", "MIME sniffing is disabled (nosniff)" → "X-Content-Type-Options header set to nosniff").
+
+= 2.4.0 =
+* Improved: Maximum Security preset rebalanced. Minimum password length raised to 16; File Integrity switched to instant alerts with full scope (core, plugins, themes, uploads, critical config) and daily auto-scan; CSP applied actively instead of report-only mode; Activity Log records every event type, including option changes. HSTS and `close_old_comments` are no longer touched by the preset — your existing decisions are respected, so a site without a healthy HTTPS setup isn't accidentally locked out and a content decision (closing old comments) doesn't get bundled with security hardening.
+* Improved: Standard preset declares its REST API mode (selective) explicitly instead of relying on the global default.
+* Improved: REST API protection no longer blocks `/wp/v2/users` from two places at once. The selective-mode "protected endpoints" list shipped with `/wp/v2/users` baked in by default, duplicating the dedicated "Block user enumeration" toggle — turning that toggle off didn't unblock users. The default list is now empty: one toggle, one behaviour. Existing installs with the legacy single-element default are migrated; custom lists are left alone. If you want to protect additional endpoints in selective mode, add them explicitly under the protected list.
+* Improved: Under Attack mode now applies the Maximum preset on top of your existing configuration plus stricter overrides — 2 login attempts before lockout (vs. Maximum's 3), all security modules forced on, REST API authenticated-only enforced at the network layer, full File Integrity scope, Activity Log retention bumped to at least 30 days / 10 000 entries (only raised, never lowered, to preserve forensic visibility), new registrations paused and every comment sent to moderation while the mode is active.
+* Improved: Under Attack mode now snapshots your full configuration (including which preset, if any, was active) before activating. When the mode ends — manually or by timer — the snapshot is restored verbatim, so your custom settings, Standard, Maximum, or any other previous state come back exactly as they were.
+* Improved: Both when Under Attack activates and when it deactivates, the Security Analyzer is refreshed (a fast offline pass synchronously plus a full scan via wp-cron) so the Dashboard widget reflects the current configuration.
+* Improved: A persistent admin notice now shows that any changes made to Vigilant settings while Under Attack is active will be reverted when the mode ends, plus an inline warning on the Tools tab when exporting or importing settings during the mode.
+* Fix: REST API "Authenticated" mode wasn't really blocking. Two compounding bugs were responsible: applying Maximum or saving "Authenticated" manually wrote one string while the backend looked for another (so the field appeared as "Open" after Maximum and manual saves were silently no-ops); and the helper that decides what is allowed without authentication was reusing the selective-mode "public list", so `/wp/v2/posts`, `/wp/v2/pages`, `/wp/v2/categories`, `/wp/v2/tags` and `/oembed/` were leaking through anyway. Authenticated mode now only allows hard-coded essentials (oEmbed, Site Health) plus endpoints from compatible plugins (WooCommerce, Contact Form 7, Gravity Forms, WPForms, Elementor, Jetpack — each gated by its own compatibility toggle). Existing installs with the legacy bad value are migrated on activation.
+* Fix: every security module silently switched itself off whenever its tab was saved. The generic save handler treated the absence of each section's top-level `enabled` flag (which is controlled by the Dashboard module toggle, not by a checkbox in the section form) as a checkbox the user had unchecked, and stored it as false. The save handler no longer touches that flag, and the plugin self-heals existing affected installs on the next page load.
+* Fix: applying a preset no longer overwrites fields the preset doesn't mention. Previously, applying Standard or Maximum reset every field that wasn't explicitly listed back to the global default — for example, HSTS was switched off any time you applied Maximum, even if you had it deliberately enabled. Presets now layer on top of your current configuration: only the fields the preset declares change. Use "Reset to Defaults" if you want a clean slate.
+* Fix: importing a settings file no longer leaves the Dashboard showing the previously-active preset. The active preset marker is re-evaluated against the imported data using a tolerant subset match (boolean variants `"1"`/`1`/`true` vs `"0"`/`0`/`""`/`false` are normalised before comparing). The Security Score widget is also refreshed in the background after an import so it reflects the new configuration.
+
+= 2.3.0 =
+* New: Bulk selection in File Integrity scan results. Each table (Suspicious, Extra, Modified, Ignored) now has a checkbox column with native WordPress "select all" header, plus an "Ignore selected" / "Stop ignoring selected" action button per table. No more clicking Ignore one row at a time after a plugin update bumps a checksum and a hundred files appear.
+* New: Developer filter `vigilante_skip_rate_limit` for modules that need to opt visitors out of firewall rate limiting (used internally by Under Attack mode for verified visitors).
+* Improved: Firewall &rarr; IP Whitelist and IP Blacklist now document the supported formats inline. The descriptions and placeholders show that exact IPs, CIDR ranges (IPv4 only) and wildcards with `*` are accepted — the matcher already supported all three, but it wasn't visible in the UI.
+* Fix: Under Attack mode no longer leaves visitors stuck on the JavaScript challenge page until rate limiting kicks in. Verified visitors (those who already passed the challenge) now bypass the aggressive 30 req/min cap that the mode applies — previously, loading a normal page with many WordPress-served images/scripts could burn the cap and produce a "Rate limit exceeded" message that looked like the challenge had failed.
+* Fix: Refreshing the JS challenge page no longer invalidates an in-flight challenge nonce. The transient is now reused if still valid, breaking the loop where a user pressing F5 would post a stale nonce and bounce back to a new challenge endlessly. Nonce TTL also raised to 15 minutes (was 5) to tolerate slow Proof-of-Work on weak CPUs.
+
+= 2.2.0 =
+* New: Two opt-in protections for `wp-cron.php` abuse, both off by default and clearly labeled as "only enable if your host has real server-side cron":
+* New: **Protect wp-cron.php** (Firewall &rarr; File Protection) — adds an `.htaccess` rule (`<Files wp-cron.php> Require all denied </Files>`) that blocks direct external HTTP access. This is the actual protection against cron-spam DoS abuse.
+* New: **Disable WP Cron** (WP Hardening &rarr; wp-config.php Security) — writes `define('DISABLE_WP_CRON', true)` to wp-config.php, stopping WordPress from auto-spawning cron from page views. Pairs with the .htaccess block for full coverage.
+* Improved: wp-cron.php Security Check now reads both Vigilant settings plus the `DISABLE_WP_CRON` constant and gives accurate, scenario-specific messages instead of the previous generic "consider disabling WordPress cron" advice. PASS when the URL is blocked (with extra confirmation when both Vigilant toggles are also active). When the URL is still reachable, the message tells you exactly which protection is missing — and never tells you to "disable WP cron" if you already have. Clicking "Go to setting" now jumps straight to the Vigilant toggle that fixes it.
+
+= 2.1.1 =
+* Fix: `?author=N` author enumeration was still leaking the username even with "Block author scanning" enabled. The protection's hook ran at the same priority as WordPress core's canonical redirect, which executed first and exposed the login. Hook now runs at priority 1 so the username never reaches the response.
+* Improved: Security Check distinguishes three scenarios when a probe still detects a leak — sub-toggle on but master module off (explicit FAIL pointing to the master switch), both toggles on but probe still leaks (WARN suggesting cache/CDN purge), or both off (clean FAIL). Applied to both `?author=N` and REST API user enumeration checks.
+* Improved: "Excellent" quality tag is now reserved for a perfect 100/100 score. A single missing point drops to "Good" so the label stays meaningful.
+* Improved: Warning color in the Security Check widget now uses the same amber (#ff9800) as the Configuration Score warnings — less alarming than the previous deep-orange and consistent across the plugin.
+* Improved: Trend card now requires at least 3 scans before drawing a sparkline, adds a delta chip showing the score change vs. the previous scan, and a clearer "Score trend (last N scans)" label. Shows a friendly placeholder when fewer than 3 scans exist.
+* Improved: Security Score card content centered (was floating left with empty space) and the Scan now button icon and text now align correctly.
+* Changed: Informational categories (Reputation/DNSBL) replaced the confusing "Not scored" placeholder with an explicit "All clear" (green check) or "N findings" (amber warning) status. Listed-on-blacklist results now register visually as warnings without deducting from the score.
+* Changed: User-visible English strings now consistently use "Vigilant" (matching the plugin's published name) instead of "Vigilante" in detail messages, email subjects, and the analyzer User-Agent. Internal identifiers (text domain, class names) remain unchanged.
+* Internal: Plugin Check report cleaned up — added missing `translators:` comments for two header detail strings, fixed `_n()` singular without placeholder, scoped the `meta_key` slow-query and `fclose` (TLS stream socket, not filesystem) sniffer ignores precisely.
+
+= 2.1.0 =
+* New: Security Check analyzer — on-demand audit with a 0-100 Security Score and A-E grade, 43 checks across 6 categories (SSL/TLS, HTTP headers, WP exposure, auth/access, sensitive files, internal exclusives). Lives in the Dashboard with a compact widget and a full expandable report.
+* New: 13 internal-exclusive checks impossible from external scanners: PHP EOL, WP core/plugins/themes updates, inactive plugins, file permissions, default salts, `wp_` table prefix, `admin` username, admins without 2FA, Vigilant modules off, recent activity log errors, file integrity status.
+* New: Every failed check links directly to the relevant Vigilant setting with a visual pulse on arrival, so you know exactly what to change.
+* New: Weekly automatic scan with optional email alert when the score drops 10+ points or new critical checks fail. SVG sparkline of the last 30 scans shows score evolution over time.
+* New: Two separate metrics clarified — "Configuration Score" (how well you configured Vigilant) vs "Security Score" (how secure the site really is right now), displayed side by side on the Dashboard.
+* Improved: Two-phase scan (fast checks first, then slow HTTP checks) so the report paints progressively instead of waiting 15s for a single response.
+
+= 2.0.0 =
+* New: Instant settings search — a search field inline on every tab title. Client-side matching against translated labels with English fallback. Results grouped by tab with direct links to the exact section.
+* Improved: "Server Protection" section moved from the Firewall tab to the Security Headers tab, where it fits better. Existing settings are migrated automatically.
+* Improved: Database backup table selector now shows the total size next to the table count. When you deselect tables, the counter switches to "X tables selected" with the size recalculated live.
+* Improved: Cleaner "View" popup in Security Audit — removed the non-actionable "Extra Data" JSON dump and fixed the double line that appeared below the "Message" row.
+* New: Whitelist/blacklist state in the Security Audit "View" popup — IPs and User-Agents already in a firewall list now show a disabled "In whitelist" / "In blacklist" button inline, without extra clicks.
+* Changed: Version history moved to a dedicated changelog.txt file served from the plugin's public SVN, keeping readme.txt focused on the current release.
+
+= 1.14.1 =
+Improved: Typo changes for consistency
+
+= 1.14.0 =
+* New: Critical config file baseline monitoring — detects unauthorized modifications to wp-config.php and .htaccess using stored hash comparison. Closes the gap left by WordPress.org checksums, which don't cover these files
+* New: Line-level diff view showing added and removed lines with line numbers, making injected code immediately visible
+* New: Per-file approve workflow — review the diff and approve legitimate changes individually, recorded in Security Audit
+* New: Scan Scope checkbox for critical config files (enabled by default)
+* New: Vigilant's own modifications to wp-config.php and .htaccess automatically update the baseline to prevent false positives
+* New: Dedicated email section for critical config changes with SECURITY ALERT subject
+* Improved: Instant Alert now also fires on modified and critical config files (previously only suspicious and additional)
+* Improved: "Suspicious only" notification level now includes critical config changes, since they represent the same severity tier
+
+= 1.13.1 =
+* Improve: Activity log entries are now trimmed immediately when retention limits are changed, instead of waiting for the next daily cron run.
+* Improve: Lowered minimum and step for max entries setting from 1000/10000 to 100/100 for finer control.
+
+= 1.13.0 =
+* New: Progressive rate limiting — block duration doubles on each repeat offense (5 min → 10 min → 20 min, etc.) with configurable maximum cap from 1 hour to 7 days. Enabled by default in Maximum Security preset.
+* New: Currently blocked IPs section in Firewall tab showing active rate limit blocks with IP, duration, strike count, and manual unblock button.
+* Improved: "Events to Log" note clarifying that firewall, security and settings events are always logged is now displayed as a visible notice box instead of a small description text.
+
+= 1.12.2 =
+* Fix: rate limit logging now records only once per block instead of every repeated request
+* Fix: file integrity scan compatibility with WordPress.org checksums API nested response format
+
+= 1.12.1 =
+* Fix: WooCommerce payment gateway IPN callbacks blocked by bot protection htaccess rules
+
+= 1.12.0 =
+* New: WordPress option change tracking now uses a curated whitelist of ~30 security-relevant core options instead of an unreliable blacklist. No more false positives from cache plugins, management tools, or hit counters.
+* New: "Additional options to track" field in Security Audit settings — monitor options from WooCommerce, SEOPress, or any plugin using exact names or prefix matching (e.g. "woocommerce_").
+* Fix: REST API protected endpoints caused PHP warnings due to regex patterns being corrupted by input sanitization. Endpoint matching now uses simple prefix comparison, eliminating the issue entirely.
+
+= 1.11.1 =
+* Fix: Additional notification recipients were saved without line breaks, causing only the admin email to receive notifications. Recipients are now stored as an array internally.
+* Fix: Disabling "Send to admin email" now works correctly — the fallback no longer overrides the user's explicit choice.
+* Fix: Creating a new user no longer generates a duplicate "role changed" log entry.
+* Fix: Comment approvals and rejections are now logged (previously only creation, spam, trash, and deletion were tracked).
+* Fix: Noisy options from management plugins (ManageWP, MainWP, InfiniteWP) and hit counters are filtered from option change logging.
+* Improved: Events to Log checkboxes displayed in two-column grid layout.
+* Improved: Exclusion fields include descriptive helper text.
+* Improved: Settings change log entries show readable names instead of internal slugs.
+* Improved: Instant alert description clarified in File Integrity settings.
+* Improved: Existing corrupted email recipient data is automatically repaired on update.
+
+= 1.11.0 =
+* Fix: Security Audit logging was silently disabled after saving settings due to an internal flag being incorrectly reset. This was the root cause of inconsistent or missing log entries across sites.
+* Fix: Per-category toggles (login, user changes, file changes) now actually control logging. Previously, external modules logged events regardless of user preferences.
+* Fix: Extra data in log entries no longer duplicates object fields already stored in dedicated columns.
+* Fix: Exclusion lists (users, IPs) and cleanup settings now use fresh values instead of stale cached data.
+* Fix: Removed dead code in AJAX trait (unused sanitizer, preset handler calling non-existent method).
+* New: Content edits without status change (e.g. editing a published post) are now logged as "edited" events.
+* New: Plugin and theme installations are now logged (previously only activations, updates, and deletions were tracked).
+* New: Theme updates are now logged via the upgrader.
+* New: "Security" event type added for Under Attack mode events, with proper label and filter support.
+* New: Complete settings form for Security Audit — all toggles are now visible and functional: failed logins, comments, media, file integrity, WordPress option changes, max entries, excluded users, and excluded IPs.
+* New: Media uploads and deletions are now logged (previously broken due to missing default).
+* Improved: WordPress option change logging now uses a blacklist approach instead of a 10-item whitelist, covering settings from WordPress core, WooCommerce, and other plugins.
+* Improved: Refresh button shows visual feedback (spinner) during loading and displays errors when requests fail.
+* Improved: Database migration automatically repairs sites where logging was silently disabled by previous versions.
+
+= 1.10.1 =
+* Improved: Notification table status column now adjusts to text width to prevent wrapping
+
+= 1.10.0 =
+* New: Centralized notification recipients - configure who receives all administrative emails from a single location in Settings & Tools
+* New: Additional recipients field - add maintenance professionals or security contacts alongside the WordPress admin email
+* New: Notification summary table - view all active notifications at a glance with direct links to configure each one
+* New: File integrity instant alert - receive an immediate email when suspicious or additional files are detected, regardless of periodic report settings
+* New: Developer filter `vigilante_notification_recipients` to programmatically modify admin email recipients
+* Improved: Tools tab renamed to "Settings & Tools" with notification settings at the top
+* Improved: Each notification section now shows a link to the centralized recipient settings
+* Fix: Admin monitoring section no longer displays a misleading reference to a non-existent "Login Security > Notification Email" field
+* Fix: File integrity scan "Total Scanned" now correctly sums OK + modified + suspicious + extra + ignored files instead of using an incomplete internal counter
+
+= 1.9.0 =
+* Removed: Performance settings section from WP Hardening (post revisions, autosave interval, trash days, memory limit, auto updates). These are outside the scope of a security plugin and could cause conflicts with hosting configurations.
+* Removed: CONCATENATE_SCRIPTS, WP_POST_REVISIONS, AUTOSAVE_INTERVAL, EMPTY_TRASH_DAYS, WP_MEMORY_LIMIT, WP_MAX_MEMORY_LIMIT, and WP_AUTO_UPDATE_CORE from wp-config.php managed constants. Vigilant no longer comments out or overwrites these constants.
+* Fix: wp-config.php constants with multiple occurrences (e.g. duplicate WP_DEBUG defines) are now all properly commented. Previously only the first occurrence was handled, leaving duplicates active and causing conflicts.
+* Fix: WP_DEBUG is now explicitly set to false in wp-config.php when debug mode is disabled, instead of relying on WordPress implicit defaults.
+* Improved: Updated promotional banner with latest plugin and service catalog.
+* Tested up to WordPress 7.0
+
+= 1.8.0 =
+* New - Force password reset by role: select one or more roles to reset all their users at once, ideal for security incidents
+* New - Informative login message when a user tries to log in after a forced password reset
+
+= 1.7.2 =
+* Improved: Dashboard recommendations now include a direct link to the relevant settings tab
+* Improved: Your current IP address is displayed in the firewall IP management section
+* Improved: wp-config.php settings now visually separated into Security and Performance sections
+* Improved: File integrity scan summary stats are now centered for better visual consistency
+* Improved: Firewall description includes a compatibility note about full page caching systems (Varnish, LiteSpeed Cache, NGINX FastCGI, Cloudflare APO)
+* Improved: Activity Log renamed to Security Audit across the entire admin interface (internal slugs unchanged)
+* Fixed: File integrity scan totals now include an Ignored count so the summary numbers add up correctly
+
+= 1.7.1 =
+* Fixed: Under Attack mode now correctly auto-deactivates when the timer expires
+* Fixed: JavaScript challenge no longer loops indefinitely - visitors pass through and get redirected properly
+* Fixed: Challenge page assets externalized to CSS/JS files for Content Security Policy compatibility
+* Fixed: Cache bypass on activation now works correctly with SiteGround (NGINX + Memcached + file-based cache), LiteSpeed, WP Rocket, WP Super Cache, W3 Total Cache, and other major caching solutions
+* Fixed: Admin countdown timer now updates immediately on page load
+* Improved: Added .htaccess cache-busting rules during Under Attack mode (auto-removed on deactivation)
+* Improved: Added NGINX and CDN no-cache headers (X-Accel-Expires, Surrogate-Control) for reverse proxy environments
+
+= 1.7.0 =
+* New: Activity log search — find entries by IP, user agent, username, message, or any text. Minimum 3 characters, 400ms debounce. Works combined with existing type, severity, and method filters. Export respects active search and filters.
+* New: Activity log type and severity columns now display translated labels instead of raw database values.
+* Fix: Insecure username detection (admin, root, test, etc.) now checks all user roles, not just administrators. Consistent with username creation blocking which already prevents these names regardless of role.
+* Fix: Insecure username warning now always active, independent of the "block insecure usernames" setting. Previously, disabling the setting also silenced the warning.
+* Fix: Security score now penalizes installations with accounts using insecure usernames (-3 points).
+* Fix: Insecure usernames now appear in dashboard security recommendations with high priority.
+* Fix: Plugin name in browser tab titles is now translatable instead of hardcoded.
+* Fix: Activity log table no longer crushes the Message column on narrow screens. Uses auto layout with horizontal scroll instead of fixed layout.
+
+= 1.6.1 =
+* New: Legacy WordPress core file detection in root scanner (wp-feed.php, wp-pass.php, etc.) - marked as additional instead of suspicious
+* New: Browser tab title now shows plugin name and active tab (e.g. "Vigilant > Firewall")
+* Improved: Search engine verification files (BingSiteAuth.xml, LiveSearchSiteAuth.xml) and php.ini excluded from root directory scan
+
+= 1.6.0 =
+* New: Root directory scanning in file integrity - detects non-core PHP files in WordPress root (common attack vector)
+* New: phpinfo() detection pattern in file integrity scanner
+* New: WP_DEBUG active warning in security dashboard with score penalty
+* New: Display name protection - prevents saving display name matching login username (User Security)
+* New: Dashboard recommendation when users have display name equal to login
+* New: Smart .htaccess classification in uploads - dangerous rules flagged as suspicious, protective rules as additional with content summary
+* Fix: readme.html and license.txt were never deleted due to mismatched setting keys
+* Fix: Sensitive file cleanup now runs daily (WordPress core updates recreate these files)
+* Fix: Added licencia.txt (Spanish locale) to sensitive file deletion, firewall blocking, and htaccess protection
+
+= 1.5.5 =
+* Fix: Submenu links (Activity Log, File Integrity) showing blank page on some hosting environments
+
+= 1.5.4 =
+* Fix: Close old comments setting no longer blocks WooCommerce product reviews
+* Fix: Email header plugin name was not translatable due to wrong text domain
+* Improved: Close old comments disabled by default (only active in Maximum preset)
+* Improved: Database tables list in backup tool now has scroll, zebra striping, and better layout
+
+= 1.5.3 =
+* Fix: Plugin name in email header was not translatable
+* Fix: Overly broad bot detection patterns in PHP firewall that could block legitimate HTTP requests from plugins and external services
+
+= 1.5.2 =
+* New: Admin option to allow/disallow "Remember this device" checkbox on 2FA verification (disabled by default)
+* New: Password expiry email reminder - sends notification when warning period starts
+* Improved: File integrity scanner skips known false positives (version.php, readme files)
+* Improved: Default email notification level changed to "Suspicious only" for file integrity
+* Improved: Custom login URL placeholder is now translatable
+* Improved: Explanatory text for password expiry email reminder setting
+* Fix: Password expiry email reminder setting had no functional implementation
+
+= 1.5.1 =
+* Improved: Plugin rebranded to "Vigilant" for better international naming
+* Improved: New brand icon and banners
+
+= 1.5.0 =
+* New: Authenticator app (TOTP) two-factor authentication - RFC 6238 compliant
+* New: Method selector - choose between email codes or authenticator app per site
+* New: QR code setup in user profile with verification step
+* New: Backup codes for TOTP - 10 emergency codes generated on setup
+* New: Grace period for TOTP setup (configurable 0-30 days)
+* New: Admin TOTP reset tool - search and reset users who lost authenticator access
+* New: Grace period dashboard notice reminding users to set up their authenticator app
+* New: Dedicated TOTP database table with encrypted secrets (AES-256-CBC)
+* New: HTML styled emails for verification codes and activation notifications
+* New: Admin password change alert in user security monitoring
+* New: Login URL change notification with auto-send and manual button
+* New: 2FA settings UI with visual method selector cards
+
+* Fix: Admin login notification now fires for all administrator logins
+* Fix: Plugin deactivation email was never sent
+* Improved: File integrity scan patterns stored externally for better hosting compatibility
+
+= 1.4.2 =
+* Improved: Pagination for activity log (server-side, 20 items per page with AJAX navigation)
+* Improved: Pagination for file integrity scan results (suspicious, extra, and modified files)
+* Improved: Pagination for ignored files, blocked IPs, and active sessions lists
+* Improved: All paginated tables show item count and range indicator, with navigation arrows when needed
+* Improved: Pagination updates dynamically when items are removed (ignore file, unblock IP, revoke session)
+
+= 1.4.1 =
+* Improved: All firewall block messages are now fully translatable (46 strings added to translation system)
+* Improved: Session limits default behavior changed to "Close oldest session" (recommended) instead of "Block new login"
+* Improved: Default WordPress memory limit increased to 1024 MB
+* Added: 2048 MB option for WordPress memory limit
+
+= 1.4.0 =
+* New: Email notification levels - choose between all issues, suspicious only, or disabled
+* New: Excluded file extensions setting to reduce false positives (e.g., .log, .pot, .po, .mo)
+* New: Excluded paths UI - configure which directories to skip during scans
+* New: Ignore list - dismiss individual files from scan results and email notifications
+* New: Extra file detection in plugins and themes (PHP files not in official WordPress.org packages)
+* New: Plugins and themes without checksums are now scanned for suspicious code patterns
+* New: Two-level detection system - strict mode for plugins (obfuscation combos only), standard mode for uploads (broad pattern matching)
+* New: Extra files with suspicious code automatically escalate to the Suspicious category
+* New: String concatenation obfuscation detection (e.g., building dangerous function names from split strings)
+* New: Double extension detection in uploads directory (e.g., file.php.jpg)
+* New: .htaccess detection in uploads directory
+* New: HTML formatted email notifications with severity sections and summary stats
+* New: Enhanced suspicious code pattern detection (hex2bin, create_function, hex-encoded strings, chr() obfuscation, eval+decode combos)
+* Fix: Missing Scan Themes checkbox in settings UI
+* Fix: Plugins without available checksums were completely skipped, including suspicious file detection
+* Improved: Scan results tables now include Ignore buttons for each file
+* Improved: Scan scope checkboxes grouped in a single fieldset for clarity
+
+= 1.3.2 =
+* Fixed: File integrity email notifications failing with "No recipient forward path" error when notification email field was empty
+
+= 1.3.1 =
+* Fix: All admin JavaScript strings are now fully translatable (activity log popup, scan results, password reset, session management, user approval, preset badges, and more)
+* Fix: File integrity email notifications now work for both manual and scheduled scans
+* Fix: Duplicate scheduled file integrity scans removed (respects configured frequency)
+* Improved: Email notification on file changes is now enabled by default
+
+= 1.3.0 =
+* New: User-Agent whitelist - exclude services like ManageWP, MainWP, UptimeRobot from firewall checks
+* New: User-Agent blacklist - block requests by User-Agent string with partial matching
+* New: HTTP request method column in activity log (GET, POST, PUT, DELETE, etc.)
+* New: Request method filter in activity log
+* New: Quick action buttons in log detail popup to add IPs or User-Agents to firewall lists
+* New: IP lookup links to AbuseIPDB directly from log entries
+* Improved: Log detail popup redesigned with grouped sections (Request, Client, Extra Data)
+* Improved: CSV export now includes request method column
+
+= 1.2.3 =
+* Fix: IP whitelist and blacklist entries were merged into a single line after page reload, preventing exclusions from working correctly
+* Fix: Automatic migration repairs previously corrupted IP lists on update
+
+= 1.2.2 =
+* Improved: New plugin suggestion added.
+
+= 1.2.1 =
+* Improved: wp-config.php constant insertion now correctly placed before "That's all, stop editing" comment, with support for translated wp-config files
+
+= 1.2.0 =
+* New: Database backup download tool with table selection (Tools tab)
+* New: Database prefix change with random secure prefix generation (WP Hardening tab)
+
+= 1.1.1 =
+* Fix: HTTP method restriction no longer blocks PUT and DELETE, allowing REST API requests from plugins like SiteGround Optimizer to work correctly.
+
+= 1.1.0 =
+* New: Under Attack mode - Emergency JavaScript challenge protection with one-click activation
+* New: Automatic browser verification with proof-of-work challenge for frontend visitors
+* New: HMAC-signed verification cookies to prevent cookie forgery
+* New: Aggressive rate limiting (30 req/min) and HTTP method restriction during attacks
+* New: Auto-deactivation after 4 hours with email notifications
+* New: REST API and XML-RPC lockdown during Under Attack mode
+* New: Non-dismissible admin notice with link to dashboard while mode is active
+
+= 1.0.4 =
+* Fixed: File Integrity scan results are now fully translatable
+* Fixed: File Integrity scanner now reliably detects suspicious files in uploads
+* Improved: Uploads directory is now scanned first for faster malware detection
+* Improved: Scan time limit increased from 25 to 60 seconds for thorough scanning
+* Improved: File limit in uploads scan increased from 2,000 to 10,000 files
+
+= 1.0.3 =
+* Fixed: Security Headers test button and results are now fully translatable
+* Improved: Custom plugin icon now displayed in settings page header
+* Improved: Activation notice now includes shield dashicon
+
+= 1.0.2 =
+* Improved: Settings page now uses full available width for better tab display
+
+= 1.0.1 =
+* Fixed: REST API compatibility with plugins using PUT/DELETE methods
+* Fixed: wp-config.php constant insertion now works correctly on non-English WordPress installations
+* Fixed: WP Hardening options now properly apply when unchecking (disabling) settings
+* Fixed: Corrupted UTF-8 characters in activity log messages and CSS
+* Improved: Custom login URL now automatically enables wp-login.php redirect to 404
+* Improved: Session limits no longer exclude administrators by default for better security
+* Improved: Dashboard "Custom Configuration" badge now uses more visible orange color
+* Improved: htaccess HTTP method restrictions now exclude REST API endpoints
+
+= 1.0.0 =
+* Initial release
+* Two-factor authentication via email with trusted device support
+* Role-based 2FA enforcement
+* Advanced PHP-based firewall with SQL injection, XSS, and file inclusion protection
+* Rate limiting with configurable thresholds
+* IP whitelist and blacklist management
+* Complete security headers implementation (CSP, HSTS, X-Frame-Options, Permissions Policy)
+* Built-in security header testing tool
+* HTTPS enforcer with mixed content detection
+* Login security with brute force protection and progressive lockouts
+* Custom login URL support
+* XML-RPC and application passwords control
+* User security with insecure username blocking
+* Strong password enforcement with minimum length
+* Password expiration with history tracking
+* Force password reset for all users
+* Session management and concurrent session limits
+* Email verification for new registrations
+* Registration approval workflow
+* Admin account monitoring and alerts
+* WordPress hardening (wp-config constants, comment security, head cleanup)
+* Feed management and security
+* REST API security with selective endpoint protection
+* User enumeration prevention
+* Activity log with configurable event tracking
+* Log export to CSV and filtering
+* File integrity monitoring against WordPress.org checksums
+* Two-level suspicious code detection (strict for plugins, broad for uploads)
+* Extra file and obfuscation detection in plugins and themes
+* Scheduled scans with HTML email notifications and severity levels
+* Settings export and import
+* Manual backup creation tool
+* Two configuration presets (Standard, Maximum Security)
+* Automatic backup and restoration system
+* Clean rollback on deactivation
+* Full admin interface with tabbed settings

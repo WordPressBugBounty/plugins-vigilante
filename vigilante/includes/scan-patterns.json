@@ -1,0 +1,50 @@
+{
+  "standard_patterns": {
+    "ZXZhbCg=": "eval()",
+    "YmFzZTY0X2RlY29kZSg=": "base64_decode()",
+    "Z3ppbmZsYXRlKA==": "gzinflate()",
+    "c3RyX3JvdDEzKA==": "str_rot13()",
+    "Z3p1bmNvbXByZXNzKA==": "gzuncompress()",
+    "aGV4MmJpbig=": "hex2bin()",
+    "Y3JlYXRlX2Z1bmN0aW9uKA==": "create_function()",
+    "ZXhlYyg=": "exec()",
+    "c2hlbGxfZXhlYyg=": "shell_exec()",
+    "c3lzdGVtKA==": "system()",
+    "cGFzc3RocnUo": "passthru()",
+    "cG9wZW4o": "popen()",
+    "cHJvY19vcGVuKA==": "proc_open()",
+    "Y2FsbF91c2VyX2Z1bmMo": "call_user_func()",
+    "YXNzZXJ0KA==": "assert()",
+    "ZmlsZV9wdXRfY29udGVudHMo": "file_put_contents()",
+    "Y3VybF9leGVjKA==": "curl_exec()",
+    "ZnNvY2tvcGVuKA==": "fsockopen()",
+    "JF9SRVFVRVNUWw==": "$_REQUEST access",
+    "JF9HRVRb": "$_GET access",
+    "JF9QT1NUWw==": "$_POST access",
+    "cGhwaW5mbyg=": "phpinfo()"
+  },
+  "strict_fragments": {
+    "ev": "ZXZhbA==",
+    "b6": "YmFzZTY0X2RlY29kZQ==",
+    "gz": "Z3ppbmZsYXRl",
+    "gu": "Z3p1bmNvbXByZXNz",
+    "sr": "c3RyX3JvdDEz",
+    "hb": "aGV4MmJpbg==",
+    "as": "YXNzZXJ0",
+    "ss": "c3RyaXBzbGFzaGVz",
+    "cf": "Y3JlYXRlX2Z1bmN0aW9uKA=="
+  },
+  "dangerous_names": [
+    "c3lzdGVt",
+    "ZXhlYw==",
+    "c2hlbGxfZXhlYw==",
+    "cGFzc3RocnU=",
+    "cG9wZW4=",
+    "cHJvY19vcGVu",
+    "YmFzZTY0X2RlY29kZQ==",
+    "Z3ppbmZsYXRl",
+    "Z3p1bmNvbXByZXNz",
+    "c3RyX3JvdDEz",
+    "aGV4MmJpbg=="
+  ]
+}

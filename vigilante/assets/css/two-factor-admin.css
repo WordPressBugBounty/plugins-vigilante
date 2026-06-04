@@ -1,0 +1,631 @@
+/**
+ * Two-Factor Authentication Admin Styles
+ *
+ * Styles for the 2FA settings section in Vigilante admin panel
+ *
+ * @package Vigilante
+ */
+
+/* 2FA Settings Section */
+.vigilante-2fa-section {
+    background: #fff;
+    border: 1px solid #c3c4c7;
+    border-radius: 4px;
+    padding: 0;
+    margin-bottom: 20px;
+}
+
+.vigilante-2fa-section h3 {
+    margin: 0;
+    padding: 15px 20px;
+    background: #f6f7f7;
+    border-bottom: 1px solid #c3c4c7;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.vigilante-2fa-section .inside {
+    padding: 20px;
+}
+
+/* Role checkboxes */
+.vigilante-2fa-roles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 24px;
+    margin-top: 8px;
+}
+
+.vigilante-2fa-roles label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    padding: 4px 0;
+}
+
+.vigilante-2fa-roles input[type="checkbox"] {
+    margin: 0;
+}
+
+.vigilante-2fa-roles .role-name {
+    font-weight: 500;
+}
+
+.vigilante-2fa-roles .role-count {
+    color: #646970;
+    font-size: 12px;
+}
+
+/* User exclusion search */
+.vigilante-2fa-user-search-container {
+    margin-top: 8px;
+}
+
+.vigilante-2fa-user-search {
+    position: relative;
+    max-width: 400px;
+}
+
+.vigilante-2fa-user-search input[type="text"] {
+    width: 100%;
+    padding: 8px 12px 8px 36px;
+    border: 1px solid #8c8f94;
+    border-radius: 4px;
+    font-size: 14px;
+}
+
+.vigilante-2fa-user-search input[type="text"]:focus {
+    border-color: #2271b1;
+    box-shadow: 0 0 0 1px #2271b1;
+    outline: none;
+}
+
+.vigilante-2fa-user-search .search-icon {
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #8c8f94;
+    pointer-events: none;
+}
+
+.vigilante-2fa-user-search .search-icon::before {
+    content: "\f179";
+    font-family: dashicons;
+    font-size: 16px;
+}
+
+/* Search results dropdown */
+.vigilante-2fa-search-results,
+.vigilante-pwexp-search-results {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: #fff;
+    border: 1px solid #c3c4c7;
+    border-top: none;
+    border-radius: 0 0 4px 4px;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    max-height: 200px;
+    overflow-y: auto;
+    z-index: 100;
+    display: none;
+}
+
+.vigilante-2fa-search-results.active,
+.vigilante-pwexp-search-results.active {
+    display: block;
+}
+
+.vigilante-2fa-search-results .search-result-item,
+.vigilante-pwexp-search-results .search-result-item {
+    padding: 10px 12px;
+    cursor: pointer;
+    border-bottom: 1px solid #f0f0f1;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.vigilante-2fa-search-results .search-result-item:last-child,
+.vigilante-pwexp-search-results .search-result-item:last-child {
+    border-bottom: none;
+}
+
+.vigilante-2fa-search-results .search-result-item:hover,
+.vigilante-pwexp-search-results .search-result-item:hover {
+    background: #f0f6fc;
+}
+
+.vigilante-2fa-search-results .search-result-item .user-avatar,
+.vigilante-pwexp-search-results .search-result-item .user-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: #dcdcde;
+}
+
+.vigilante-2fa-search-results .search-result-item .user-info,
+.vigilante-pwexp-search-results .search-result-item .user-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.vigilante-2fa-search-results .search-result-item .user-name,
+.vigilante-pwexp-search-results .search-result-item .user-name {
+    font-weight: 500;
+    color: #1d2327;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.vigilante-2fa-search-results .search-result-item .user-email,
+.vigilante-pwexp-search-results .search-result-item .user-email {
+    font-size: 12px;
+    color: #646970;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.vigilante-2fa-search-results .no-results,
+.vigilante-pwexp-search-results .no-results {
+    padding: 12px;
+    text-align: center;
+    color: #646970;
+    font-style: italic;
+}
+
+.vigilante-2fa-search-results .searching,
+.vigilante-pwexp-search-results .searching {
+    padding: 12px;
+    text-align: center;
+    color: #646970;
+}
+
+/* Excluded users tags */
+.vigilante-2fa-excluded-users,
+.vigilante-pwexp-excluded-users {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.vigilante-2fa-excluded-user,
+.vigilante-pwexp-excluded-user {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: #f0f0f1;
+    border: 1px solid #c3c4c7;
+    border-radius: 4px;
+    padding: 4px 8px 4px 12px;
+    font-size: 13px;
+}
+
+.vigilante-2fa-excluded-user .user-display,
+.vigilante-pwexp-excluded-user .user-display {
+    color: #1d2327;
+}
+
+.vigilante-2fa-excluded-user .remove-user,
+.vigilante-pwexp-excluded-user .remove-user {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border: none;
+    background: transparent;
+    color: #646970;
+    cursor: pointer;
+    border-radius: 50%;
+    padding: 0;
+    font-size: 16px;
+    line-height: 1;
+}
+
+.vigilante-2fa-excluded-user .remove-user:hover,
+.vigilante-pwexp-excluded-user .remove-user:hover {
+    background: #d63638;
+    color: #fff;
+}
+
+/* Email sender name field */
+.vigilante-2fa-email-from {
+    max-width: 300px;
+}
+
+/* Notification options */
+.vigilante-2fa-notification-options {
+    margin-top: 12px;
+    padding-left: 24px;
+}
+
+.vigilante-2fa-notification-options label {
+    display: block;
+    margin-bottom: 8px;
+    cursor: pointer;
+}
+
+.vigilante-2fa-notification-options input[type="radio"] {
+    margin-right: 6px;
+}
+
+/* Send notification button */
+.vigilante-2fa-send-notification {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 16px;
+}
+
+.vigilante-2fa-notification-status {
+    font-style: italic;
+}
+
+.vigilante-2fa-notification-status.success {
+    color: #00a32a;
+}
+
+.vigilante-2fa-notification-status.error {
+    color: #d63638;
+}
+
+/* Disabled state when 2FA is not enabled */
+.vigilante-2fa-settings-disabled {
+    opacity: 0.6;
+    pointer-events: none;
+}
+
+/* Method indicator badge */
+.vigilante-method-badge {
+    display: inline-block;
+    background: #dcdcde;
+    color: #1d2327;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    margin-left: 8px;
+    vertical-align: middle;
+}
+
+.vigilante-method-badge.php {
+    background: #8b5cf6;
+    color: #fff;
+}
+
+.vigilante-method-badge.database {
+    background: #3b82f6;
+    color: #fff;
+}
+
+.vigilante-method-badge.htaccess {
+    background: #10b981;
+    color: #fff;
+}
+
+.vigilante-method-badge.filter {
+    background: #f59e0b;
+    color: #fff;
+}
+
+.vigilante-method-badge.rewrite {
+    background: #ec4899;
+    color: #fff;
+}
+
+.vigilante-method-badge.email {
+    background: #06b6d4;
+    color: #fff;
+}
+
+.vigilante-method-badge.config {
+    background: #ea580c;
+    color: #fff;
+}
+
+.vigilante-method-badge.settings {
+    background: #64748b;
+    color: #fff;
+}
+
+/* Responsive */
+@media screen and (max-width: 782px) {
+    .vigilante-2fa-roles {
+        flex-direction: column;
+        gap: 8px;
+    }
+
+    .vigilante-2fa-user-search {
+        max-width: 100%;
+    }
+
+    .vigilante-2fa-method-selector {
+        flex-direction: column;
+    }
+}
+
+/* Method selector */
+.vigilante-2fa-method-selector {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.vigilante-2fa-method-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 16px;
+    border: 2px solid #c3c4c7;
+    border-radius: 6px;
+    cursor: pointer;
+    flex: 1;
+    min-width: 240px;
+    transition: border-color 0.2s, background 0.2s;
+}
+
+.vigilante-2fa-method-option:hover {
+    border-color: #2271b1;
+    background: #f0f6fc;
+}
+
+.vigilante-2fa-method-option.selected {
+    border-color: #2271b1;
+    background: #f0f6fc;
+}
+
+.vigilante-2fa-method-option input[type="radio"] {
+    margin-top: 3px;
+}
+
+.vigilante-2fa-method-option .dashicons {
+    font-size: 24px;
+    width: 24px;
+    height: 24px;
+    color: #2271b1;
+    margin-top: 2px;
+}
+
+.vigilante-2fa-method-option .method-info {
+    flex: 1;
+}
+
+.vigilante-2fa-method-option .method-info strong {
+    display: block;
+    margin-bottom: 4px;
+    color: #1d2327;
+}
+
+.vigilante-2fa-method-option .method-info span {
+    color: #646970;
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+/* TOTP reset container */
+.vigilante-totp-reset-container {
+    margin-top: 8px;
+}
+
+.vigilante-totp-reset-results {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: #fff;
+    border: 1px solid #c3c4c7;
+    border-top: none;
+    border-radius: 0 0 4px 4px;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    max-height: 200px;
+    overflow-y: auto;
+    z-index: 100;
+    display: none;
+}
+
+.vigilante-totp-reset-results.active {
+    display: block;
+}
+
+.vigilante-totp-reset-selected {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 12px 0;
+}
+
+.vigilante-totp-reset-status {
+    margin-left: 12px;
+    font-style: italic;
+}
+
+.vigilante-totp-reset-status.success {
+    color: #00a32a;
+}
+
+.vigilante-totp-reset-status.error {
+    color: #d63638;
+}
+
+/* TOTP profile section (user profile page) */
+.vigilante-totp-profile .vigilante-totp-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-weight: 500;
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-size: 13px;
+}
+
+.vigilante-totp-active {
+    background: #d4edda;
+    color: #155724;
+}
+
+.vigilante-totp-active .dashicons {
+    color: #00a32a;
+}
+
+.vigilante-totp-pending {
+    background: #fff3cd;
+    color: #856404;
+}
+
+.vigilante-totp-pending .dashicons {
+    color: #dba617;
+}
+
+.vigilante-totp-grace-notice {
+    color: #d63638;
+    font-weight: 500;
+}
+
+.vigilante-totp-backup-count {
+    font-weight: 500;
+}
+
+.vigilante-totp-backup-count.warning {
+    color: #d63638;
+}
+
+/* QR code setup */
+.vigilante-totp-setup-qr {
+    max-width: 500px;
+}
+
+.vigilante-totp-setup-qr > .description {
+    margin-bottom: 16px;
+}
+
+.vigilante-totp-qr-container {
+    margin: 16px 0;
+}
+
+.vigilante-totp-qr-container img,
+.vigilante-totp-qr-container canvas {
+    display: block;
+    border: 8px solid #fff;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    border-radius: 4px;
+}
+
+.vigilante-totp-manual-key {
+    margin: 16px 0;
+}
+
+.vigilante-totp-manual-key p {
+    margin-bottom: 8px;
+    color: #646970;
+    font-size: 13px;
+}
+
+.vigilante-totp-secret-display {
+    display: inline-block;
+    font-family: monospace;
+    font-size: 14px;
+    letter-spacing: 2px;
+    background: #f6f7f7;
+    padding: 8px 16px;
+    border: 1px solid #dcdcde;
+    border-radius: 4px;
+    user-select: all;
+    word-break: break-all;
+}
+
+.vigilante-totp-verify-setup {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid #dcdcde;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.vigilante-totp-verify-setup label {
+    font-weight: 600;
+}
+
+.vigilante-totp-verify-setup input[type="text"] {
+    width: 120px;
+    font-size: 16px;
+    letter-spacing: 4px;
+    text-align: center;
+    font-family: monospace;
+}
+
+.vigilante-totp-setup-status {
+    font-size: 13px;
+}
+
+.vigilante-totp-setup-status.error {
+    color: #d63638;
+}
+
+/* Success and backup codes */
+.vigilante-totp-success-msg {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: #d4edda;
+    color: #155724;
+    padding: 12px 16px;
+    border-radius: 4px;
+    margin-bottom: 16px;
+    font-weight: 500;
+}
+
+.vigilante-totp-success-msg .dashicons {
+    color: #00a32a;
+    font-size: 20px;
+    width: 20px;
+    height: 20px;
+}
+
+.vigilante-totp-backup-codes-box {
+    border: 1px solid #dcdcde;
+    border-radius: 4px;
+    padding: 16px;
+    margin-top: 16px;
+    background: #fff;
+}
+
+.vigilante-totp-backup-warning {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #d63638;
+    font-weight: 600;
+    margin: 0 0 12px;
+    font-size: 13px;
+}
+
+.vigilante-totp-backup-warning .dashicons {
+    color: #d63638;
+}
+
+.vigilante-totp-codes-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+}
+
+.vigilante-totp-codes-grid code {
+    display: block;
+    font-family: monospace;
+    font-size: 14px;
+    background: #f6f7f7;
+    padding: 6px 12px;
+    border: 1px solid #dcdcde;
+    border-radius: 3px;
+    letter-spacing: 1px;
+}

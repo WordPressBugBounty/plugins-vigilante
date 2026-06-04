@@ -1,0 +1,165 @@
+/**
+ * Two-Factor Authentication Login Styles
+ *
+ * Styles for the 2FA verification form on WordPress login page
+ *
+ * @package Vigilante
+ */
+
+/* Container */
+.vigilante-2fa-container {
+    margin-bottom: 16px;
+}
+
+/* Message box */
+.vigilante-2fa-message {
+    background: #f0f6fc;
+    border-left: 4px solid #2271b1;
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    border-radius: 0 4px 4px 0;
+}
+
+.vigilante-2fa-message p {
+    margin: 0 0 8px 0;
+    color: #1d2327;
+}
+
+.vigilante-2fa-message p:last-child {
+    margin-bottom: 0;
+}
+
+.vigilante-2fa-expiry {
+    font-size: 13px;
+    color: #50575e;
+}
+
+/* Error message */
+.vigilante-2fa-error {
+    background: #fcf0f1;
+    border-left: 4px solid #d63638;
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    border-radius: 0 4px 4px 0;
+    color: #d63638;
+}
+
+/* Form fields */
+.vigilante-2fa-field {
+    margin-bottom: 16px !important;
+}
+
+.vigilante-2fa-field label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 600;
+    color: #1d2327;
+}
+
+.vigilante-2fa-field input[type="text"] {
+    width: 100%;
+    font-size: 24px;
+    letter-spacing: 8px;
+    text-align: center;
+    padding: 12px 16px;
+    font-family: monospace;
+}
+
+/* Remember device checkbox */
+.vigilante-2fa-remember {
+    margin-top: 16px !important;
+}
+
+.vigilante-2fa-remember label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: normal;
+    cursor: pointer;
+}
+
+.vigilante-2fa-remember input[type="checkbox"] {
+    margin: 0;
+}
+
+/* Submit button */
+.vigilante-2fa-field.submit {
+    margin-top: 24px !important;
+}
+
+.vigilante-2fa-field.submit input[type="submit"] {
+    width: 100%;
+    height: auto;
+    padding: 12px 24px;
+    font-size: 16px;
+}
+
+/* Resend code link */
+.vigilante-2fa-resend {
+    text-align: center;
+    margin-top: 16px;
+    font-size: 13px;
+}
+
+.vigilante-2fa-resend a {
+    color: #2271b1;
+    text-decoration: none;
+}
+
+.vigilante-2fa-resend a:hover {
+    color: #135e96;
+    text-decoration: underline;
+}
+
+.vigilante-2fa-resend-status {
+    display: block;
+    margin-top: 8px;
+    font-style: italic;
+}
+
+.vigilante-2fa-resend-status:empty {
+    display: none;
+}
+
+.vigilante-2fa-resend-status.success {
+    color: #00a32a;
+}
+
+.vigilante-2fa-resend-status.error {
+    color: #d63638;
+}
+
+/* Hide elements when 2FA form is shown */
+#login form .user-pass-wrap,
+#login form > p:not(.vigilante-2fa-field):not(.vigilante-2fa-resend),
+#login form .forgetmenot {
+    /* Controlled via inline styles in PHP for specificity */
+}
+
+/* Responsive adjustments */
+@media screen and (max-width: 480px) {
+    .vigilante-2fa-field input[type="text"] {
+        font-size: 20px;
+        letter-spacing: 6px;
+        padding: 10px 12px;
+    }
+}
+
+/* TOTP-specific login styles */
+.vigilante-2fa-totp .vigilante-2fa-totp-icon {
+    text-align: center;
+    margin: 0 0 12px;
+}
+
+.vigilante-2fa-totp .vigilante-2fa-totp-icon .dashicons {
+    font-size: 32px;
+    width: 32px;
+    height: 32px;
+    color: #2271b1;
+}
+
+.vigilante-2fa-backup-hint {
+    font-size: 12px;
+    color: #646970;
+    font-style: italic;
+}
