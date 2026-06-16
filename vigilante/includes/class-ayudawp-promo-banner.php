@@ -49,11 +49,8 @@ class Vigilante_Promo_Banner {
      */
     private function get_plugins_catalog() {
         // Catalog kept in alphabetical order by slug. Source of truth lives in
-        // /mis-plugins/ayudawp-promo-banner-catalog.md. The Native SEO Suite
-        // plugins (native-seo-meta-tags, native-sitemap-customizer, noindexer)
-        // intentionally share dashicons-embed-generic to reinforce the family
-        // identity. The current host slug is excluded at runtime in
-        // get_random_plugins().
+        // /mis-plugins/ayudawp-promo-banner-catalog.md. The current host slug is
+        // excluded at runtime in get_random_plugins().
         return array(
             'ai-content-signals' => array(
                 'icon'        => 'dashicons-flag',
@@ -78,12 +75,6 @@ class Vigilante_Promo_Banner {
                 'title'       => __( 'Fix customer names', 'vigilante' ),
                 'description' => __( 'Auto-capitalize names and addresses in WordPress and WooCommerce. Keep invoices and reports professionally formatted.', 'vigilante' ),
                 'button'      => __( 'Install Auto Capitalize', 'vigilante' ),
-            ),
-            'core-diet' => array(
-                'icon'        => 'dashicons-food',
-                'title'       => __( 'Reduce WordPress Fat', 'vigilante' ),
-                'description' => __( 'Put your WordPress on a diet. Disable unnecessary default features to improve performance and reduce bloat.', 'vigilante' ),
-                'button'      => __( 'Install DietPress', 'vigilante' ),
             ),
             'easy-actions-scheduler-cleaner-ayudawp' => array(
                 'icon'        => 'dashicons-database-remove',
@@ -121,29 +112,17 @@ class Vigilante_Promo_Banner {
                 'description' => __( 'Set multiple future sale prices for WooCommerce products. Plan promotions in advance with start and end dates.', 'vigilante' ),
                 'button'      => __( 'Install Sale Scheduler', 'vigilante' ),
             ),
-            'native-seo-meta-tags' => array(
-                'icon'        => 'dashicons-embed-generic',
-                'title'       => __( 'Automatic SEO meta tags', 'vigilante' ),
-                'description' => __( 'Title, meta description, Open Graph, Twitter Card and JSON-LD schema from native WordPress fields. No heavy SEO plugin needed.', 'vigilante' ),
-                'button'      => __( 'Install Native SEO Meta Tags', 'vigilante' ),
-            ),
-            'native-sitemap-customizer' => array(
-                'icon'        => 'dashicons-embed-generic',
-                'title'       => __( 'Customize your sitemap', 'vigilante' ),
-                'description' => __( 'Control WordPress native sitemap: exclude post types, taxonomies, specific posts, and authors. No bloat, just options.', 'vigilante' ),
-                'button'      => __( 'Install Sitemap Customizer', 'vigilante' ),
+            'native-aeo-pack' => array(
+                'icon'        => 'dashicons-visibility',
+                'title'       => __( 'All-in-one SEO, AEO & GEO', 'vigilante' ),
+                'description' => __( 'Meta tags, Open Graph, JSON-LD schema, robots and native sitemap control: the clean metadata search engines and AI assistants read, built on WordPress core.', 'vigilante' ),
+                'button'      => __( 'Install Visibility', 'vigilante' ),
             ),
             'no-gutenberg' => array(
                 'icon'        => 'dashicons-edit-page',
                 'title'       => __( 'Back to Classic Editor', 'vigilante' ),
                 'description' => __( 'Completely remove Gutenberg, FSE styles, and block widgets. Restore the classic editing experience with better performance.', 'vigilante' ),
                 'button'      => __( 'Install No Gutenberg', 'vigilante' ),
-            ),
-            'noindexer' => array(
-                'icon'        => 'dashicons-embed-generic',
-                'title'       => __( 'Control search indexing', 'vigilante' ),
-                'description' => __( 'Tell search engines what not to index. Apply noindex per post, page, or entire post types with simple override controls.', 'vigilante' ),
-                'button'      => __( 'Install NoIndexer', 'vigilante' ),
             ),
             'periscopio' => array(
                 'icon'        => 'dashicons-rss',
@@ -206,10 +185,10 @@ class Vigilante_Promo_Banner {
                 'button'      => __( 'Install Widget Visibility', 'vigilante' ),
             ),
             'wpo-tweaks' => array(
-                'icon'        => 'dashicons-performance',
-                'title'       => __( 'Speed up your WordPress', 'vigilante' ),
-                'description' => __( 'Comprehensive performance optimizations: critical CSS, lazy loading, cache rules, and 30+ tweaks with zero configuration.', 'vigilante' ),
-                'button'      => __( 'Install Zero Config Performance', 'vigilante' ),
+                'icon'        => 'dashicons-food',
+                'title'       => __( 'Put WordPress on a diet', 'vigilante' ),
+                'description' => __( 'Disable bloat and apply 30+ performance tweaks (critical CSS, lazy loading, cache rules) with zero configuration for a leaner, faster site.', 'vigilante' ),
+                'button'      => __( 'Install DietPress', 'vigilante' ),
             ),
         );
     }

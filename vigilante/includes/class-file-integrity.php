@@ -2118,7 +2118,7 @@ class Vigilante_File_Integrity {
 
             $html .= '<tr>';
             $html .= '<td style="padding:4px 0;color:#1d2327;font-family:Consolas,Monaco,monospace;font-size:11px;word-break:break-all;">';
-            $html .= '<strong>' . esc_html( $name ) . '</strong> &middot; <code>' . esc_html( $slug ) . '</code>';
+            $html .= '<strong>' . esc_html( $name ) . '</strong> &middot; <a href="' . esc_url( 'https://wordpress.org/plugins/' . $slug . '/' ) . '" style="color:#2271b1;text-decoration:none;"><code>' . esc_html( $slug ) . '</code></a>';
             $html .= '</td></tr>';
             $html .= '<tr><td style="padding:0 0 4px 12px;color:#787c82;font-size:11px;">' . esc_html( implode( ' &middot; ', array_map( 'wp_strip_all_tags', $detail_bits ) ) ) . '</td></tr>';
             if ( '' !== $reason ) {

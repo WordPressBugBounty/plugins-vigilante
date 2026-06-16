@@ -5406,7 +5406,7 @@ class Vigilante_Admin {
                                     <tr>
                                         <td>
                                             <strong><?php echo esc_html( $cp_entry['name'] ?? $cp_slug ); ?></strong><br>
-                                            <code style="color: #50575e;"><?php echo esc_html( $cp_slug ); ?></code>
+                                            <a href="<?php echo esc_url( 'https://wordpress.org/plugins/' . $cp_slug . '/' ); ?>" target="_blank" rel="noopener noreferrer"><code style="color: #50575e;"><?php echo esc_html( $cp_slug ); ?></code></a>
                                         </td>
                                         <td><?php echo esc_html( $cp_entry['version'] ?? '' ); ?></td>
                                         <td><span style="color: <?php echo esc_attr( $cp_state_color ); ?>; font-weight: 600;"><?php echo esc_html( $cp_state_label ); ?></span></td>
@@ -5507,7 +5507,7 @@ class Vigilante_Admin {
                         <tr>
                             <td>
                                 <strong><?php echo esc_html( $icp_entry['name'] ?? $icp_slug ); ?></strong><br>
-                                <code style="color: #50575e;"><?php echo esc_html( $icp_slug ); ?></code>
+                                <a href="<?php echo esc_url( 'https://wordpress.org/plugins/' . $icp_slug . '/' ); ?>" target="_blank" rel="noopener noreferrer"><code style="color: #50575e;"><?php echo esc_html( $icp_slug ); ?></code></a>
                             </td>
                             <td><?php echo esc_html( $icp_state_label ); ?></td>
                             <td><?php echo esc_html( $icp_entry['closed_date'] ?? '' ); ?></td>

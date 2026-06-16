@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.6.3
+Stable tag: 2.6.4
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -135,7 +135,6 @@ Achieve Grade A security ratings:
 * HSTS (HTTP Strict Transport Security) with includeSubdomains and preload options
 * X-Frame-Options - prevent clickjacking
 * X-Content-Type-Options - prevent MIME sniffing
-* X-XSS-Protection - kept available for auditors that still check it (deprecated in modern browsers, superseded by CSP)
 * Referrer Policy control
 * Permissions Policy (camera, microphone, geolocation, payment, USB)
 * Cross-Origin policies (COEP, COOP, CORP)
@@ -427,6 +426,11 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 2.6.4 =
+* Improved: closed and removed plugins now link to their WordPress.org page from the File Integrity tab (both the active "Closed + Removed Plugins" list and the "Ignored" one) and from the scan email digest, so you can read the closure notice, reason and date in one click. For removed plugins the link may return a 404, which itself confirms the metadata was pulled by the repository team.
+* Fix: the Security Headers checker no longer reports X-XSS-Protection as a missing header. That header was deprecated years ago (browsers dropped the XSS auditor it relied on — Chrome and Edge in 2019, Firefox never shipped it — and current guidance is to not send it, since Content-Security-Policy is the real protection), and Vigilant had already removed its toggle from the Security Headers tab. The leftover scoring still listed it as "missing" with no way to turn it on, capping the headers grade at 90. The header is now fully retired and its 10 points moved to CSP, so a correctly configured site can reach 100 again.
+* Fix: the "Ignore selected" and "Stop ignoring selected" bulk buttons in File Integrity stayed showing "Processing…" after the action finished, even though the button kept working. The original label is now restored when the request completes.
+
 = 2.6.3 =
 * Improved: The Requests per Minute firewall setting now explains what counts as a request (PHP hits, not static assets) and when to whitelist an IP, instead of raising the limit.
 
@@ -454,8 +458,8 @@ For older changelog entries, please check the [changelog.txt](https://plugins.sv
 
 == Upgrade Notice ==
 
-= 2.6.3 =
-Clearer rate limiting: the Requests per Minute field now explains what counts as a request and when to whitelist an IP instead of raising the limit.
+= 2.6.4 =
+Retired the deprecated X-XSS-Protection header: the Security Headers checker no longer flags it as missing and CSP absorbs its score. Closed/removed plugins now link to their WordPress.org page. Fixed File Integrity bulk buttons stuck on "Processing…".
 
 == Support ==
 

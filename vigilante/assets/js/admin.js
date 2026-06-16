@@ -1154,6 +1154,12 @@
                 },
                 error: function() {
                     $btn.prop('disabled', false).text(originalText);
+                },
+                // Restore the label on success too. refreshBulkBar() re-derives the
+                // disabled state from the remaining selection but never rewrites the
+                // button text, so without this the button stays on "Processing...".
+                complete: function() {
+                    $btn.text(originalText);
                 }
             });
         },
@@ -1212,6 +1218,12 @@
                 },
                 error: function() {
                     $btn.prop('disabled', false).text(originalText);
+                },
+                // Restore the label on success too. refreshBulkBar() re-derives the
+                // disabled state from the remaining selection but never rewrites the
+                // button text, so without this the button stays on "Processing...".
+                complete: function() {
+                    $btn.text(originalText);
                 }
             });
         },

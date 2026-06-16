@@ -536,7 +536,7 @@ class Vigilante_Under_Attack {
         // Insert at top
         $new_content = $block . "\n\n" . ltrim( $content );
 
-        file_put_contents( $htaccess_path, $new_content, LOCK_EX ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+        file_put_contents( $htaccess_path, $new_content, LOCK_EX ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents, PluginCheck.CodeAnalysis.WriteFile.ABSPATHDetected -- .htaccess must live at the site root for the web server to read it (wp_upload_dir() is not an option); direct I/O because WP_Filesystem fails in the AJAX credential-form context.
     }
 
     /**
@@ -564,7 +564,7 @@ class Vigilante_Under_Attack {
 
         $new_content = $this->remove_htaccess_block( $content );
 
-        file_put_contents( $htaccess_path, $new_content, LOCK_EX ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+        file_put_contents( $htaccess_path, $new_content, LOCK_EX ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents, PluginCheck.CodeAnalysis.WriteFile.ABSPATHDetected -- .htaccess must live at the site root for the web server to read it (wp_upload_dir() is not an option); direct I/O because WP_Filesystem fails in the AJAX credential-form context.
     }
 
     /**

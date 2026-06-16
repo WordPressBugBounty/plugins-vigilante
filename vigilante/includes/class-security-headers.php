@@ -299,12 +299,6 @@ class Vigilante_Security_Headers {
             $rules[] = '    Header always set X-Content-Type-Options "nosniff"';
         }
 
-        // X-XSS-Protection
-        if ( ! empty( $this->options['x_xss_protection'] ) ) {
-            $rules[] = '    # XSS Protection (legacy but still useful)';
-            $rules[] = '    Header always set X-XSS-Protection "1; mode=block"';
-        }
-
         // Referrer-Policy
         if ( ! empty( $this->options['referrer_policy'] ) ) {
             $value = $this->options['referrer_policy'];
@@ -458,10 +452,6 @@ class Vigilante_Security_Headers {
             $headers['X-Content-Type-Options'] = 'nosniff';
         }
 
-        if ( ! empty( $this->options['x_xss_protection'] ) ) {
-            $headers['X-XSS-Protection'] = '1; mode=block';
-        }
-
         if ( ! empty( $this->options['referrer_policy'] ) ) {
             $headers['Referrer-Policy'] = $this->options['referrer_policy'];
         }
@@ -508,14 +498,6 @@ class Vigilante_Security_Headers {
             $missing[] = 'X-Content-Type-Options';
         }
 
-        // X-XSS-Protection (10 points)
-        if ( ! empty( $this->options['x_xss_protection'] ) ) {
-            $score += 10;
-            $enabled[] = 'X-XSS-Protection: 1; mode=block';
-        } else {
-            $missing[] = 'X-XSS-Protection';
-        }
-
         // HSTS (20 points)
         if ( ! empty( $this->options['hsts']['enabled'] ) ) {
             $hsts = $this->options['hsts'];
@@ -530,10 +512,10 @@ class Vigilante_Security_Headers {
             $missing[] = 'Strict-Transport-Security (HSTS)';
         }
 
-        // CSP (20 points)
+        // CSP (30 points; absorbs the 10 points freed by retiring the deprecated X-XSS-Protection)
         if ( ! empty( $this->options['csp']['enabled'] ) ) {
             if ( empty( $this->options['csp']['report_only'] ) ) {
-                $score += 20;
+                $score += 30;
                 $enabled[] = 'Content-Security-Policy';
                 
                 // Add warning if CSP is restrictive
@@ -554,7 +536,7 @@ class Vigilante_Security_Headers {
                     }
                 }
             } else {
-                $score += 10;
+                $score += 15;
                 $enabled[] = 'Content-Security-Policy-Report-Only';
                 $warnings[] = 'CSP is in report-only mode (recommended for testing)';
             }

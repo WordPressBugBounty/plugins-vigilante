@@ -128,7 +128,6 @@ class Vigilante_Settings {
                 // Basic headers
                 'x_frame_options'         => 'SAMEORIGIN',
                 'x_content_type_options'  => true,
-                'x_xss_protection'        => true,
                 'referrer_policy'         => 'strict-origin-when-cross-origin',
                 
                 // HSTS

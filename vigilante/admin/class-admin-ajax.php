@@ -596,7 +596,6 @@ trait Vigilante_Admin_Ajax {
             'enabled'               => true,
             'x_frame_options'       => isset( $headers['x_frame_options'] ) ? sanitize_text_field( $headers['x_frame_options'] ) : 'SAMEORIGIN',
             'x_content_type_options'=> ! empty( $headers['x_content_type_options'] ),
-            'x_xss_protection'      => ! empty( $headers['x_xss_protection'] ),
             'referrer_policy'       => isset( $headers['referrer_policy'] ) ? sanitize_text_field( $headers['referrer_policy'] ) : 'strict-origin-when-cross-origin',
             'hsts'                  => array(
                 'enabled'            => ! empty( $headers['hsts']['enabled'] ),
