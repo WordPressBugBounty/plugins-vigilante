@@ -1004,40 +1004,13 @@ class Vigilante_Database {
     /**
      * Get client IP address
      *
+     * Delegates to the shared resolver, which only trusts REMOTE_ADDR unless a
+     * proxy header has been explicitly declared in settings.
+     *
      * @return string
      */
     public function get_client_ip() {
-        $ip = '';
-
-        // Check for various headers (in order of preference)
-        $headers = array(
-            'HTTP_CF_CONNECTING_IP', // Cloudflare
-            'HTTP_X_REAL_IP',        // Nginx proxy
-            'HTTP_X_FORWARDED_FOR',
-            'HTTP_X_FORWARDED',
-            'HTTP_FORWARDED_FOR',
-            'HTTP_FORWARDED',
-            'REMOTE_ADDR',
-        );
-
-        foreach ( $headers as $header ) {
-            if ( ! empty( $_SERVER[ $header ] ) ) {
-                $ip = sanitize_text_field( wp_unslash( $_SERVER[ $header ] ) );
-                // X-Forwarded-For can contain multiple IPs, get the first one
-                if ( strpos( $ip, ',' ) !== false ) {
-                    $ips = explode( ',', $ip );
-                    $ip = trim( $ips[0] );
-                }
-                break;
-            }
-        }
-
-        // Validate IP
-        if ( ! filter_var( $ip, FILTER_VALIDATE_IP ) ) {
-            $ip = '0.0.0.0';
-        }
-
-        return $ip;
+        return Vigilante_IP_Utils::get_client_ip();
     }
 
     /**

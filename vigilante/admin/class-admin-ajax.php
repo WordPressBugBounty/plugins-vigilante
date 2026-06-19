@@ -518,6 +518,11 @@ trait Vigilante_Admin_Ajax {
     private function sanitize_firewall_data( $data ) {
         $firewall = isset( $data['firewall'] ) ? $data['firewall'] : $data;
 
+        $proxy_header = sanitize_text_field( wp_unslash( $firewall['trusted_proxy_header'] ?? '' ) );
+        if ( ! in_array( $proxy_header, array( 'cf-connecting-ip', 'x-forwarded-for', 'x-real-ip' ), true ) ) {
+            $proxy_header = '';
+        }
+
         return array(
             'block_bad_query_strings'   => ! empty( $firewall['block_bad_query_strings'] ),
             'block_sql_injection'       => ! empty( $firewall['block_sql_injection'] ),
@@ -548,6 +553,7 @@ trait Vigilante_Admin_Ajax {
             'ip_blacklist'              => $this->sanitize_ip_list( $firewall['ip_blacklist'] ?? '' ),
             'ua_whitelist'              => $this->sanitize_ua_list( $firewall['ua_whitelist'] ?? '' ),
             'ua_blacklist'              => $this->sanitize_ua_list( $firewall['ua_blacklist'] ?? '' ),
+            'trusted_proxy_header'      => $proxy_header,
         );
     }
 

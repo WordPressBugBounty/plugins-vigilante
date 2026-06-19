@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.6.4
+Stable tag: 2.7.0
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -87,8 +87,9 @@ Block malicious requests before they reach WordPress:
 * Block requests with empty user agent
 * Block legacy HTTP/1.0 requests (almost always automated tools, never modern browsers)
 * Rate limiting against DDoS and brute force, with optional progressive lockouts
-* IP whitelist and blacklist management (with CIDR ranges)
+* IP whitelist and blacklist management (IPv4 and IPv6, with CIDR ranges and wildcards)
 * User-Agent whitelist and blacklist with partial matching
+* Visitor IP detection control - read the real IP directly from the connection (a spoof-proof default) or from a proxy header when behind Cloudflare, a reverse proxy or a load balancer, with an admin notice if a proxy is detected but not configured
 * HTTP method restriction
 * Server-level file protection via .htaccess: block direct access to wp-config.php, .htaccess, wp-includes/, and sensitive files (.log, .sql, .bak, .ini, debug.log, readme.html, etc.), and optionally wp-cron.php external access
 * Block PHP execution in /uploads (one of the most common post-exploit vectors)
@@ -232,7 +233,7 @@ Utilities included:
 
 **Automatic Backup System**
 
-Your existing .htaccess, wp-config.php, and robots.txt are automatically backed up before any modifications. Backups include integrity verification (MD5 checksums) and are stored safely in wp-content/vigilante-backups/, persisting through plugin updates.
+Your existing .htaccess, wp-config.php, and robots.txt are automatically backed up before any modifications. Backups are stored in the WordPress database, never as files under the web root, and verified with MD5 checksums.
 
 **Clean Rollback**
 
@@ -272,7 +273,7 @@ No. Vigilant is optimized for performance. The firewall uses efficient pattern m
 
 = What happens when I activate the plugin? =
 
-Vigilant immediately creates a backup of your existing .htaccess and wp-config.php files, then applies default security settings. All modules are enabled with balanced defaults suitable for most sites.
+Vigilant immediately backs up your existing .htaccess and wp-config.php to the database, then applies default security settings. All modules are enabled with balanced defaults suitable for most sites.
 
 = What happens when I deactivate the plugin? =
 
@@ -368,7 +369,7 @@ Standard applies balanced settings suitable for most sites. Maximum applies stri
 
 = Where are backups stored? =
 
-Backups are stored in wp-content/vigilante-backups/. This location persists through plugin updates. The directory is protected with .htaccess rules to prevent direct access.
+Configuration backups (.htaccess, wp-config.php, robots.txt) are stored in the WordPress database, not as files under the web root, so they can never be served over HTTP. A database backup you download is generated as a temporary ZIP with an unguessable name and removed right after the download.
 
 = What is Under Attack mode? =
 
@@ -388,7 +389,7 @@ No. It operates independently from your preset configuration (Standard or Maximu
 
 = How does the database backup work? =
 
-Go to Vigilant > Tools > Database Backup. Select which tables to include (or leave all selected), then click Download. The backup is generated as a ZIP file containing a SQL dump. No files are stored on the server.
+Go to Vigilant > Tools > Database Backup. Select which tables to include (or leave all selected), then click Download. The backup is generated as a temporary ZIP with an unguessable name, streamed to your browser and deleted from the server immediately after the download.
 
 = What does changing the database prefix do? =
 
@@ -397,6 +398,8 @@ WordPress uses wp_ as default table prefix. Changing it to a random prefix adds 
 = How do I exclude management services like ManageWP from the firewall? =
 
 Go to Vigilant > Firewall > User-Agent Lists and add the service name (e.g., ManageWP, MainWP, UptimeRobot) to the User-Agent Whitelist. Partial matching is used, so entering "ManageWP" will match any User-Agent string containing that keyword.
+
+If you also use a custom login URL, add the management dashboard's IP address to the firewall IP Whitelist as well. Some operations (for example pushing a plugin update from MainWP) reach wp-admin without a WordPress session and with a generic WordPress user agent rather than the service name, so the User-Agent rule alone would not match them. A whitelisted IP is allowed past the hidden login/wp-admin protection (it still has to authenticate).
 
 = Can I send security notifications to someone other than the site admin? =
 
@@ -426,42 +429,30 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
-= 2.6.4 =
-* Improved: closed and removed plugins now link to their WordPress.org page from the File Integrity tab (both the active "Closed + Removed Plugins" list and the "Ignored" one) and from the scan email digest, so you can read the closure notice, reason and date in one click. For removed plugins the link may return a 404, which itself confirms the metadata was pulled by the repository team.
-* Fix: the Security Headers checker no longer reports X-XSS-Protection as a missing header. That header was deprecated years ago (browsers dropped the XSS auditor it relied on — Chrome and Edge in 2019, Firefox never shipped it — and current guidance is to not send it, since Content-Security-Policy is the real protection), and Vigilant had already removed its toggle from the Security Headers tab. The leftover scoring still listed it as "missing" with no way to turn it on, capping the headers grade at 90. The header is now fully retired and its 10 points moved to CSP, so a correctly configured site can reach 100 again.
-* Fix: the "Ignore selected" and "Stop ignoring selected" bulk buttons in File Integrity stayed showing "Processing…" after the action finished, even though the button kept working. The original label is now restored when the request completes.
-
-= 2.6.3 =
-* Improved: The Requests per Minute firewall setting now explains what counts as a request (PHP hits, not static assets) and when to whitelist an IP, instead of raising the limit.
-
-= 2.6.2 =
-* Fix: "Hide login errors" was replacing the registration, lost-password and reset-password screens with the login-only message "Invalid username or password." That mask hooks the `login_errors` filter, which login_header() fires on every wp-login.php screen, while the locale-safe detector that whitelists Vigilant's own messages hooks `wp_login_errors`, which only fires on the login action. So a failed registration ("Please type your email address", "This username is already registered") or a lost-password validation error showed a meaningless "Invalid username or password" instead of the real reason. The mask is now scoped to the login action only; register, lost-password and reset-password show their genuine errors again.
-
-= 2.6.1 =
-* Improved: new optional "Remove WordPress version from script/style URLs" toggle under WP Hardening > Header Cleanup. Strips ?ver=X.Y.Z from enqueued assets only when it matches the current WordPress version, leaving plugin/theme versions intact for legitimate cache busting. The Security Check "WordPress version in assets" finding now links directly to this toggle so the fix is one click away.
-* Improved: every define() Vigilant writes into wp-config.php is now wrapped in `if ( ! defined() )`. Standard WordPress installs were unaffected, but non-standard setups that pre-define WordPress constants before wp-config.php is parsed (custom bootstraps, .env-driven configs, drop-ins under wp-content/, auto_prepend_file, etc.) hit a fatal "Constant already defined" when wp-config.php reached our block. The block is now safe on every layout. Upgrades automatically rewrite the existing block via a 2.6.1 migration; sites already crashing because of this need a manual recovery (see Upgrade Notice).
-* Improved: Security Check category breakdown is easier to read at a glance. The quality pill now absorbs the test counter, so "Good" becomes "Good · 11/14 tests" right in the pill (passed over total scoring tests, info-only checks excluded). Every per-check row shows "pts" after the score so points aren't confused with check counts.
-* Fix: Security Check "Internal Checks" category showed wrong totals (scores like 28/22) because the catalog's declared maximum had not been updated after recent checks were added, and the merge between the scan's "fast" and "slow" phases preserved the stale max from the previous run no matter how many times you re-scanned. The global maximum is now computed dynamically from the categories (no more silent desync when adding checks), the per-category max is reset on every merge from the declared meta, and the 2.6.1 migration drops the cached scan and triggers an immediate background re-scan so the dashboard self-heals after the upgrade.
-* Fix: settings import was failing silently for any export containing `<` or `>` characters (custom htaccess rules, email templates, etc.). The raw JSON payload was being run through sanitize_text_field(), which calls wp_strip_all_tags() internally, corrupting it before json_decode could parse it. Sanitization now happens after parsing, on the structured array.
-* Fix: settings import now reports a specific error message ("Could not import settings. Check the file and try again.") on network failures or server-side rejections, instead of the generic "Error saving settings" or no message at all.
-* Fix: removed dead `ajax_export_settings` / `ajax_import_settings` handlers from class-admin-ajax.php. They were never registered and referenced non-existent methods on the Settings class.
-
-= 2.6.0 =
-* New: closed plugins detection. Once a day, Vigilant queries the WordPress.org plugin API for the slug of every installed plugin (active and inactive) and flags any one listed as closed by the repository team. Closures usually mean an active malware finding, an unpatched vulnerability, a guideline violation, or a supply chain compromise — the site keeps running the affected code until you uninstall it. Closed plugins appear in a dedicated "Closed + Removed Plugins" subsection of the File Integrity tab with their closure date, reason and detected-on date; events are logged in Security Audit (type `plugin`, action `closed_detected`, critical severity); the slug is rolled into the file integrity scan email so it keeps appearing in every digest until uninstalled or ignored. The daily cron also produces an immediate first-detection alert so a weekly integrity scan doesn't delay urgent news. Reopens are picked up automatically. Plugins that have never been in the WordPress.org repository (premium, custom) are ignored silently. New "Closed plugins" toggle in Scan Scope, on by default.
-* New: per-slug Ignore for closed/removed plugins. Some installs intentionally keep a legacy plugin running that wp.org has already closed (dependency, scheduled replacement, internal fork). Ignored plugins are excluded from the main list and from email digests but remain visible in a dedicated "Ignored Closed + Removed Plugins" subsection as a constant reminder, and stay tracked in the Security Audit log. Automatic cleanup: if a previously-ignored slug stops being closed in wp.org (the plugin reopened), the ignore is dropped silently so a future re-closure alerts normally instead of staying silenced forever.
-* New: closed plugins surfaced in the Dashboard recommendations and in Security Check. A dedicated critical recommendation lists the affected plugin names with a direct link to the File Integrity tab. The Security Analyzer gains a new exclusive internal check (14 internal checks now) that reads the cached state with no extra HTTP call and lowers the score for every closed/removed plugin still present.
-* Improved: detection by state tracking, not just by metadata. Some closures (especially the ones triggered by a Security Issue) cause WordPress.org to hide the plugin's public metadata entirely — the API just returns 404. Vigilant remembers which slugs it has previously seen alive, so a 404 on a slug that used to respond normally is treated as a hard "removed from repository" signal with the same severity as an explicit closure. Slugs that were never observed alive are kept as `not_in_repo` and don't generate noise.
-* Improved: fewer false positives in File Integrity. Translation files (`.po`, `.mo`, `.pot`) and binary images (`.jpg`, `.jpeg`, `.png`, `.gif`, `.ico`, `.webp`, `.avif`) are now excluded from the scan by default. PHP error logs dropped in the WordPress root by managed hosts (SiteGround, Hostinger, cPanel) — files named `php_errorlog` or `error_log` — are reported as "additional" instead of "suspicious"; they are server diagnostics, not executable code. Harmless `index.php` placeholders (the empty file or the classic `<?php // Silence is golden.` one-liner used by WordPress core and many plugins to block directory listings) are no longer reported as extra files. All whitelists are by content where possible, so an attacker can't bypass the rule with a payload named `index.php`. The `excluded_extensions` field remains editable for strict-mode users.
-* Fix: the "Approve" button in the Critical Config Files results no longer relies on DOM ordering to remove its diff row. It now targets the diff row by the id the PHP renders for that specific file, removing any chance of visual confusion between wp-config.php and .htaccess when both have a pending change.
+= 2.7.0 =
+* New: granular password policy. Each strength requirement is now an individual toggle (uppercase, lowercase, number, special character, reject common passwords), you can optionally disallow the username inside the password, and you can scope all the rules to specific roles. Turning off, for example, the "number" and "special character" requirements lets people use long passphrases that WordPress itself rates as strong. Defaults match the previous behaviour, so nothing changes until you relax a rule.
+* New: visitor IP detection setting in the Firewall. Tell Vigilant how to read the real visitor IP: directly from the connection (the default, and the right choice for most sites) or from a forwarded header when the site sits behind Cloudflare, a reverse proxy or a load balancer (CF-Connecting-IP, X-Forwarded-For, X-Real-IP). If requests arrive with a proxy header while detection is still set to direct, an admin notice points you to the setting so the firewall doesn't end up reading the CDN address for every visitor.
+* Improved: the firewall IP whitelist and blacklist now accept IPv6 as well as IPv4, in exact, CIDR and wildcard form. Both lists share the same matcher so they behave identically.
+* Improved: an IP in the firewall whitelist now also bypasses the hidden wp-admin / custom login URL masking, not only the firewall checks. Remote managers such as MainWP and ManageWP, which reach a site without a WordPress session cookie, were getting a 404 when a custom login URL was active; adding the dashboard's IP to the whitelist lets them through again. Only the URL masking is relaxed — the IP still has to authenticate normally.
+* Improved: clearer guidance during a forced password change. When a password expires, the profile notice now explains that the new password is only saved once the whole form is error-free, so a blocking error on an unrelated field (for example a display name that matches the username) no longer leaves people thinking their new password "is not recognized".
+* Improved: the "insecure usernames" warning (admin, info, etc.) is now dismissible per administrator. Closing it persists for that user, while the Dashboard keeps showing it as a standing reminder. Previously the close button did nothing on the next page load.
+* Fix: visitor IP detection no longer trusts forwarded headers (CF-Connecting-IP, X-Forwarded-For, X-Real-IP) by default. On a site that is not actually behind a proxy, any visitor could send one of these headers to impersonate any IP address and slip past the IP whitelist/blacklist or poison the rate limiter. Forwarded headers are now honoured only when you declare your proxy in the new visitor IP detection setting; otherwise only the real connection address is used.
+* Fix: configuration backups (wp-config.php, .htaccess, robots.txt) are no longer written as files inside wp-content/vigilante-backups/. A server that doesn't honour that directory's protective .htaccess (common on Nginx) could serve them and expose database credentials and secret keys. Backups are now stored in the database, out of HTTP reach, and any backup files left on disk by earlier versions are removed automatically on update. Downloaded database backups now use an unguessable filename and are deleted immediately after the download.
+* Fix: a forced password change could be silently rejected and leave the old password active. The strength and history checks sanitized the password before inspecting it, so a password containing characters like "<", tabs or repeated spaces was mismeasured (for example counted as too short), the whole profile save was aborted and the new password never took effect, leaving the user unable to log in with it. Passwords are now inspected exactly as typed.
+* Fix: the display-name protection could block a forced password change. A user whose display name already matched their username could not save the forced password change, because the save was rejected for the unrelated display-name rule and the password never changed. The rule now only blocks when you actually set a display name equal to the username.
 
 For older changelog entries, please check the [changelog.txt](https://plugins.svn.wordpress.org/vigilante/trunk/changelog.txt) file
 
 == Upgrade Notice ==
 
-= 2.6.4 =
-Retired the deprecated X-XSS-Protection header: the Security Headers checker no longer flags it as missing and CSP absorbs its score. Closed/removed plugins now link to their WordPress.org page. Fixed File Integrity bulk buttons stuck on "Processing…".
+= 2.7.0 =
+Security update. Visitor IP now comes from the real connection by default; if you're behind Cloudflare or a proxy, set it in Firewall > Visitor IP detection. Config backups moved out of the web root into the database. Adds granular password policies and IPv6 IP lists.
 
 == Support ==
+
+Need private support or custom development?
+
+Do you need one-on-one help, priority troubleshooting, or a custom feature, integration, or tweak built specifically for your site? I offer private support and custom development. Just [contact me](mailto:vigilante@ayudawp.com) and tell me what you need.
 
 Need help or have suggestions?
 

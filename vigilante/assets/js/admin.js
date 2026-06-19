@@ -2082,27 +2082,20 @@
             var $btn = $(e.currentTarget);
             $btn.prop('disabled', true).html(vigilanteAdmin.strings.loading + ' <span class="vigilante-spinner"></span>');
 
-            $.ajax({
-                url: vigilanteAdmin.ajaxUrl,
-                type: 'POST',
-                data: {
-                    action: 'vigilante_create_backup',
-                    nonce: vigilanteAdmin.nonce
-                },
-                success: function(response) {
-                    if (response.success) {
-                        Vigilante_Admin.showNotice('success', vigilanteAdmin.strings.backupCreated || 'Backup created successfully.');
-                        setTimeout(function() {
-                            location.reload();
-                        }, 1000);
-                    } else {
-                        Vigilante_Admin.showNotice('error', response.data);
-                    }
-                },
-                complete: function() {
-                    $btn.prop('disabled', false).text(vigilanteAdmin.strings.createBackupNow || 'Create Backup Now');
-                }
-            });
+            // Direct file download via a hidden form (same pattern as the
+            // database backup): the server streams a ZIP with wp-config.php and
+            // .htaccess as an attachment.
+            var $form = $('<form>', { method: 'POST', action: vigilanteAdmin.ajaxUrl });
+            $form.append($('<input>', { type: 'hidden', name: 'action', value: 'vigilante_download_files_backup' }));
+            $form.append($('<input>', { type: 'hidden', name: 'nonce', value: vigilanteAdmin.nonce }));
+            $('body').append($form);
+            $form.submit();
+            $form.remove();
+
+            // Re-enable the button after a short delay (download runs in the background).
+            setTimeout(function() {
+                $btn.prop('disabled', false).text(vigilanteAdmin.strings.createBackupNow || 'Create Backup Now');
+            }, 2000);
         },
 
         // =================================================================

@@ -219,6 +219,11 @@ class Vigilante_Login_Security {
             if ( strpos( $request, 'admin-ajax.php' ) !== false || strpos( $request, 'admin-post.php' ) !== false ) {
                 return $location;
             }
+
+            // Allow whitelisted IPs (e.g. remote managers like MainWP/ManageWP).
+            if ( $this->is_ip_exempt_from_hiding() ) {
+                return $location;
+            }
             
             
             // Log the attempt
@@ -271,6 +276,11 @@ class Vigilante_Login_Security {
         // Allow POST requests
         $request_method = isset( $_SERVER['REQUEST_METHOD'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) : '';
         if ( 'POST' === $request_method ) {
+            return;
+        }
+
+        // Allow whitelisted IPs (e.g. remote managers like MainWP/ManageWP).
+        if ( $this->is_ip_exempt_from_hiding() ) {
             return;
         }
         
@@ -369,6 +379,11 @@ class Vigilante_Login_Security {
         if ( is_user_logged_in() ) {
             wp_safe_redirect( admin_url() );
             exit;
+        }
+
+        // Allow whitelisted IPs (e.g. remote managers like MainWP/ManageWP).
+        if ( $this->is_ip_exempt_from_hiding() ) {
+            return;
         }
         
         
@@ -1139,42 +1154,29 @@ class Vigilante_Login_Security {
     private function is_ip_whitelisted( $ip ) {
         $whitelist = $this->options['ip_whitelist'] ?? array();
 
+        return Vigilante_IP_Utils::in_list( $ip, $whitelist );
+    }
+
+    /**
+     * Whether the current request comes from an IP that may bypass the
+     * hidden-login / hidden-wp-admin masking.
+     *
+     * Reads the firewall's global IP whitelist (the visible "IP whitelist"
+     * box) so trusted services such as MainWP or ManageWP, which reach
+     * wp-admin without a WordPress session cookie, are not turned away with
+     * a 404. This relaxes only the URL masking, never authentication: an
+     * exempt IP still has to log in normally.
+     *
+     * @return bool
+     */
+    private function is_ip_exempt_from_hiding() {
+        $whitelist = $this->settings->get_option( 'firewall', 'ip_whitelist', array() );
+
         if ( empty( $whitelist ) ) {
             return false;
         }
 
-        foreach ( $whitelist as $allowed ) {
-            if ( $this->ip_matches( $ip, trim( $allowed ) ) ) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /**
-     * Check if an IP matches a pattern
-     *
-     * @param string $ip      IP address.
-     * @param string $pattern Pattern (IP or CIDR).
-     * @return bool
-     */
-    private function ip_matches( $ip, $pattern ) {
-        if ( $ip === $pattern ) {
-            return true;
-        }
-
-        // CIDR notation
-        if ( strpos( $pattern, '/' ) !== false ) {
-            list( $subnet, $bits ) = explode( '/', $pattern );
-            $ip_long = ip2long( $ip );
-            $subnet_long = ip2long( $subnet );
-            $mask = -1 << ( 32 - (int) $bits );
-            $subnet_long &= $mask;
-            return ( $ip_long & $mask ) === $subnet_long;
-        }
-
-        return false;
+        return Vigilante_IP_Utils::in_list( $this->database->get_client_ip(), $whitelist );
     }
 
     /**

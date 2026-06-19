@@ -134,7 +134,7 @@ class Vigilante_Admin {
         add_action( 'wp_ajax_vigilante_import_settings', array( $this, 'ajax_import_settings' ) );
         add_action( 'wp_ajax_vigilante_get_logs', array( $this, 'ajax_get_logs' ) );
         add_action( 'wp_ajax_vigilante_test_headers', array( $this, 'ajax_test_headers' ) );
-        add_action( 'wp_ajax_vigilante_create_backup', array( $this, 'ajax_create_backup' ) );
+        add_action( 'wp_ajax_vigilante_download_files_backup', array( $this, 'ajax_download_files_backup' ) );
         
         // 2FA AJAX handlers
         add_action( 'wp_ajax_vigilante_search_users_2fa', array( $this, 'ajax_search_users_2fa' ) );
@@ -1333,7 +1333,7 @@ class Vigilante_Admin {
                 'exportLogs'                   => __( 'Export Logs', 'vigilante' ),
                 // Backup strings
                 'backupCreated'                => __( 'Backup created successfully.', 'vigilante' ),
-                'createBackupNow'              => __( 'Create Backup Now', 'vigilante' ),
+                'createBackupNow'              => __( 'Download Backup', 'vigilante' ),
                 'downloadBackup'               => __( 'Download Backup (.zip)', 'vigilante' ),
                 /* translators: %d: number of tables */
                 'tablesCount'                  => __( '%d tables', 'vigilante' ),
@@ -1510,6 +1510,52 @@ class Vigilante_Admin {
                     </p>
                     <p>
                         <em><?php esc_html_e( 'Vigilant has applied the Maximum preset plus extra hardening on top of your previous configuration. Any changes you make to Vigilant settings while this mode is active will be reverted when it ends.', 'vigilante' ); ?></em>
+                    </p>
+                </div>
+                <?php
+            }
+        }
+
+        // Proxy/CDN detection: if IP detection is set to "direct" but requests
+        // arrive with a forwarded-for header carrying a different valid IP, the
+        // site is very likely behind a proxy/CDN that has not been declared, so
+        // the firewall is seeing the proxy IP for every visitor. Guide the admin.
+        if ( current_user_can( 'manage_options' ) && '' === Vigilante_IP_Utils::trusted_proxy_header() ) {
+            $remote   = isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) ) : '';
+            $detected = '';
+            foreach ( Vigilante_IP_Utils::trusted_header_map() as $proxy_label => $server_key ) {
+                if ( empty( $_SERVER[ $server_key ] ) ) {
+                    continue;
+                }
+                $candidate = sanitize_text_field( wp_unslash( $_SERVER[ $server_key ] ) );
+                if ( false !== strpos( $candidate, ',' ) ) {
+                    $parts     = explode( ',', $candidate );
+                    $candidate = trim( $parts[0] );
+                }
+                if ( filter_var( $candidate, FILTER_VALIDATE_IP ) && $candidate !== $remote ) {
+                    $detected = $proxy_label;
+                    break;
+                }
+            }
+
+            if ( '' !== $detected ) {
+                $firewall_url   = admin_url( 'admin.php?page=vigilante&tab=firewall' );
+                $detail_message = sprintf(
+                    /* translators: %s: detected forwarded header name wrapped in a code tag. */
+                    esc_html__( 'Requests are arriving with a %s header, but visitor IP detection is set to direct connection. The firewall is reading the proxy address instead of the real visitor IP, which affects the IP lists and rate limiting.', 'vigilante' ),
+                    '<code>' . esc_html( strtoupper( $detected ) ) . '</code>'
+                );
+                ?>
+                <div class="notice notice-warning">
+                    <p>
+                        <span class="dashicons dashicons-shield"></span>
+                        <strong><?php esc_html_e( 'Vigilant: this site looks like it is behind a proxy or CDN', 'vigilante' ); ?></strong>
+                    </p>
+                    <p><?php echo wp_kses_post( $detail_message ); ?></p>
+                    <p>
+                        <a href="<?php echo esc_url( $firewall_url ); ?>" class="button button-secondary">
+                            <?php esc_html_e( 'Set your proxy in Firewall settings', 'vigilante' ); ?>
+                        </a>
                     </p>
                 </div>
                 <?php
@@ -2479,10 +2525,10 @@ class Vigilante_Admin {
             </div>
 
             <div class="vigilante-tool-card">
-                <h3><?php esc_html_e( 'Create Backup', 'vigilante' ); ?></h3>
-                <p><?php esc_html_e( 'Create a backup of .htaccess and wp-config.php files before making security changes. Backups are stored in wp-content/vigilante-backups/ and will be deleted if the plugin is uninstalled.', 'vigilante' ); ?></p>
+                <h3><?php esc_html_e( 'Download Config Backup', 'vigilante' ); ?></h3>
+                <p><?php esc_html_e( 'Download a ZIP backup of your wp-config.php and .htaccess (plus robots.txt if present) before making security changes. The archive is built on the fly and sent to your browser, so nothing is left on the server.', 'vigilante' ); ?></p>
                 <button type="button" class="button vigilante-create-backup">
-                    <?php esc_html_e( 'Create Backup Now', 'vigilante' ); ?>
+                    <?php esc_html_e( 'Download Backup', 'vigilante' ); ?>
                 </button>
             </div>
 
@@ -2728,6 +2774,21 @@ class Vigilante_Admin {
                 </p>
                 <table class="form-table">
                     <tr>
+                        <th scope="row"><?php esc_html_e( 'Visitor IP detection', 'vigilante' ); ?></th>
+                        <td>
+                            <?php $proxy_header = $options['trusted_proxy_header'] ?? ''; ?>
+                            <select name="firewall[trusted_proxy_header]">
+                                <option value="" <?php selected( $proxy_header, '' ); ?>><?php esc_html_e( 'Direct connection, only REMOTE_ADDR (recommended)', 'vigilante' ); ?></option>
+                                <option value="cf-connecting-ip" <?php selected( $proxy_header, 'cf-connecting-ip' ); ?>><?php esc_html_e( 'Behind Cloudflare (CF-Connecting-IP)', 'vigilante' ); ?></option>
+                                <option value="x-forwarded-for" <?php selected( $proxy_header, 'x-forwarded-for' ); ?>><?php esc_html_e( 'Behind a reverse proxy or load balancer (X-Forwarded-For)', 'vigilante' ); ?></option>
+                                <option value="x-real-ip" <?php selected( $proxy_header, 'x-real-ip' ); ?>><?php esc_html_e( 'Behind an nginx proxy (X-Real-IP)', 'vigilante' ); ?></option>
+                            </select>
+                            <p class="description">
+                                <?php esc_html_e( 'Where to read the visitor IP from. Leave on "Direct connection" unless your site really sits behind that proxy or CDN. Trusting a forwarded header on a site that is not behind it lets visitors spoof their IP and bypass the IP lists and rate limiting.', 'vigilante' ); ?>
+                            </p>
+                        </td>
+                    </tr>
+                    <tr>
                         <th scope="row"><?php esc_html_e( 'IP Whitelist', 'vigilante' ); ?></th>
                         <td>
                             <textarea name="firewall[ip_whitelist]" rows="4" class="large-text code" placeholder="192.168.1.50&#10;192.168.1.0/24&#10;192.168.1.*"><?php echo esc_textarea( implode( "\n", $options['ip_whitelist'] ?? array() ) ); ?></textarea>
@@ -2737,7 +2798,7 @@ class Vigilante_Admin {
                                 <?php
                                 printf(
                                     /* translators: 1: opening <code>, 2: closing </code>. Placeholders wrap the IP, CIDR and wildcard examples. */
-                                    esc_html__( 'Accepts exact IPs (%1$s192.168.1.50%2$s), CIDR ranges (%1$s192.168.1.0/24%2$s, IPv4 only), and wildcards with %1$s*%2$s (e.g. %1$s192.168.1.*%2$s).', 'vigilante' ),
+                                    esc_html__( 'Accepts exact IPs (%1$s192.168.1.50%2$s), CIDR ranges (%1$s192.168.1.0/24%2$s, IPv4 and IPv6), and wildcards with %1$s*%2$s (e.g. %1$s192.168.1.*%2$s).', 'vigilante' ),
                                     '<code>',
                                     '</code>'
                                 ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- HTML tags are hardcoded.
@@ -2755,7 +2816,7 @@ class Vigilante_Admin {
                                 <?php
                                 printf(
                                     /* translators: 1: opening <code>, 2: closing </code>. Placeholders wrap the IP, CIDR and wildcard examples. */
-                                    esc_html__( 'Accepts exact IPs (%1$s203.0.113.42%2$s), CIDR ranges (%1$s203.0.113.0/24%2$s, IPv4 only), and wildcards with %1$s*%2$s (e.g. %1$s203.0.113.*%2$s).', 'vigilante' ),
+                                    esc_html__( 'Accepts exact IPs (%1$s203.0.113.42%2$s), CIDR ranges (%1$s203.0.113.0/24%2$s, IPv4 and IPv6), and wildcards with %1$s*%2$s (e.g. %1$s203.0.113.*%2$s).', 'vigilante' ),
                                     '<code>',
                                     '</code>'
                                 ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- HTML tags are hardcoded.
@@ -3661,12 +3722,27 @@ class Vigilante_Admin {
                             </label>
                         </td>
                     </tr>
+                    <?php
+                    $pw_policy = wp_parse_args(
+                        ( isset( $options['password_policy'] ) && is_array( $options['password_policy'] ) ) ? $options['password_policy'] : array(),
+                        array(
+                            'require_uppercase' => true,
+                            'require_lowercase' => true,
+                            'require_number'    => true,
+                            'require_special'   => true,
+                            'block_common'      => true,
+                            'block_username'    => false,
+                            'affected_roles'    => array(),
+                        )
+                    );
+                    $pw_policy_roles = (array) $pw_policy['affected_roles'];
+                    ?>
                     <tr>
                         <th scope="row"><?php esc_html_e( 'Enforce Strong Passwords', 'vigilante' ); ?></th>
                         <td>
                             <label>
                                 <input type="checkbox" name="user_security[force_strong_passwords]" value="1" <?php checked( ! empty( $options['force_strong_passwords'] ) ); ?>>
-                                <?php esc_html_e( 'Require passwords with uppercase, lowercase, numbers, and special characters', 'vigilante' ); ?>
+                                <?php esc_html_e( 'Check passwords against the requirements below when a user sets or changes one', 'vigilante' ); ?>
                             </label>
                         </td>
                     </tr>
@@ -3675,6 +3751,48 @@ class Vigilante_Admin {
                         <td>
                             <input type="number" name="user_security[min_password_length]" value="<?php echo esc_attr( $options['min_password_length'] ?? 12 ); ?>" min="6" max="32" class="small-text">
                             <?php esc_html_e( 'characters', 'vigilante' ); ?>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e( 'Password Requirements', 'vigilante' ); ?></th>
+                        <td>
+                            <label style="display:block;margin-bottom:5px;">
+                                <input type="checkbox" name="user_security[password_policy][require_uppercase]" value="1" <?php checked( ! empty( $pw_policy['require_uppercase'] ) ); ?>>
+                                <?php esc_html_e( 'Require an uppercase letter (A-Z)', 'vigilante' ); ?>
+                            </label>
+                            <label style="display:block;margin-bottom:5px;">
+                                <input type="checkbox" name="user_security[password_policy][require_lowercase]" value="1" <?php checked( ! empty( $pw_policy['require_lowercase'] ) ); ?>>
+                                <?php esc_html_e( 'Require a lowercase letter (a-z)', 'vigilante' ); ?>
+                            </label>
+                            <label style="display:block;margin-bottom:5px;">
+                                <input type="checkbox" name="user_security[password_policy][require_number]" value="1" <?php checked( ! empty( $pw_policy['require_number'] ) ); ?>>
+                                <?php esc_html_e( 'Require a number (0-9)', 'vigilante' ); ?>
+                            </label>
+                            <label style="display:block;margin-bottom:5px;">
+                                <input type="checkbox" name="user_security[password_policy][require_special]" value="1" <?php checked( ! empty( $pw_policy['require_special'] ) ); ?>>
+                                <?php esc_html_e( 'Require a special character (!, @, #, ...)', 'vigilante' ); ?>
+                            </label>
+                            <label style="display:block;margin-bottom:5px;">
+                                <input type="checkbox" name="user_security[password_policy][block_common]" value="1" <?php checked( ! empty( $pw_policy['block_common'] ) ); ?>>
+                                <?php esc_html_e( 'Reject well-known common passwords', 'vigilante' ); ?>
+                            </label>
+                            <label style="display:block;margin-bottom:5px;">
+                                <input type="checkbox" name="user_security[password_policy][block_username]" value="1" <?php checked( ! empty( $pw_policy['block_username'] ) ); ?>>
+                                <?php esc_html_e( 'Do not allow the username inside the password', 'vigilante' ); ?>
+                            </label>
+                            <p class="description"><?php esc_html_e( 'These rules apply only while "Enforce Strong Passwords" is on. Turn off individual rules to allow, for example, long passphrases without numbers or symbols.', 'vigilante' ); ?></p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e( 'Apply Password Rules To', 'vigilante' ); ?></th>
+                        <td>
+                            <?php foreach ( wp_roles()->get_names() as $role_slug => $role_name ) : ?>
+                            <label style="display:block;margin-bottom:5px;">
+                                <input type="checkbox" name="user_security[password_policy][affected_roles][]" value="<?php echo esc_attr( $role_slug ); ?>" <?php checked( empty( $pw_policy_roles ) || in_array( $role_slug, $pw_policy_roles, true ) ); ?>>
+                                <?php echo esc_html( translate_user_role( $role_name ) ); ?>
+                            </label>
+                            <?php endforeach; ?>
+                            <p class="description"><?php esc_html_e( 'All roles are covered by default. Uncheck a role to exclude it from the password policy.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
                     <tr id="field-block-author-scanning">
@@ -5572,22 +5690,25 @@ class Vigilante_Admin {
     }
 
     /**
-     * AJAX: Create backup
+     * AJAX: Download a ZIP backup of the critical config files.
+     *
+     * Streams wp-config.php and .htaccess (and robots.txt if present) as a
+     * downloadable archive. Config backups are no longer left as files under the
+     * web root, so this hands the admin the archive directly.
      */
-    public function ajax_create_backup() {
+    public function ajax_download_files_backup() {
         check_ajax_referer( 'vigilante_admin_nonce', 'nonce' );
 
         if ( ! current_user_can( 'manage_options' ) ) {
-            wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
+            wp_die( esc_html__( 'Permission denied.', 'vigilante' ), 403 );
         }
 
         $backup_manager = new Vigilante_Backup_Manager();
-        $result = $backup_manager->create_backups();
+        $result         = $backup_manager->stream_files_zip();
 
-        if ( $result ) {
-            wp_send_json_success( __( 'Backup created successfully.', 'vigilante' ) );
-        } else {
-            wp_send_json_error( __( 'Failed to create backup.', 'vigilante' ) );
+        // stream_files_zip() exits on success; only a WP_Error returns here.
+        if ( is_wp_error( $result ) ) {
+            wp_die( esc_html( $result->get_error_message() ), 500 );
         }
     }
 
@@ -6741,23 +6862,31 @@ class Vigilante_Admin {
         // Create fresh settings instance to ensure we have the latest data
         $fresh_settings = new Vigilante_Settings();
 
-        // Regenerate htaccess for firewall section
-        if ( 'firewall' === $section || 'modules' === $section ) {
+        // The shared Vigilant .htaccess block carries BOTH the firewall's
+        // file-protection rules and the server-signature / fingerprinting rules
+        // that are configured under Security Headers. So it must be regenerated
+        // whenever either section (or the module toggles) changes, not only on
+        // the firewall save — otherwise toggling "Hide server signature" or
+        // "Remove fingerprinting headers" never reaches the .htaccess.
+        if ( in_array( $section, array( 'firewall', 'security_headers', 'modules' ), true ) ) {
             $htaccess = new Vigilante_Htaccess_Protection( $fresh_settings );
-            $firewall_enabled = ! empty( $all_options['modules']['firewall'] );
-            
-            if ( $firewall_enabled ) {
+            $sh       = $fresh_settings->get_section( 'security_headers' );
+            $needs_htaccess_block = ! empty( $all_options['modules']['firewall'] )
+                || ! empty( $sh['hide_server_signature'] )
+                || ! empty( $sh['remove_fingerprinting_headers'] );
+
+            if ( $needs_htaccess_block ) {
                 $htaccess->apply_rules();
             } else {
                 $htaccess->remove_rules();
             }
         }
 
-        // Regenerate htaccess for security_headers section
+        // Regenerate the HTTP security headers (sent by PHP) for the headers section.
         if ( 'security_headers' === $section || 'modules' === $section ) {
             $security_headers = new Vigilante_Security_Headers( $fresh_settings );
             $headers_enabled = ! empty( $all_options['modules']['security_headers'] );
-            
+
             if ( $headers_enabled ) {
                 $security_headers->apply_rules();
             } else {

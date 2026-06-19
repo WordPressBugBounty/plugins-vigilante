@@ -67,6 +67,7 @@ class Vigilante_User_Security {
 
         // Warn about existing insecure users (always active, independent of settings)
         add_action( 'admin_notices', array( $this, 'show_insecure_user_warning' ) );
+        add_action( 'wp_ajax_vigilante_dismiss_insecure_warning', array( $this, 'ajax_dismiss_insecure_warning' ) );
 
         // Block author scanning — must run BEFORE WordPress core's redirect_canonical()
         // (also on template_redirect, default priority 10), which would otherwise redirect
@@ -255,45 +256,117 @@ class Vigilante_User_Security {
             return;
         }
 
-        // Check for dismissed notices
-        $dismissed = get_option( 'vigilante_dismissed_notices', array() );
-        if ( isset( $dismissed['insecure_users'] ) && $dismissed['insecure_users'] > ( time() - WEEK_IN_SECONDS ) ) {
+        // Find insecure accounts first; if there are none there is nothing to warn
+        // about and we skip any further state read.
+        $found_users = $this->get_insecure_users();
+
+        if ( empty( $found_users ) ) {
             return;
         }
 
-        $priority_usernames = array( 'admin', 'administrator', 'root', 'test', 'user', 'guest', 'info', 'sysadmin', 'webmaster' );
-        $found_users = array();
+        // The warning is a standing reminder, so it always shows on the Dashboard
+        // (index.php). On every other admin screen it is dismissible per
+        // administrator, but the dismissal records WHICH insecure usernames were
+        // present when it was closed: closing it silences only those. If a new
+        // insecure account shows up later, the warning comes back instead of
+        // staying hidden forever. The Dashboard always shows it while the issue
+        // remains unresolved.
+        global $pagenow;
+        $is_dashboard = ( 'index.php' === $pagenow );
 
-        foreach ( $priority_usernames as $username ) {
-            $user = get_user_by( 'login', $username );
-            if ( $user ) {
-                $found_users[] = $username;
+        if ( ! $is_dashboard ) {
+            $dismissed = get_user_meta( get_current_user_id(), 'vigilante_dismissed_insecure_users', true );
+            $dismissed = is_array( $dismissed ) ? $dismissed : array();
+
+            // Stay hidden only while every currently-found user was already dismissed.
+            if ( empty( array_diff( $found_users, $dismissed ) ) ) {
+                return;
             }
         }
 
-        if ( ! empty( $found_users ) ) {
-            ?>
-            <div class="notice notice-error is-dismissible" data-notice-id="insecure_users">
-                            <p>
-                    <strong><?php esc_html_e( 'Security Alert!', 'vigilante' ); ?></strong>
-                </p>
-                <p>
-                    <?php
-                    $escaped_users = array_map( 'esc_html', $found_users );
-                    $usernames_html = '<code>' . implode( '</code>, <code>', $escaped_users ) . '</code>';
-                    printf(
-                        /* translators: %s: Comma-separated list of usernames in <code> tags */
-                        esc_html__( 'The following accounts use insecure usernames that are commonly targeted in brute force attacks: %s', 'vigilante' ),
-                        wp_kses( $usernames_html, array( 'code' => array() ) )
-                    );
-                    ?>
-                </p>
-                <p>
-                    <?php esc_html_e( 'For security, create new accounts with unique usernames and delete these.', 'vigilante' ); ?>
-                </p>
-            </div>                      
-            <?php
+        $escaped_users  = array_map( 'esc_html', $found_users );
+        $usernames_html = '<code>' . implode( '</code>, <code>', $escaped_users ) . '</code>';
+        ?>
+        <div class="notice notice-error is-dismissible" data-vigilante-notice="insecure_users">
+            <p>
+                <strong><?php esc_html_e( 'Security Alert!', 'vigilante' ); ?></strong>
+            </p>
+            <p>
+                <?php
+                printf(
+                    /* translators: %s: Comma-separated list of usernames in <code> tags */
+                    esc_html__( 'The following accounts use insecure usernames that are commonly targeted in brute force attacks: %s', 'vigilante' ),
+                    wp_kses( $usernames_html, array( 'code' => array() ) )
+                );
+                ?>
+            </p>
+            <p>
+                <?php esc_html_e( 'For security, create new accounts with unique usernames and delete these.', 'vigilante' ); ?>
+            </p>
+        </div>
+        <script>
+        ( function () {
+            var notice = document.querySelector( '.notice[data-vigilante-notice="insecure_users"]' );
+            if ( ! notice ) {
+                return;
+            }
+            // The dismiss button is injected by core after load, so delegate from
+            // the notice element and persist the dismissal for this user.
+            notice.addEventListener( 'click', function ( e ) {
+                if ( ! e.target || ! e.target.classList.contains( 'notice-dismiss' ) ) {
+                    return;
+                }
+                var data = new FormData();
+                data.append( 'action', 'vigilante_dismiss_insecure_warning' );
+                data.append( 'nonce', '<?php echo esc_js( wp_create_nonce( 'vigilante_dismiss_insecure_warning' ) ); ?>' );
+                if ( navigator.sendBeacon ) {
+                    navigator.sendBeacon( ajaxurl, data );
+                } else {
+                    var xhr = new XMLHttpRequest();
+                    xhr.open( 'POST', ajaxurl, true );
+                    xhr.send( data );
+                }
+            } );
+        } )();
+        </script>
+        <?php
+    }
+
+    /**
+     * Persist per-user dismissal of the insecure-usernames warning.
+     *
+     * Stores the set of insecure usernames present at dismissal time, so the
+     * warning stays hidden for this admin only while those exact accounts remain;
+     * a new insecure account brings it back. It still re-appears on the Dashboard.
+     */
+    public function ajax_dismiss_insecure_warning() {
+        check_ajax_referer( 'vigilante_dismiss_insecure_warning', 'nonce' );
+
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error();
         }
+
+        update_user_meta( get_current_user_id(), 'vigilante_dismissed_insecure_users', $this->get_insecure_users() );
+
+        wp_send_json_success();
+    }
+
+    /**
+     * List the insecure-by-name accounts currently present.
+     *
+     * @return string[] Matching logins.
+     */
+    private function get_insecure_users() {
+        $priority_usernames = array( 'admin', 'administrator', 'root', 'test', 'user', 'guest', 'info', 'sysadmin', 'webmaster' );
+        $found              = array();
+
+        foreach ( $priority_usernames as $username ) {
+            if ( get_user_by( 'login', $username ) ) {
+                $found[] = $username;
+            }
+        }
+
+        return $found;
     }
 
     /**
@@ -381,12 +454,28 @@ class Vigilante_User_Security {
             return;
         }
 
-        if ( strcasecmp( $display_name, $user_data->user_login ) === 0 ) {
-            $errors->add(
-                'display_name_login_match',
-                __( '<strong>Error</strong>: Your display name cannot be the same as your login username. The display name is publicly visible and would expose your login credentials.', 'vigilante' )
-            );
+        // Nothing to enforce unless the display name being saved equals the login.
+        if ( strcasecmp( $display_name, $user_data->user_login ) !== 0 ) {
+            return;
         }
+
+        // The display name equals the login, which is the unsafe state we want to
+        // prevent (it exposes the login publicly). Block it — EXCEPT when this same
+        // save is also changing the password. That is the forced password-change
+        // flow for a legacy "display == login" account: aborting it would dead-lock
+        // the change (the password never updates and the user is bounced on every
+        // load). WordPress exposes the new plaintext password as $user->user_pass
+        // during this hook, so a value different from the stored hash means a
+        // password change is in progress; in that case we let the save through.
+        $changing_password = isset( $user->user_pass ) && '' !== $user->user_pass && $user->user_pass !== $user_data->user_pass;
+        if ( $changing_password ) {
+            return;
+        }
+
+        $errors->add(
+            'display_name_login_match',
+            __( '<strong>Error</strong>: Your display name cannot be the same as your login username. The display name is publicly visible and would expose your login credentials.', 'vigilante' )
+        );
     }
 
     /**
@@ -397,14 +486,41 @@ class Vigilante_User_Security {
      * @param WP_User  $user   User object.
      */
     public function validate_password_strength( $errors, $update, $user ) {
-        // phpcs:ignore WordPress.Security.NonceVerification.Missing
-        if ( empty( $_POST['pass1'] ) ) {
+        // During user_profile_update_errors WordPress exposes the new password
+        // (still plaintext, only slashed) as $user->user_pass. Reading it from the
+        // object instead of $_POST keeps this validator free of input/nonce sniffs
+        // AND avoids sanitizing the password: sanitize_text_field() would strip
+        // "<...>", tabs and repeated spaces, mismeasure the value and wrongly reject
+        // valid passwords, aborting a forced change and leaving the old one active.
+        if ( ! isset( $user->user_pass ) || '' === $user->user_pass ) {
             return;
         }
 
-        // phpcs:ignore WordPress.Security.NonceVerification.Missing
-        $password = sanitize_text_field( wp_unslash( $_POST['pass1'] ) );
-        $strength_errors = $this->check_password_strength( $password );
+        $username = isset( $user->user_login ) ? $user->user_login : '';
+        $roles    = array();
+
+        if ( $update && isset( $user->ID ) ) {
+            $user_data = get_userdata( $user->ID );
+            if ( $user_data ) {
+                // On a profile save that doesn't touch the password, user_pass is
+                // still the stored hash, not a new plaintext value: nothing to check.
+                if ( $user->user_pass === $user_data->user_pass ) {
+                    return;
+                }
+                $username = $user_data->user_login;
+                $roles    = $user_data->roles;
+            }
+        } elseif ( ! empty( $user->role ) ) {
+            // New account created from wp-admin: the chosen role is on the object.
+            $roles = array( $user->role );
+        }
+
+        if ( ! empty( $roles ) && ! $this->password_policy_applies( $roles ) ) {
+            return;
+        }
+
+        $password        = (string) wp_unslash( $user->user_pass );
+        $strength_errors = $this->check_password_strength( $password, $username );
 
         foreach ( $strength_errors as $error ) {
             $errors->add( 'weak_password', $error );
@@ -425,9 +541,22 @@ class Vigilante_User_Security {
             return $errors;
         }
 
+        // Registration runs on a public form with no $user object carrying the
+        // password, so it must read $_POST. Unlike the profile path there is no
+        // "saved but unrecognized" trap here (the account isn't created until the
+        // password passes), so the mild mismeasure sanitize_text_field() can cause
+        // on exotic characters is an acceptable trade for not suppressing a
+        // security sniff on a public endpoint.
         // phpcs:ignore WordPress.Security.NonceVerification.Missing
         $password = sanitize_text_field( wp_unslash( $_POST['user_pass'] ) );
-        $strength_errors = $this->check_password_strength( $password );
+
+        // New registrations receive the site's default role; skip enforcement if
+        // the policy is scoped to roles that don't include it.
+        if ( ! $this->password_policy_applies( array( get_option( 'default_role', 'subscriber' ) ) ) ) {
+            return $errors;
+        }
+
+        $strength_errors = $this->check_password_strength( $password, $sanitized_user_login );
 
         foreach ( $strength_errors as $error ) {
             $errors->add( 'weak_password', $error );
@@ -437,14 +566,56 @@ class Vigilante_User_Security {
     }
 
     /**
-     * Check password strength
+     * Read the granular password policy merged with safe defaults.
+     *
+     * Defaults reproduce the historical all-requirements behaviour so a site
+     * upgrading from before the policy existed keeps the same rules.
+     *
+     * @return array
+     */
+    private function get_password_policy() {
+        return wp_parse_args(
+            $this->options['password_policy'] ?? array(),
+            array(
+                'require_uppercase' => true,
+                'require_lowercase' => true,
+                'require_number'    => true,
+                'require_special'   => true,
+                'block_common'      => true,
+                'block_username'    => false,
+                'affected_roles'    => array(),
+            )
+        );
+    }
+
+    /**
+     * Whether the password policy applies to a user with the given roles.
+     *
+     * @param array $roles Role slugs.
+     * @return bool
+     */
+    private function password_policy_applies( $roles ) {
+        $affected = (array) ( $this->get_password_policy()['affected_roles'] );
+
+        // Empty list = apply to every role.
+        if ( empty( $affected ) ) {
+            return true;
+        }
+
+        return (bool) array_intersect( (array) $roles, $affected );
+    }
+
+    /**
+     * Check password strength against the configured policy
      *
      * @param string $password Password to check.
+     * @param string $username Login name, for the "don't contain username" rule.
      * @return array Array of error messages (empty if password is strong).
      */
-    public function check_password_strength( $password ) {
-        $errors = array();
-        $min_length = $this->options['min_password_length'] ?? 12;
+    public function check_password_strength( $password, $username = '' ) {
+        $errors     = array();
+        $min_length = absint( $this->options['min_password_length'] ?? 12 );
+        $policy     = $this->get_password_policy();
 
         // Check length
         if ( strlen( $password ) < $min_length ) {
@@ -455,36 +626,42 @@ class Vigilante_User_Security {
             );
         }
 
-        // Check for uppercase
-        if ( ! preg_match( '/[A-Z]/', $password ) ) {
+        // Character-class requirements (each one is individually optional)
+        if ( ! empty( $policy['require_uppercase'] ) && ! preg_match( '/[A-Z]/', $password ) ) {
             $errors[] = __( 'Password must contain at least one uppercase letter.', 'vigilante' );
         }
 
-        // Check for lowercase
-        if ( ! preg_match( '/[a-z]/', $password ) ) {
+        if ( ! empty( $policy['require_lowercase'] ) && ! preg_match( '/[a-z]/', $password ) ) {
             $errors[] = __( 'Password must contain at least one lowercase letter.', 'vigilante' );
         }
 
-        // Check for numbers
-        if ( ! preg_match( '/[0-9]/', $password ) ) {
+        if ( ! empty( $policy['require_number'] ) && ! preg_match( '/[0-9]/', $password ) ) {
             $errors[] = __( 'Password must contain at least one number.', 'vigilante' );
         }
 
-        // Check for special characters
-        if ( ! preg_match( '/[^a-zA-Z0-9]/', $password ) ) {
+        if ( ! empty( $policy['require_special'] ) && ! preg_match( '/[^a-zA-Z0-9]/', $password ) ) {
             $errors[] = __( 'Password must contain at least one special character.', 'vigilante' );
         }
 
-        // Check for common passwords
-        $common_passwords = array(
-            'password', '123456', '12345678', 'qwerty', 'abc123',
-            'monkey', '1234567', 'letmein', 'trustno1', 'dragon',
-            'baseball', 'iloveyou', 'master', 'sunshine', 'ashley',
-            'bailey', 'passw0rd', 'shadow', '123123', '654321',
-        );
+        // Don't allow the username inside the password. Guard on a minimum
+        // username length so trivial 1-3 char logins don't reject everything.
+        if ( ! empty( $policy['block_username'] ) && '' !== $username
+            && strlen( $username ) >= 4 && false !== stripos( $password, $username ) ) {
+            $errors[] = __( 'Password must not contain your username.', 'vigilante' );
+        }
 
-        if ( in_array( strtolower( $password ), $common_passwords, true ) ) {
-            $errors[] = __( 'This password is too common. Please choose a more unique password.', 'vigilante' );
+        // Check for common passwords
+        if ( ! empty( $policy['block_common'] ) ) {
+            $common_passwords = array(
+                'password', '123456', '12345678', 'qwerty', 'abc123',
+                'monkey', '1234567', 'letmein', 'trustno1', 'dragon',
+                'baseball', 'iloveyou', 'master', 'sunshine', 'ashley',
+                'bailey', 'passw0rd', 'shadow', '123123', '654321',
+            );
+
+            if ( in_array( strtolower( $password ), $common_passwords, true ) ) {
+                $errors[] = __( 'This password is too common. Please choose a more unique password.', 'vigilante' );
+            }
         }
 
         return $errors;
@@ -1860,18 +2037,29 @@ class Vigilante_User_Security {
         // Check if must change password
         $must_change = get_user_meta( $user_id, 'vigilante_must_change_password', true );
         if ( $must_change ) {
+            global $pagenow;
+            $on_profile = ( 'profile.php' === $pagenow );
             ?>
             <div class="notice notice-error">
                 <p>
-                    <strong><?php esc_html_e( 'Password Expired', 'vigilante' ); ?></strong>
-                    <?php
-                    printf(
-                        /* translators: %s: Link to profile */
-                        esc_html__( 'Your password has expired. Please %s now.', 'vigilante' ),
-                        '<a href="' . esc_url( admin_url( 'profile.php' ) ) . '">' . esc_html__( 'change your password', 'vigilante' ) . '</a>'
-                    );
-                    ?>
+                    <strong><?php esc_html_e( 'Password change required', 'vigilante' ); ?></strong>
+                    <?php if ( $on_profile ) : ?>
+                        <?php esc_html_e( 'Your password has expired. Set a new password in the section below and save your profile to continue.', 'vigilante' ); ?>
+                    <?php else : ?>
+                        <?php
+                        printf(
+                            /* translators: %s: Link to profile */
+                            esc_html__( 'Your password has expired. Please %s now.', 'vigilante' ),
+                            '<a href="' . esc_url( admin_url( 'profile.php#password' ) ) . '">' . esc_html__( 'change your password', 'vigilante' ) . '</a>'
+                        );
+                        ?>
+                    <?php endif; ?>
                 </p>
+                <?php if ( $on_profile ) : ?>
+                    <p>
+                        <?php esc_html_e( 'Important: your password is only changed once the profile saves with no errors. If any other error is shown above (for example, your display name cannot match your username), fix it as well — otherwise your new password will not be saved and you will keep being asked to change it.', 'vigilante' ); ?>
+                    </p>
+                <?php endif; ?>
             </div>
             <?php
             return;
@@ -2139,17 +2327,26 @@ class Vigilante_User_Security {
      * @param WP_User  $user   User object.
      */
     public function check_password_history( $errors, $update, $user ) {
-        if ( ! $update ) {
+        if ( ! $update || ! isset( $user->ID ) ) {
             return;
         }
 
-        // phpcs:ignore WordPress.Security.NonceVerification.Missing
-        if ( empty( $_POST['pass1'] ) ) {
+        // Read the new password from $user->user_pass (set by WordPress during this
+        // hook), not from $_POST: no input/nonce sniff and, crucially, no sanitizing
+        // — wp_check_password() must test the exact string WordPress stores, or the
+        // reuse check would compare a mangled value and silently miss matches.
+        if ( ! isset( $user->user_pass ) || '' === $user->user_pass ) {
             return;
         }
 
-        // phpcs:ignore WordPress.Security.NonceVerification.Missing
-        $new_password = sanitize_text_field( wp_unslash( $_POST['pass1'] ) );
+        // Profile save that doesn't change the password: user_pass is still the
+        // stored hash, so there is no new value to compare.
+        $user_data = get_userdata( $user->ID );
+        if ( $user_data && $user->user_pass === $user_data->user_pass ) {
+            return;
+        }
+
+        $new_password = (string) wp_unslash( $user->user_pass );
         $settings = $this->options['password_expiration'] ?? array();
         $history_count = absint( $settings['password_history'] ?? 3 );
 

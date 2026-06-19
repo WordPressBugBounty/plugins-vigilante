@@ -90,7 +90,11 @@ class Vigilante_Settings {
                 // IP management
                 'ip_whitelist'              => array(),
                 'ip_blacklist'              => array(),
-                
+
+                // Proxy / CDN: forwarded header to trust for the visitor IP.
+                // Empty = trust only REMOTE_ADDR (the real connection, unspoofable).
+                'trusted_proxy_header'      => '',
+
                 // User-Agent management
                 'ua_whitelist'              => array(),
                 'ua_blacklist'              => array(),
@@ -260,6 +264,23 @@ class Vigilante_Settings {
                 'block_author_scanning'   => true,
                 'force_strong_passwords'  => true,
                 'min_password_length'     => 12,
+
+                // Granular password policy. Applies only while
+                // force_strong_passwords is on. Defaults reproduce the previous
+                // all-requirements behaviour so existing sites keep the same
+                // rules until the admin relaxes them. block_username is the only
+                // new opt-in rule (off by default to avoid rejecting passwords
+                // that were valid before). affected_roles empty = all roles.
+                'password_policy'         => array(
+                    'require_uppercase' => true,
+                    'require_lowercase' => true,
+                    'require_number'    => true,
+                    'require_special'   => true,
+                    'block_common'      => true,
+                    'block_username'    => false,
+                    'affected_roles'    => array(),
+                ),
+
                 'prevent_display_name_login_match' => true,
                 
                 // Admin monitoring
@@ -679,6 +700,15 @@ class Vigilante_Settings {
                 'user_security' => array(
                     'prevent_display_name_login_match' => true,
                     'min_password_length'              => 16,
+                    'password_policy' => array(
+                        'require_uppercase' => true,
+                        'require_lowercase' => true,
+                        'require_number'    => true,
+                        'require_special'   => true,
+                        'block_common'      => true,
+                        'block_username'    => true,
+                        'affected_roles'    => array(),
+                    ),
                     'admin_monitoring' => array(
                         'alert_new_admin'              => true,
                         'alert_admin_email_change'     => true,

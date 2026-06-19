@@ -862,19 +862,7 @@ class Vigilante_Firewall {
     private function is_ip_whitelisted() {
         $whitelist = $this->options['ip_whitelist'] ?? array();
 
-        if ( empty( $whitelist ) ) {
-            return false;
-        }
-
-        $ip = $this->get_client_ip();
-
-        foreach ( $whitelist as $allowed ) {
-            if ( $this->ip_matches( $ip, $allowed ) ) {
-                return true;
-            }
-        }
-
-        return false;
+        return Vigilante_IP_Utils::in_list( $this->get_client_ip(), $whitelist );
     }
 
     /**
@@ -885,52 +873,7 @@ class Vigilante_Firewall {
     private function is_ip_blacklisted() {
         $blacklist = $this->options['ip_blacklist'] ?? array();
 
-        if ( empty( $blacklist ) ) {
-            return false;
-        }
-
-        $ip = $this->get_client_ip();
-
-        foreach ( $blacklist as $blocked ) {
-            if ( $this->ip_matches( $ip, $blocked ) ) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /**
-     * Check if an IP matches a pattern (supports CIDR notation)
-     *
-     * @param string $ip      IP address to check.
-     * @param string $pattern Pattern to match against (IP or CIDR).
-     * @return bool
-     */
-    private function ip_matches( $ip, $pattern ) {
-        // Exact match
-        if ( $ip === $pattern ) {
-            return true;
-        }
-
-        // CIDR notation
-        if ( strpos( $pattern, '/' ) !== false ) {
-            list( $subnet, $bits ) = explode( '/', $pattern );
-            $ip_long = ip2long( $ip );
-            $subnet_long = ip2long( $subnet );
-            $mask = -1 << ( 32 - (int) $bits );
-            $subnet_long &= $mask;
-            return ( $ip_long & $mask ) === $subnet_long;
-        }
-
-        // Wildcard
-        if ( strpos( $pattern, '*' ) !== false ) {
-            $pattern = str_replace( '.', '\.', $pattern );
-            $pattern = str_replace( '*', '.*', $pattern );
-            return (bool) preg_match( '/^' . $pattern . '$/', $ip );
-        }
-
-        return false;
+        return Vigilante_IP_Utils::in_list( $this->get_client_ip(), $blacklist );
     }
 
     /**
@@ -1001,33 +944,13 @@ class Vigilante_Firewall {
     /**
      * Get client IP address
      *
+     * Delegates to the shared resolver, which only trusts REMOTE_ADDR unless a
+     * proxy header has been explicitly declared in settings.
+     *
      * @return string
      */
     private function get_client_ip() {
-        $headers = array(
-            'HTTP_CF_CONNECTING_IP', // Cloudflare
-            'HTTP_X_REAL_IP',        // Nginx proxy
-            'HTTP_X_FORWARDED_FOR',
-            'HTTP_X_FORWARDED',
-            'HTTP_FORWARDED_FOR',
-            'HTTP_FORWARDED',
-            'REMOTE_ADDR',
-        );
-
-        foreach ( $headers as $header ) {
-            if ( ! empty( $_SERVER[ $header ] ) ) {
-                $ip = sanitize_text_field( wp_unslash( $_SERVER[ $header ] ) );
-                if ( strpos( $ip, ',' ) !== false ) {
-                    $ips = explode( ',', $ip );
-                    $ip = trim( $ips[0] );
-                }
-                if ( filter_var( $ip, FILTER_VALIDATE_IP ) ) {
-                    return $ip;
-                }
-            }
-        }
-
-        return '0.0.0.0';
+        return Vigilante_IP_Utils::get_client_ip();
     }
 
     // =========================================================================

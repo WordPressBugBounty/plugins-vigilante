@@ -3,7 +3,7 @@
  * Plugin Name: Vigilant
  * Plugin URI: https://servicios.ayudawp.com
  * Description: Complete security solution for WordPress. Firewall, 2FA, security headers, login protection, file integrity monitoring, activity logging and more.
- * Version: 2.6.4
+ * Version: 2.7.0
  * Author: Fernando Tellado
  * Author URI: https://ayudawp.com
  * Text Domain: vigilante
@@ -24,7 +24,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Plugin constants
  */
-define( 'VIGILANTE_VERSION', '2.6.4' );
+define( 'VIGILANTE_VERSION', '2.7.0' );
 define( 'VIGILANTE_PLUGIN_FILE', __FILE__ );
 define( 'VIGILANTE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'VIGILANTE_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -111,6 +111,7 @@ function vigilante_load_plugin() {
     // Load core classes (no translations used in these)
     require_once VIGILANTE_INCLUDES_DIR . 'class-database.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-settings.php';
+    require_once VIGILANTE_INCLUDES_DIR . 'class-ip-utils.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-backup-manager.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-activator.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-deactivator.php';
@@ -243,6 +244,14 @@ final class Vigilante_Main {
         // Auto-create/update tables when DB version is outdated (handles file-only updates)
         if ( $this->database->needs_update() ) {
             $this->database->create_tables();
+        }
+
+        // One-time cleanup: versions before 2.7.0 wrote config backups (including
+        // wp-config.php) as files under wp-content/vigilante-backups/. Those now
+        // live in the database, so remove anything left on disk.
+        if ( ! get_option( 'vigilante_legacy_backups_cleaned' ) ) {
+            Vigilante_Backup_Manager::cleanup_legacy_files();
+            update_option( 'vigilante_legacy_backups_cleaned', 1, false );
         }
     }
 

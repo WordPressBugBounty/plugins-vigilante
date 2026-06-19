@@ -35,13 +35,6 @@ class Vigilante_Htaccess_Manager {
     private $htaccess_path;
 
     /**
-     * Path to backup file
-     *
-     * @var string
-     */
-    private $backup_path;
-
-    /**
      * Known block markers (start => end)
      *
      * @var array
@@ -69,7 +62,6 @@ class Vigilante_Htaccess_Manager {
      */
     private function __construct() {
         $this->htaccess_path = ABSPATH . '.htaccess';
-        $this->backup_path = WP_CONTENT_DIR . '/vigilante-backups/.htaccess.safe';
     }
 
     /**
@@ -351,14 +343,29 @@ class Vigilante_Htaccess_Manager {
      * @return bool
      */
     private function create_backup( $content ) {
-        $backup_dir = dirname( $this->backup_path );
+        // Store the backup in a private database option instead of a file under
+        // the web root, so it can never be served over HTTP.
+        $stored = update_option(
+            'vigilante_htaccess_backup',
+            array(
+                'content' => (string) $content,
+                'time'    => time(),
+            ),
+            false
+        );
 
-        if ( ! is_dir( $backup_dir ) ) {
-            wp_mkdir_p( $backup_dir );
-            file_put_contents( $backup_dir . '/.htaccess', 'Deny from all' ); // phpcs:ignore
-        }
+        // update_option() also returns false when the value is unchanged.
+        return ( false !== $stored ) || ( (string) $content === $this->get_backup_content() );
+    }
 
-        return ( false !== file_put_contents( $this->backup_path, $content ) ); // phpcs:ignore
+    /**
+     * Get the stored .htaccess backup content, or '' if none.
+     *
+     * @return string
+     */
+    private function get_backup_content() {
+        $backup = get_option( 'vigilante_htaccess_backup' );
+        return ( is_array( $backup ) && isset( $backup['content'] ) ) ? (string) $backup['content'] : '';
     }
 
     /**
@@ -367,13 +374,9 @@ class Vigilante_Htaccess_Manager {
      * @return bool
      */
     public function restore_backup() {
-        if ( ! file_exists( $this->backup_path ) ) {
-            return false;
-        }
+        $content = $this->get_backup_content();
 
-        $content = file_get_contents( $this->backup_path ); // phpcs:ignore
-
-        if ( false === $content ) {
+        if ( '' === $content ) {
             return false;
         }
 

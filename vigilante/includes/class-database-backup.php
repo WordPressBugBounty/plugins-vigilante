@@ -186,15 +186,25 @@ class Vigilante_Database_Backup {
             return new WP_Error( 'dir_error', __( 'Cannot create temporary directory.', 'vigilante' ) );
         }
 
-        // Protect temp directory
+        // Protect temp directory: deny rule (Apache/LiteSpeed) plus an index so
+        // it cannot be listed. The unguessable filename below is the real guard
+        // on servers that ignore .htaccess.
         $htaccess_path = $temp_dir . '.htaccess';
         if ( ! file_exists( $htaccess_path ) ) {
-            // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+            // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- writing a protective deny rule, not user input.
             file_put_contents( $htaccess_path, "Deny from all\n" );
         }
+        $index_path = $temp_dir . 'index.php';
+        if ( ! file_exists( $index_path ) ) {
+            // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- writing a silence-is-golden index, not user input.
+            file_put_contents( $index_path, "<?php\n// Silence is golden.\n" );
+        }
 
+        // Random suffix so the archive cannot be fetched by guessing the
+        // timestamp if it is ever left behind on a server that serves uploads.
+        $token        = wp_generate_password( 20, false );
         $sql_filename = 'vigilante-db-backup-' . gmdate( 'Y-m-d-His' ) . '.sql';
-        $zip_filename = 'vigilante-db-backup-' . gmdate( 'Y-m-d-His' ) . '.zip';
+        $zip_filename = 'vigilante-db-backup-' . gmdate( 'Y-m-d-His' ) . '-' . $token . '.zip';
         $zip_path     = $temp_dir . $zip_filename;
 
         $zip = new ZipArchive();

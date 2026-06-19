@@ -159,23 +159,36 @@ class Vigilante_Wpconfig_Security {
             return new WP_Error( 'invalid_config', __( 'wp-config.php does not appear to be a valid WordPress configuration file', 'vigilante' ) );
         }
 
-        // Create backup directory
-        $backup_dir = WP_CONTENT_DIR . '/vigilante-backups';
-        if ( ! is_dir( $backup_dir ) ) {
-            wp_mkdir_p( $backup_dir );
-            // Protect backup directory
-            file_put_contents( $backup_dir . '/.htaccess', 'Deny from all' ); // phpcs:ignore
-            file_put_contents( $backup_dir . '/index.php', '<?php // Silence is golden' ); // phpcs:ignore
-        }
+        // Store the backup in a private database option, never as a file under
+        // the web root. wp-config.php holds DB credentials and salts; a file in
+        // wp-content could be served by a misconfigured server. The option is
+        // not reachable over HTTP and is not autoloaded.
+        $stored = update_option(
+            'vigilante_wpconfig_backup',
+            array(
+                'content' => $content,
+                'time'    => time(),
+            ),
+            false
+        );
 
-        $backup_path = $backup_dir . '/wp-config.php.backup';
-        $result = file_put_contents( $backup_path, $content ); // phpcs:ignore
-
-        if ( false === $result ) {
+        // update_option() returns false both on failure and when the value is
+        // unchanged; only treat it as an error if the content was not stored.
+        if ( false === $stored && $content !== $this->get_wpconfig_backup_content() ) {
             return new WP_Error( 'backup_failed', __( 'Could not create wp-config.php backup', 'vigilante' ) );
         }
 
         return true;
+    }
+
+    /**
+     * Get the stored wp-config.php backup content, or '' if none.
+     *
+     * @return string
+     */
+    private function get_wpconfig_backup_content() {
+        $backup = get_option( 'vigilante_wpconfig_backup' );
+        return ( is_array( $backup ) && isset( $backup['content'] ) ) ? (string) $backup['content'] : '';
     }
 
     /**
