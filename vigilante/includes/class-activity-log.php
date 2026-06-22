@@ -221,7 +221,42 @@ class Vigilante_Activity_Log {
             'extra_data'    => $data,
         );
 
-        return $this->database->insert_activity_log( $log_data );
+        $log_id = $this->database->insert_activity_log( $log_data );
+
+        if ( $log_id ) {
+            /**
+             * Fires after a security event passed every gate and was persisted.
+             *
+             * Lets the Audit Alerts engine react to events without coupling to
+             * each module: it only fires for events that were actually logged
+             * (module on, type flag on, not excluded).
+             *
+             * @param string $type     Event type (login, user, plugin, firewall, ...).
+             * @param string $action   Event action (failed, created, deactivated, ...).
+             * @param string $severity Severity level: info, warning, critical.
+             * @param array  $context  Event context: message, user_id, ip,
+             *                          object_type, object_id, object_name,
+             *                          extra_data, log_id.
+             */
+            do_action(
+                'vigilante_event_logged',
+                $type,
+                $action,
+                $severity,
+                array(
+                    'message'     => $message,
+                    'user_id'     => $user_id,
+                    'ip'          => $ip,
+                    'object_type' => $object_type,
+                    'object_id'   => $object_id,
+                    'object_name' => $object_name,
+                    'extra_data'  => $data,
+                    'log_id'      => $log_id,
+                )
+            );
+        }
+
+        return $log_id;
     }
 
     // =========================================================================

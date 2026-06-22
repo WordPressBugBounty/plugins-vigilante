@@ -454,6 +454,50 @@ class Vigilante_Settings {
                 'weekly_scan_enabled' => true,
                 'email_on_regression' => false,
             ),
+
+            // Audit Alerts (v2.8.0) — alerting layer on top of Security Audit.
+            // The engine subscribes to logged events and only runs when the
+            // Security Audit (activity_log) module is enabled. Opt-in: both
+            // legs start OFF so it never duplicates the per-module emails that
+            // already exist (User Security admin monitoring, Plugin Status...).
+            'audit_alerts' => array(
+                // Shared anti-repeat cooldown (minutes). After an alert, do not
+                // send another about the same thing (same event type for
+                // immediate, same category for threshold) until this passes.
+                // Prevents a flood during a sustained attack.
+                'cooldown_minutes' => 60,
+                // #38 Immediate alerts: selected event types email right away.
+                'immediate' => array(
+                    'enabled'      => false,
+                    // Alert on any logged event at or above this severity. A new
+                    // admin, a closed plugin or a privilege escalation are all
+                    // logged as "critical", so "critical" already covers them.
+                    'min_severity' => 'critical', // 'critical' | 'warning'
+                ),
+                // #10 Threshold alerts: N events of a category within a window.
+                'threshold' => array(
+                    'enabled'    => false,
+                    'window'     => '1h', // 30m | 1h | 6h | 24h
+                    // Per-category trigger counts (warning/critical events only);
+                    // 0 disables that category. Covers every event type that can
+                    // log a warning or critical. Keep in sync with
+                    // Vigilante_Audit_Alerts::category_labels().
+                    'categories' => array(
+                        'firewall' => 50,
+                        'login'    => 20,
+                        'user'     => 5,
+                        'plugin'   => 0,
+                        'file'     => 0,
+                        'security' => 0,
+                        'system'   => 0,
+                        'settings' => 0,
+                        'theme'    => 0,
+                        'content'  => 0,
+                        'comment'  => 0,
+                        'media'    => 0,
+                    ),
+                ),
+            ),
         );
     }
 

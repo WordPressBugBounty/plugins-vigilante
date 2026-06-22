@@ -4184,6 +4184,37 @@
         Vigilante_Admin.initUserApproval();
         Vigilante_Admin.initSessionManagement();
         VigilanteAnalyzer.init();
+
+        // Shared "Send test email" button (Notification settings, File Integrity, Audit Alerts).
+        $(document).on('click', '.vigilante-test-email-btn', function(e) {
+            e.preventDefault();
+            var $btn = $(this);
+            var $result = $btn.siblings('.vigilante-test-email-result');
+            var original = $btn.data('original-text') || $btn.text();
+            $btn.prop('disabled', true).text(vigilanteAdmin.strings.sendingTest || 'Sending...');
+            $result.text('').css('color', '');
+            $.ajax({
+                url: vigilanteAdmin.ajaxUrl,
+                type: 'POST',
+                data: {
+                    action: 'vigilante_send_test_email',
+                    nonce: vigilanteAdmin.nonce
+                },
+                success: function(response) {
+                    if (response && response.success) {
+                        $result.css('color', '#00a32a').text((response.data && response.data.message) || '');
+                    } else {
+                        $result.css('color', '#d63638').text((response && response.data && response.data.message) || vigilanteAdmin.strings.error);
+                    }
+                },
+                error: function() {
+                    $result.css('color', '#d63638').text(vigilanteAdmin.strings.error);
+                },
+                complete: function() {
+                    $btn.prop('disabled', false).text(original);
+                }
+            });
+        });
     });
 
 })(jQuery);

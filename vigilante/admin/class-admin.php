@@ -27,6 +27,7 @@ class Vigilante_Admin {
 
     use Vigilante_Admin_Ajax;
     use Vigilante_Admin_Analyzer_Ajax;
+    use Vigilante_Admin_Audit_Alerts_Ajax;
 
     /**
      * Settings instance
@@ -181,6 +182,9 @@ class Vigilante_Admin {
         add_action( 'wp_ajax_vigilante_analyzer_history', array( $this, 'ajax_analyzer_history' ) );
         add_action( 'wp_ajax_vigilante_analyzer_dismiss_notice', array( $this, 'ajax_analyzer_dismiss_notice' ) );
         add_action( 'wp_ajax_vigilante_analyzer_save_settings', array( $this, 'ajax_analyzer_save_settings' ) );
+
+        // Shared "Send test email" handler — Notification settings, File Integrity, Audit Alerts (v2.8.0)
+        add_action( 'wp_ajax_vigilante_send_test_email', array( $this, 'ajax_send_test_email' ) );
 
         // Run migrations on admin load
         add_action( 'admin_init', array( $this, 'run_migrations' ) );
@@ -719,6 +723,20 @@ class Vigilante_Admin {
             }
         }
 
+        // Audit alerts details (6 points) - only when Security Audit is on,
+        // because the alerting layer rides on top of the activity log. Leaving
+        // both alert legs off keeps these points unearned.
+        if ( ! empty( $options['modules']['activity_log'] ) ) {
+            $alerts = isset( $options['audit_alerts'] ) ? (array) $options['audit_alerts'] : array();
+            $max_score += 6;
+            if ( Vigilante_Audit_Alerts::immediate_is_active( $alerts ) ) {
+                $score += 3;
+            }
+            if ( Vigilante_Audit_Alerts::threshold_is_active( $alerts ) ) {
+                $score += 3;
+            }
+        }
+
         // Environment checks (8 points) - penalize insecure server configuration
         $max_score += 8;
         $env_score = 8;
@@ -927,6 +945,20 @@ class Vigilante_Admin {
             }
         }
 
+        // Medium: Security Audit is on but no audit alert is configured. The
+        // alerting layer only makes sense while the activity log is running.
+        if ( ! empty( $options['modules']['activity_log'] ) ) {
+            $alerts = isset( $options['audit_alerts'] ) ? (array) $options['audit_alerts'] : array();
+            if ( ! Vigilante_Audit_Alerts::has_active_alerts( $alerts ) ) {
+                $recommendations[] = array(
+                    'icon'     => 'email-alt',
+                    'priority' => 'medium',
+                    'message'  => __( 'Set up Audit Alerts to get an email when something important happens (a new admin, a closed plugin, or an attack in progress).', 'vigilante' ),
+                    'tab'      => 'activity-log',
+                );
+            }
+        }
+
         // Sort by priority
         $priority_order = array( 'critical' => 0, 'high' => 1, 'medium' => 2, 'low' => 3 );
         usort( $recommendations, function( $a, $b ) use ( $priority_order ) {
@@ -1130,6 +1162,9 @@ class Vigilante_Admin {
             array( 'tab' => 'activity-log', 'tab_label' => __( 'Security Audit', 'vigilante' ), 'section' => __( 'Security Audit Settings', 'vigilante' ), 'anchor' => 'vigilante-section-audit-settings', 'label' => __( 'Events to Log', 'vigilante' ), 'label_en' => 'Events to Log', 'keywords' => 'eventos log registro auditoría registrar capturar' ),
             array( 'tab' => 'activity-log', 'tab_label' => __( 'Security Audit', 'vigilante' ), 'section' => __( 'Security Audit Settings', 'vigilante' ), 'anchor' => 'vigilante-section-audit-settings', 'label' => __( 'Option Tracking', 'vigilante' ), 'label_en' => 'Option Tracking', 'keywords' => 'opciones seguimiento rastreo cambios ajustes options tracking' ),
             array( 'tab' => 'activity-log', 'tab_label' => __( 'Security Audit', 'vigilante' ), 'section' => __( 'Security Audit Settings', 'vigilante' ), 'anchor' => 'vigilante-section-audit-settings', 'label' => __( 'Exclusions', 'vigilante' ), 'label_en' => 'Exclusions', 'keywords' => 'exclusiones excluir ignorar usuarios roles ip filtros' ),
+            array( 'tab' => 'activity-log', 'tab_label' => __( 'Security Audit', 'vigilante' ), 'section' => __( 'Audit Alerts', 'vigilante' ), 'anchor' => 'vigilante-section-audit-alerts', 'label' => __( 'Audit Alerts', 'vigilante' ), 'label_en' => 'Audit Alerts', 'keywords' => 'alertas avisos aviso notificaciones email correo mail auditoría audit seguridad warning critical destinatarios test prueba' ),
+            array( 'tab' => 'activity-log', 'tab_label' => __( 'Security Audit', 'vigilante' ), 'section' => __( 'Audit Alerts', 'vigilante' ), 'anchor' => 'field-audit-alerts-immediate', 'label' => __( 'Immediate alerts', 'vigilante' ), 'label_en' => 'Immediate alerts', 'keywords' => 'alertas inmediatas email correo mail aviso severidad crítico critical warning evento auditoría inmediato' ),
+            array( 'tab' => 'activity-log', 'tab_label' => __( 'Security Audit', 'vigilante' ), 'section' => __( 'Audit Alerts', 'vigilante' ), 'anchor' => 'field-audit-alerts-threshold', 'label' => __( 'Threshold alerts', 'vigilante' ), 'label_en' => 'Threshold alerts', 'keywords' => 'alertas umbral pico ráfaga email correo mail aviso categoría ventana threshold auditoría cortafuegos login' ),
             array( 'tab' => 'activity-log', 'tab_label' => __( 'Security Audit', 'vigilante' ), 'section' => __( 'Recent Activity', 'vigilante' ), 'anchor' => 'vigilante-section-audit-recent', 'label' => __( 'Recent Activity', 'vigilante' ), 'label_en' => 'Recent Activity', 'keywords' => 'actividad reciente log registro eventos últimos historial' ),
             // Settings & Tools
             array( 'tab' => 'tools', 'tab_label' => __( 'Settings & Tools', 'vigilante' ), 'section' => __( 'Notification settings', 'vigilante' ), 'anchor' => 'vigilante-section-tools-notifications', 'label' => __( 'Notification settings', 'vigilante' ), 'label_en' => 'Notification settings', 'keywords' => 'notificaciones ajustes settings email correo avisos alertas' ),
@@ -1184,6 +1219,7 @@ class Vigilante_Admin {
             ),
             'strings'       => array(
                 'saving'              => __( 'Saving...', 'vigilante' ),
+                'sendingTest'         => __( 'Sending...', 'vigilante' ),
                 'saved'               => __( 'Settings saved', 'vigilante' ),
                 'error'               => __( 'Error saving settings', 'vigilante' ),
                 'confirm'             => __( 'Are you sure?', 'vigilante' ),
@@ -2312,6 +2348,7 @@ class Vigilante_Admin {
         $login_options     = $this->settings->get_section( 'login_security' );
         $user_options      = $this->settings->get_section( 'user_security' );
         $fi_options        = $this->settings->get_section( 'file_integrity' );
+        $alerts_options    = $this->settings->get_section( 'audit_alerts' );
         $monitoring        = $user_options['admin_monitoring'] ?? array();
         $registration      = $user_options['registration_approval'] ?? array();
         $current_admin     = get_option( 'admin_email' );
@@ -2369,7 +2406,12 @@ class Vigilante_Admin {
                             <button type="submit" class="button button-primary vigilante-save-btn" data-original-text="<?php esc_attr_e( 'Save Settings', 'vigilante' ); ?>">
                                 <?php esc_html_e( 'Save Settings', 'vigilante' ); ?>
                             </button>
+                            <button type="button" class="button vigilante-test-email-btn" data-original-text="<?php esc_attr_e( 'Send test email', 'vigilante' ); ?>">
+                                <?php esc_html_e( 'Send test email', 'vigilante' ); ?>
+                            </button>
+                            <span class="vigilante-test-email-result" style="margin-left:8px;vertical-align:middle;"></span>
                         </p>
+                        <p class="description"><?php esc_html_e( 'The test goes to the recipients above and confirms that email delivery works for every Vigilant notification.', 'vigilante' ); ?></p>
 
                     </form>
                 </div>
@@ -2435,6 +2477,18 @@ class Vigilante_Admin {
                                     'tab'    => 'file-integrity',
                                 ),
                                 array(
+                                    'label'  => __( 'Audit alert: immediate', 'vigilante' ),
+                                    'active' => Vigilante_Audit_Alerts::immediate_is_active( $alerts_options ),
+                                    'tab'    => 'activity-log',
+                                    'anchor' => 'vigilante-section-audit-alerts',
+                                ),
+                                array(
+                                    'label'  => __( 'Audit alert: threshold', 'vigilante' ),
+                                    'active' => Vigilante_Audit_Alerts::threshold_is_active( $alerts_options ),
+                                    'tab'    => 'activity-log',
+                                    'anchor' => 'vigilante-section-audit-alerts',
+                                ),
+                                array(
                                     'label'  => __( 'Under Attack mode', 'vigilante' ),
                                     'active' => true,
                                     'tab'    => '',
@@ -2461,7 +2515,7 @@ class Vigilante_Admin {
                                 </td>
                                 <td style="text-align: center;">
                                     <?php if ( ! empty( $notif['tab'] ) ) : ?>
-                                        <a href="<?php echo esc_url( admin_url( 'admin.php?page=vigilante&tab=' . $notif['tab'] ) ); ?>" class="button button-small">
+                                        <a href="<?php echo esc_url( admin_url( 'admin.php?page=vigilante&tab=' . $notif['tab'] ) . ( ! empty( $notif['anchor'] ) ? '#' . $notif['anchor'] : '' ) ); ?>" class="button button-small">
                                             <span class="dashicons dashicons-admin-generic" style="font-size: 14px; line-height: 1.8;"></span>
                                         </a>
                                     <?php else : ?>
@@ -4800,7 +4854,7 @@ class Vigilante_Admin {
                     <tr>
                         <th scope="row"><?php esc_html_e( 'Events to Log', 'vigilante' ); ?></th>
                         <td>
-                            <fieldset style="display:grid; grid-template-columns:1fr 1fr; gap:6px 24px; max-width:600px;">
+                            <fieldset style="display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:6px 24px; max-width:600px;">
                                 <label><input type="checkbox" name="activity_log[log_logins]" value="1" <?php checked( ! empty( $options['log_logins'] ) ); ?>> <?php esc_html_e( 'Successful logins', 'vigilante' ); ?></label>
                                 <label><input type="checkbox" name="activity_log[log_failed_logins]" value="1" <?php checked( ! empty( $options['log_failed_logins'] ) ); ?>> <?php esc_html_e( 'Failed login attempts', 'vigilante' ); ?></label>
                                 <label><input type="checkbox" name="activity_log[log_user_changes]" value="1" <?php checked( ! empty( $options['log_user_changes'] ) ); ?>> <?php esc_html_e( 'User changes', 'vigilante' ); ?></label>
@@ -4832,7 +4886,7 @@ class Vigilante_Admin {
                     <tr>
                         <th scope="row"><?php esc_html_e( 'Exclusions', 'vigilante' ); ?></th>
                         <td>
-                            <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; max-width:600px;">
+                            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:16px; max-width:600px;">
                                 <div>
                                     <label><?php esc_html_e( 'Excluded user IDs:', 'vigilante' ); ?></label><br>
                                     <textarea name="activity_log[excluded_users]" rows="3" cols="25"><?php echo esc_textarea( implode( "\n", $options['excluded_users'] ?? array() ) ); ?></textarea>
@@ -4844,6 +4898,129 @@ class Vigilante_Admin {
                                     <p class="description"><?php esc_html_e( 'One IP per line. Requests from these IPs will not be logged.', 'vigilante' ); ?></p>
                                 </div>
                             </div>
+                        </td>
+                    </tr>
+                </table>
+            </div>
+
+            <p class="submit vigilante-submit-buttons">
+                <button type="submit" class="button button-primary vigilante-save-btn" data-original-text="<?php esc_attr_e( 'Save Settings', 'vigilante' ); ?>">
+                    <?php esc_html_e( 'Save Settings', 'vigilante' ); ?>
+                </button>
+                <button type="button" class="button vigilante-reset-section-btn" data-original-text="<?php esc_attr_e( 'Reset to Defaults', 'vigilante' ); ?>">
+                    <?php esc_html_e( 'Reset to Defaults', 'vigilante' ); ?>
+                </button>
+            </p>
+        </form>
+
+        <?php
+        // Audit Alerts — alerting layer on top of Security Audit. Its own
+        // settings section and form, rendered right after the logging settings
+        // so the tab reads as "log this, exclude that, and alert me about this".
+        $alerts         = $this->settings->get_section( 'audit_alerts' );
+        $immediate      = isset( $alerts['immediate'] ) ? $alerts['immediate'] : array();
+        $threshold      = isset( $alerts['threshold'] ) ? $alerts['threshold'] : array();
+        $alert_severity = isset( $immediate['min_severity'] ) ? $immediate['min_severity'] : 'critical';
+        $alert_window   = isset( $threshold['window'] ) ? $threshold['window'] : '1h';
+        $threshold_cats = isset( $threshold['categories'] ) ? (array) $threshold['categories'] : array();
+        $cat_labels     = Vigilante_Audit_Alerts::category_labels();
+        ?>
+        <form class="vigilante-settings-form <?php echo $is_disabled ? 'vigilante-form-disabled' : ''; ?>" data-section="audit_alerts" <?php echo $is_disabled ? 'inert' : ''; ?>>
+            <div id="vigilante-section-audit-alerts" class="vigilante-settings-section">
+                <h2>
+                    <?php esc_html_e( 'Audit Alerts', 'vigilante' ); ?>
+                    <span class="vigilante-method-badge php"><?php esc_html_e( 'PHP', 'vigilante' ); ?></span>
+                </h2>
+                <p><?php esc_html_e( 'Get an email when the events above point to something worth your attention. Both alert types are off by default.', 'vigilante' ); ?></p>
+
+                <table class="form-table">
+                    <tr id="field-audit-alerts-immediate">
+                        <th scope="row"><?php esc_html_e( 'Immediate alerts', 'vigilante' ); ?></th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="audit_alerts[immediate][enabled]" value="1" <?php checked( ! empty( $immediate['enabled'] ) ); ?>>
+                                <?php esc_html_e( 'Email me as soon as a serious event is logged', 'vigilante' ); ?>
+                            </label>
+                            <p class="description"><?php esc_html_e( 'Sends one email per event type, then waits for the cooldown below before repeating, so a burst of the same event is a single notice.', 'vigilante' ); ?></p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e( 'Alert on severity', 'vigilante' ); ?></th>
+                        <td>
+                            <select name="audit_alerts[immediate][min_severity]">
+                                <option value="critical" <?php selected( $alert_severity, 'critical' ); ?>><?php esc_html_e( 'Critical only (recommended)', 'vigilante' ); ?></option>
+                                <option value="warning" <?php selected( $alert_severity, 'warning' ); ?>><?php esc_html_e( 'Warning and Critical', 'vigilante' ); ?></option>
+                            </select>
+                            <p class="description"><?php esc_html_e( 'A new administrator, a closed plugin or a privilege escalation are all logged as Critical, so "Critical only" already covers them.', 'vigilante' ); ?></p>
+                        </td>
+                    </tr>
+                    <tr id="field-audit-alerts-threshold">
+                        <th scope="row"><?php esc_html_e( 'Threshold alerts', 'vigilante' ); ?></th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="audit_alerts[threshold][enabled]" value="1" <?php checked( ! empty( $threshold['enabled'] ) ); ?>>
+                                <?php esc_html_e( 'Email me when a category spikes within a time window', 'vigilante' ); ?>
+                            </label>
+                            <p class="description"><?php esc_html_e( 'Catches an attack in progress, e.g. hundreds of firewall blocks or login failures in an hour.', 'vigilante' ); ?></p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e( 'Time window', 'vigilante' ); ?></th>
+                        <td>
+                            <select name="audit_alerts[threshold][window]">
+                                <option value="30m" <?php selected( $alert_window, '30m' ); ?>><?php esc_html_e( '30 minutes', 'vigilante' ); ?></option>
+                                <option value="1h" <?php selected( $alert_window, '1h' ); ?>><?php esc_html_e( '1 hour', 'vigilante' ); ?></option>
+                                <option value="6h" <?php selected( $alert_window, '6h' ); ?>><?php esc_html_e( '6 hours', 'vigilante' ); ?></option>
+                                <option value="24h" <?php selected( $alert_window, '24h' ); ?>><?php esc_html_e( '24 hours', 'vigilante' ); ?></option>
+                            </select>
+                            <p class="description"><?php esc_html_e( 'How far back Vigilant looks when counting events. For example, "1 hour" means "more than the number below within the last hour".', 'vigilante' ); ?></p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e( 'Thresholds per category', 'vigilante' ); ?></th>
+                        <td>
+                            <fieldset style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:8px 24px; max-width:760px;">
+                                <?php
+                                foreach ( $cat_labels as $cat_slug => $cat_label ) :
+                                    $cat_value = isset( $threshold_cats[ $cat_slug ] ) ? (int) $threshold_cats[ $cat_slug ] : 0;
+                                    ?>
+                                    <label style="display:flex;align-items:center;gap:8px;justify-content:space-between;">
+                                        <span><?php echo esc_html( $cat_label ); ?></span>
+                                        <input type="number" name="audit_alerts[threshold][categories][<?php echo esc_attr( $cat_slug ); ?>]" value="<?php echo esc_attr( $cat_value ); ?>" min="0" max="100000" step="1" class="small-text">
+                                    </label>
+                                <?php endforeach; ?>
+                            </fieldset>
+                            <p class="description"><?php esc_html_e( 'Number of warning/critical events in the window that triggers an alert. 0 disables that category. Routine info-level activity (normal logins, edits) is not counted.', 'vigilante' ); ?></p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e( "Don't repeat alerts", 'vigilante' ); ?></th>
+                        <td>
+                            <input type="number" name="audit_alerts[cooldown_minutes]" value="<?php echo esc_attr( isset( $alerts['cooldown_minutes'] ) ? (int) $alerts['cooldown_minutes'] : 60 ); ?>" min="0" max="1440" class="small-text">
+                            <?php esc_html_e( 'minutes', 'vigilante' ); ?>
+                            <p class="description"><?php esc_html_e( 'After an alert, Vigilant waits this long before sending another about the same thing: the same event type for immediate alerts, or the same category for threshold alerts. This prevents a flood during a sustained attack. Applies to both alert types above.', 'vigilante' ); ?></p>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <th scope="row"><?php esc_html_e( 'Recipients', 'vigilante' ); ?></th>
+                        <td>
+                            <p class="description" style="margin-top:0;">
+                                <?php
+                                printf(
+                                    /* translators: %s: Link to notification settings */
+                                    esc_html__( 'Alerts go to the recipients configured in %s.', 'vigilante' ),
+                                    '<a href="' . esc_url( admin_url( 'admin.php?page=vigilante&tab=tools' ) ) . '">' . esc_html__( 'Settings & Tools', 'vigilante' ) . '</a>'
+                                );
+                                ?>
+                            </p>
+                            <p style="margin:8px 0 0;">
+                                <button type="button" class="button vigilante-test-email-btn" data-original-text="<?php esc_attr_e( 'Send test email', 'vigilante' ); ?>">
+                                    <?php esc_html_e( 'Send test email', 'vigilante' ); ?>
+                                </button>
+                                <span class="vigilante-test-email-result" style="margin-left:8px;"></span>
+                            </p>
+                            <p class="description"><?php esc_html_e( 'Heads up: some events (a new admin, a closed plugin) already send their own email from other modules. Enabling alerts for them here too may produce two notices until notifications are unified.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
                 </table>
@@ -5130,6 +5307,16 @@ class Vigilante_Admin {
                                 );
                                 ?>
                             </p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e( 'Test email', 'vigilante' ); ?></th>
+                        <td>
+                            <button type="button" class="button vigilante-test-email-btn" data-original-text="<?php esc_attr_e( 'Send test email', 'vigilante' ); ?>">
+                                <?php esc_html_e( 'Send test email', 'vigilante' ); ?>
+                            </button>
+                            <span class="vigilante-test-email-result" style="margin-left:8px;"></span>
+                            <p class="description"><?php esc_html_e( 'Sends a test message to the configured recipients to confirm email delivery works.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
                     <tr>

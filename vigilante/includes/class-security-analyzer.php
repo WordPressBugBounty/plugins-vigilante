@@ -97,7 +97,7 @@ class Vigilante_Security_Analyzer {
                 // Sum of the max values of every check in
                 // Vigilante_SA_Category_Internal. Update when adding/removing
                 // checks or changing their max value.
-                'max'   => 28,
+                'max'   => 30,
             ),
             'reputation'  => array(
                 'slug'     => 'reputation',

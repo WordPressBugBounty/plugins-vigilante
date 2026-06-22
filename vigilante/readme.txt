@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.7.0
+Stable tag: 2.8.0
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -182,13 +182,23 @@ Track everything happening on your site:
 * Export logs to CSV
 * Filter by event type, severity, request method, or date
 
+**Audit Alerts**
+
+Get an email when the audit log points to something worth your attention — off by default, configured under Security Audit:
+
+* Immediate alerts the moment a serious event is logged, by minimum severity (a new administrator, a closed plugin or a privilege escalation are all logged as Critical)
+* Threshold alerts when a category spikes — firewall blocks, login failures, user, plugin, file integrity, security, system and content events — over a 30-minute, 1, 6 or 24 hour window, counting only warning and critical events so routine activity never trips them
+* A single anti-repeat cooldown keeps a storm of events down to one notice instead of flooding your inbox
+* Active alerts surface in Settings & Tools, the Dashboard, the Configuration Score and the Security Check
+* "Send test email" button to confirm delivery, shared by Settings & Tools, File Integrity and Audit Alerts
+
 **Security Check**
 
 On-demand security audit built into the Dashboard. No external services, no accounts, no API keys — everything runs on your server:
 
 * 40+ checks across 6 categories: SSL/TLS, HTTP Headers, WP Exposure, Access & Auth, Sensitive Files, and Internal Checks
 * Single 0–100 score with A–E grade, plus per-category breakdown and explanatory details for every check
-* 14 exclusive internal checks impossible from the outside: PHP end-of-life status, pending updates, inactive plugins, closed or removed plugins in the WordPress.org repository, file permissions, default salts detection, `wp_` table prefix, `admin` username, administrators without 2FA enrolled, module status, recent audit errors, and last File Integrity scan result
+* 15 exclusive internal checks impossible from the outside: PHP end-of-life status, pending updates, inactive plugins, closed or removed plugins in the WordPress.org repository, file permissions, default salts detection, `wp_` table prefix, `admin` username, administrators without 2FA enrolled, module status, recent audit errors, last File Integrity scan result, and whether audit alerts are configured
 * DNS-only reputation lookup against Spamhaus ZEN, Barracuda BRBL and SpamCop SCBL (informational — listings are flagged but don't deduct from the score)
 * Two-phase scan: fast local checks appear in under a second, remote checks stream in as they complete
 * Weekly automatic scan with opt-in email alert if the score drops by 10+ points or a new critical check starts failing
@@ -429,24 +439,16 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
-= 2.7.0 =
-* New: granular password policy. Each strength requirement is now an individual toggle (uppercase, lowercase, number, special character, reject common passwords), you can optionally disallow the username inside the password, and you can scope all the rules to specific roles. Turning off, for example, the "number" and "special character" requirements lets people use long passphrases that WordPress itself rates as strong. Defaults match the previous behaviour, so nothing changes until you relax a rule.
-* New: visitor IP detection setting in the Firewall. Tell Vigilant how to read the real visitor IP: directly from the connection (the default, and the right choice for most sites) or from a forwarded header when the site sits behind Cloudflare, a reverse proxy or a load balancer (CF-Connecting-IP, X-Forwarded-For, X-Real-IP). If requests arrive with a proxy header while detection is still set to direct, an admin notice points you to the setting so the firewall doesn't end up reading the CDN address for every visitor.
-* Improved: the firewall IP whitelist and blacklist now accept IPv6 as well as IPv4, in exact, CIDR and wildcard form. Both lists share the same matcher so they behave identically.
-* Improved: an IP in the firewall whitelist now also bypasses the hidden wp-admin / custom login URL masking, not only the firewall checks. Remote managers such as MainWP and ManageWP, which reach a site without a WordPress session cookie, were getting a 404 when a custom login URL was active; adding the dashboard's IP to the whitelist lets them through again. Only the URL masking is relaxed — the IP still has to authenticate normally.
-* Improved: clearer guidance during a forced password change. When a password expires, the profile notice now explains that the new password is only saved once the whole form is error-free, so a blocking error on an unrelated field (for example a display name that matches the username) no longer leaves people thinking their new password "is not recognized".
-* Improved: the "insecure usernames" warning (admin, info, etc.) is now dismissible per administrator. Closing it persists for that user, while the Dashboard keeps showing it as a standing reminder. Previously the close button did nothing on the next page load.
-* Fix: visitor IP detection no longer trusts forwarded headers (CF-Connecting-IP, X-Forwarded-For, X-Real-IP) by default. On a site that is not actually behind a proxy, any visitor could send one of these headers to impersonate any IP address and slip past the IP whitelist/blacklist or poison the rate limiter. Forwarded headers are now honoured only when you declare your proxy in the new visitor IP detection setting; otherwise only the real connection address is used.
-* Fix: configuration backups (wp-config.php, .htaccess, robots.txt) are no longer written as files inside wp-content/vigilante-backups/. A server that doesn't honour that directory's protective .htaccess (common on Nginx) could serve them and expose database credentials and secret keys. Backups are now stored in the database, out of HTTP reach, and any backup files left on disk by earlier versions are removed automatically on update. Downloaded database backups now use an unguessable filename and are deleted immediately after the download.
-* Fix: a forced password change could be silently rejected and leave the old password active. The strength and history checks sanitized the password before inspecting it, so a password containing characters like "<", tabs or repeated spaces was mismeasured (for example counted as too short), the whole profile save was aborted and the new password never took effect, leaving the user unable to log in with it. Passwords are now inspected exactly as typed.
-* Fix: the display-name protection could block a forced password change. A user whose display name already matched their username could not save the forced password change, because the save was rejected for the unrelated display-name rule and the password never changed. The rule now only blocks when you actually set a display name equal to the username.
+= 2.8.0 =
+* New: Audit Alerts. Vigilant can now email you when something on the site deserves your attention, configured under Security Audit and off by default. Immediate alerts send an email the moment a serious event is logged, by severity — a new administrator, a closed plugin or a privilege escalation are all logged as Critical. Threshold alerts watch for a spike of warning or critical events in a category (firewall, login, users, plugins, file integrity, security, system, and the content categories) within a 1, 6 or 24 hour window, ignoring routine info-level activity. A per-event and per-category cooldown keeps a storm of events down to a single notice instead of flooding your inbox. The active alerts appear in Settings & Tools next to the other notifications, and the Dashboard, Configuration Score and Security Check now reflect whether alerts are set up.
+* New: "Send test email" button in Settings & Tools, File Integrity and Audit Alerts, so you can confirm that notifications actually reach your inbox.
 
 For older changelog entries, please check the [changelog.txt](https://plugins.svn.wordpress.org/vigilante/trunk/changelog.txt) file
 
 == Upgrade Notice ==
 
-= 2.7.0 =
-Security update. Visitor IP now comes from the real connection by default; if you're behind Cloudflare or a proxy, set it in Firewall > Visitor IP detection. Config backups moved out of the web root into the database. Adds granular password policies and IPv6 IP lists.
+= 2.8.0 =
+New Audit Alerts: get an email when a serious event is logged or when activity spikes in a category (firewall, login, users, plugins), with a cooldown to avoid floods. Set it up under Security Audit; it is off by default.
 
 == Support ==
 

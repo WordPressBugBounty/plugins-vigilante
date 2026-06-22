@@ -1,6 +1,6 @@
 <?php
 /**
- * Security Analyzer — Internal-exclusive category (25 pts).
+ * Security Analyzer — Internal-exclusive category (30 pts).
  *
  * The differential of this analyzer vs any external scanner. Each check
  * reads data that is impossible to observe from the outside.
@@ -21,6 +21,8 @@
  *  - vigilante_modules_off (2)
  *  - activity_log_errors (1)
  *  - file_integrity_status (1)
+ *  - audit_alerts_active (2)  ← v2.8.0: warns when Security Audit is on but no
+ *                              audit alert is configured; skips when off.
  *
  * @package Vigilante
  * @since   2.1.0
@@ -83,6 +85,7 @@ class Vigilante_SA_Category_Internal {
         $results[] = $this->check_vigilante_modules_off();
         $results[] = $this->check_activity_log_errors();
         $results[] = $this->check_file_integrity_status();
+        $results[] = $this->check_audit_alerts_active();
 
         return $results;
     }
@@ -651,6 +654,55 @@ class Vigilante_SA_Category_Internal {
         return count( $off ) >= 2
             ? Vigilante_SA_Check_Result::fail( $args )
             : Vigilante_SA_Check_Result::warn( $args );
+    }
+
+    private function check_audit_alerts_active() {
+        $args = array(
+            'id'       => 'audit_alerts_active',
+            'category' => self::SLUG,
+            'max'      => 2,
+            'label'    => __( 'Audit alerts configured', 'vigilante' ),
+            'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'activity-log', 'vigilante-section-audit-alerts' ),
+        );
+
+        // Alerts ride on top of Security Audit; with the module off there is
+        // nothing to alert on, so the check does not apply.
+        if ( ! $this->settings->is_module_enabled( 'activity_log' ) ) {
+            $args['detail'] = __( 'Security Audit is disabled, so audit alerts do not apply. Enable Security Audit to use them.', 'vigilante' );
+            return Vigilante_SA_Check_Result::skip( $args );
+        }
+
+        if ( ! class_exists( 'Vigilante_Audit_Alerts' ) ) {
+            require_once VIGILANTE_INCLUDES_DIR . 'class-audit-alerts.php';
+        }
+
+        $config    = (array) $this->settings->get_section( 'audit_alerts' );
+        $immediate = Vigilante_Audit_Alerts::immediate_is_active( $config );
+        $threshold = Vigilante_Audit_Alerts::threshold_is_active( $config );
+
+        $args['data'] = array(
+            'immediate' => $immediate,
+            'threshold' => $threshold,
+        );
+
+        if ( $immediate || $threshold ) {
+            $active = array();
+            if ( $immediate ) {
+                $active[] = __( 'immediate', 'vigilante' );
+            }
+            if ( $threshold ) {
+                $active[] = __( 'threshold', 'vigilante' );
+            }
+            $args['detail'] = sprintf(
+                /* translators: %s: comma-separated list of active alert types */
+                __( 'Audit alerts are active (%s). Important events will reach you by email.', 'vigilante' ),
+                implode( ', ', $active )
+            );
+            return Vigilante_SA_Check_Result::pass( $args );
+        }
+
+        $args['detail'] = __( 'No audit alerts are configured. Turn on immediate or threshold alerts so important events reach you by email.', 'vigilante' );
+        return Vigilante_SA_Check_Result::warn( $args );
     }
 
     private function check_activity_log_errors() {

@@ -3,7 +3,7 @@
  * Plugin Name: Vigilant
  * Plugin URI: https://servicios.ayudawp.com
  * Description: Complete security solution for WordPress. Firewall, 2FA, security headers, login protection, file integrity monitoring, activity logging and more.
- * Version: 2.7.0
+ * Version: 2.8.0
  * Author: Fernando Tellado
  * Author URI: https://ayudawp.com
  * Text Domain: vigilante
@@ -24,7 +24,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Plugin constants
  */
-define( 'VIGILANTE_VERSION', '2.7.0' );
+define( 'VIGILANTE_VERSION', '2.8.0' );
 define( 'VIGILANTE_PLUGIN_FILE', __FILE__ );
 define( 'VIGILANTE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'VIGILANTE_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -132,6 +132,7 @@ function vigilante_load_plugin() {
     require_once VIGILANTE_INCLUDES_DIR . 'class-head-cleaner.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-feed-manager.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-activity-log.php';
+    require_once VIGILANTE_INCLUDES_DIR . 'class-audit-alerts.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-file-integrity.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-plugin-status.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-under-attack.php';
@@ -142,6 +143,7 @@ function vigilante_load_plugin() {
     // Load admin classes
     if ( is_admin() ) {
         require_once VIGILANTE_ADMIN_DIR . 'class-admin-analyzer-ajax.php';
+        require_once VIGILANTE_ADMIN_DIR . 'class-admin-audit-alerts-ajax.php';
         require_once VIGILANTE_ADMIN_DIR . 'class-admin.php';
     }
 
@@ -340,6 +342,14 @@ final class Vigilante_Main {
 
         // Activity Log is always initialized (core component)
         // Logging is gated by the modules.activity_log toggle and per-type flags
+
+        // Audit Alerts engine - an alerting layer on top of Security Audit.
+        // Only instantiated when Security Audit is on, because it reacts to the
+        // events the activity log records (a passive subscriber, no per-module
+        // coupling). Both alert legs are opt-in, off by default.
+        if ( ! empty( $options['modules']['activity_log'] ) ) {
+            new Vigilante_Audit_Alerts( $this->settings, $this->activity_log );
+        }
 
         // Under Attack mode - always loaded (independent of modules)
         new Vigilante_Under_Attack( $this->settings, $this->activity_log );

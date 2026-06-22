@@ -40,6 +40,13 @@ class Vigilante_Deactivator {
         delete_transient( 'vigilante_restore_on_deactivate' );
         delete_transient( 'vigilante_backup_error' );
 
+        // Audit Alerts: clear every engine transient (per-category counters and
+        // cooldowns, plus the immediate anti-duplicate keys). Names are dynamic
+        // (one per category, md5 per event), so a prefix sweep is the only way.
+        global $wpdb;
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- One-off cleanup on deactivate; dynamic transient names cannot be enumerated individually.
+        $wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '\\_transient\\_vigilante\\_aa\\_%' OR option_name LIKE '\\_transient\\_timeout\\_vigilante\\_aa\\_%'" );
+
         // Flush rewrite rules
         flush_rewrite_rules();
     }
@@ -235,6 +242,13 @@ class Vigilante_Deactivator {
         delete_transient( 'vigilante_restore_on_deactivate' );
         delete_transient( 'vigilante_backup_error' );
         delete_transient( 'vigilante_file_integrity_last_scan' );
+
+        // Audit Alerts: remove every engine transient (counters, cooldowns and
+        // the immediate anti-duplicate keys), including their timeout twins.
+        // Names are dynamic (md5 per event), so a prefix sweep is the only way.
+        global $wpdb;
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- One-off uninstall cleanup; dynamic transient names cannot be enumerated individually.
+        $wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '\\_transient\\_vigilante\\_aa\\_%' OR option_name LIKE '\\_transient\\_timeout\\_vigilante\\_aa\\_%'" );
 
         // Remove backup directory
         self::remove_backup_directory();

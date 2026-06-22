@@ -136,6 +136,38 @@ class Vigilante_Email_Template {
     }
 
     /**
+     * Send a neutral test email to the configured recipients.
+     *
+     * Shared by every "Send test email" button (Notification settings, File
+     * Integrity, Audit Alerts) so they all verify the same delivery path.
+     *
+     * @return bool True if the email was handed to wp_mail, false otherwise.
+     */
+    public static function send_test() {
+        $recipients = self::get_admin_recipients();
+        if ( empty( $recipients ) ) {
+            return false;
+        }
+
+        $subject = sprintf(
+            /* translators: %s: site name */
+            __( '[Vigilant] Test email from %s', 'vigilante' ),
+            wp_specialchars_decode( get_bloginfo( 'name' ) )
+        );
+
+        $body  = self::success_box(
+            __( 'This is a test email from Vigilant. If you can read this, your notification recipients are set correctly and email delivery works.', 'vigilante' )
+        );
+        $body .= self::data_table(
+            array(
+                __( 'Recipients', 'vigilante' ) => implode( ', ', $recipients ),
+            )
+        );
+
+        return self::send( $recipients, $subject, __( 'Test email', 'vigilante' ), $body, false );
+    }
+
+    /**
      * Wrap body content in the standard email shell
      *
      * @param string $title Header title.
