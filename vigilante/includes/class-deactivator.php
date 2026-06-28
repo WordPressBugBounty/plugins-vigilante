@@ -170,6 +170,8 @@ class Vigilante_Deactivator {
         wp_unschedule_hook( 'vigilante_password_expiry_reminder' );
         wp_unschedule_hook( 'vigilante_analyzer_weekly_scan' );
         wp_unschedule_hook( 'vigilante_plugin_status_check' );
+        // Post-update verification single events (scheduled with per-update args).
+        wp_unschedule_hook( 'vigilante_fi_postupdate_verify' );
     }
 
     /**

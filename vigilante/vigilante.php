@@ -3,7 +3,7 @@
  * Plugin Name: Vigilant
  * Plugin URI: https://servicios.ayudawp.com
  * Description: Complete security solution for WordPress. Firewall, 2FA, security headers, login protection, file integrity monitoring, activity logging and more.
- * Version: 2.8.0
+ * Version: 2.9.0
  * Author: Fernando Tellado
  * Author URI: https://ayudawp.com
  * Text Domain: vigilante
@@ -24,7 +24,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Plugin constants
  */
-define( 'VIGILANTE_VERSION', '2.8.0' );
+define( 'VIGILANTE_VERSION', '2.9.0' );
 define( 'VIGILANTE_PLUGIN_FILE', __FILE__ );
 define( 'VIGILANTE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'VIGILANTE_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -254,6 +254,47 @@ final class Vigilante_Main {
         if ( ! get_option( 'vigilante_legacy_backups_cleaned' ) ) {
             Vigilante_Backup_Manager::cleanup_legacy_files();
             update_option( 'vigilante_legacy_backups_cleaned', 1, false );
+        }
+
+        // One-time migration (2.9.0): add '.css' to File Integrity's excluded
+        // extensions on existing installs. Stylesheets are rewritten so often by
+        // themes and optimizer plugins that they were the main post-update false
+        // positive. New installs get it from the defaults; this brings existing
+        // sites in line without touching any other setting. Additive, idempotent.
+        if ( ! get_option( 'vigilante_css_exclusion_migrated' ) ) {
+            $fi = $this->settings->get_section( 'file_integrity' );
+            if ( is_array( $fi ) ) {
+                $ext = ( isset( $fi['excluded_extensions'] ) && is_array( $fi['excluded_extensions'] ) )
+                    ? $fi['excluded_extensions']
+                    : array();
+                if ( ! in_array( '.css', $ext, true ) ) {
+                    $ext[]                     = '.css';
+                    $fi['excluded_extensions'] = $ext;
+                    $this->settings->update_section( 'file_integrity', $fi );
+                }
+            }
+            update_option( 'vigilante_css_exclusion_migrated', 1, false );
+        }
+
+        // One-time on upgrade to 2.9.0: drop any cached WordPress.org checksum
+        // manifests. The new comparison is array-aware and self-corrects a cached
+        // array-md5 value, but a manifest cached by an older version while wp.org
+        // was still propagating a new release could otherwise keep producing
+        // false "modified" results until it expires (up to 24h). Flushing on
+        // upgrade guarantees a clean slate on the very release that fixes them;
+        // the next scan refetches fresh manifests. One-time, bulk, no caching.
+        if ( ! get_option( 'vigilante_checksum_cache_flushed_290' ) ) {
+            global $wpdb;
+            $wpdb->query( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- one-time 2.9.0 migration dropping stale checksum transients so the new comparison starts clean.
+                "DELETE FROM {$wpdb->options}
+                WHERE option_name LIKE '\\_transient\\_vigilante\\_plugin\\_checksums\\_%'
+                OR option_name LIKE '\\_transient\\_timeout\\_vigilante\\_plugin\\_checksums\\_%'
+                OR option_name LIKE '\\_transient\\_vigilante\\_theme\\_checksums\\_%'
+                OR option_name LIKE '\\_transient\\_timeout\\_vigilante\\_theme\\_checksums\\_%'
+                OR option_name LIKE '\\_transient\\_vigilante\\_core\\_checksums\\_%'
+                OR option_name LIKE '\\_transient\\_timeout\\_vigilante\\_core\\_checksums\\_%'"
+            );
+            update_option( 'vigilante_checksum_cache_flushed_290', 1, false );
         }
     }
 

@@ -3,6 +3,12 @@ Vigilant — Full changelog
 For each release, see the entries below. The latest version is always at the top.
 The current release notes also live in readme.txt under "== Changelog ==".
 
+= 2.9.0 =
+* New: Vigilant now verifies any plugin or theme against the official WordPress.org files the moment it finishes updating, instead of waiting for the next scheduled scan. If an update has been tampered with, the mismatch is caught and recorded right away.
+* Improved: stylesheets (.css) are excluded from integrity scanning by default. Themes and optimization plugins rewrite them constantly, which was a frequent source of false "modified file" alerts; strict-mode users can re-enable .css in the scan settings.
+* Improved: the scanner detects one more obfuscation technique used by tampered or nulled plugins, downloading a remote payload and unserializing it.
+* Fix: File Integrity no longer reports false "modified" or "extra" files right after you update a plugin or theme. When WordPress.org publishes several valid checksums for a file (common in re-tagged releases) the file is now matched against any of them, and right after an update Vigilant fetches fresh checksums instead of reusing a copy cached while WordPress.org was still publishing the new version. Verification now also uses SHA-256 in addition to MD5.
+
 = 2.8.0 =
 * New: Audit Alerts. Vigilant can now email you when something on the site deserves your attention, configured under Security Audit and off by default. Immediate alerts send an email the moment a serious event is logged, by severity — a new administrator, a closed plugin or a privilege escalation are all logged as Critical. Threshold alerts watch for a spike of warning or critical events in a category (firewall, login, users, plugins, file integrity, security, system, and the content categories) within a 1, 6 or 24 hour window, ignoring routine info-level activity. A per-event and per-category cooldown keeps a storm of events down to a single notice instead of flooding your inbox. The active alerts appear in Settings & Tools next to the other notifications, and the Dashboard, Configuration Score and Security Check now reflect whether alerts are set up.
 * New: "Send test email" button in Settings & Tools, File Integrity and Audit Alerts, so you can confirm that notifications actually reach your inbox.

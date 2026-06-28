@@ -392,6 +392,11 @@ class Vigilante_Settings {
                     '.po', '.mo', '.pot',
                     // Binary images (cosmetic, not executable; often rewritten by image-optimizer plugins).
                     '.jpg', '.jpeg', '.png', '.gif', '.ico', '.webp', '.avif',
+                    // Stylesheets: frequently rewritten by themes and optimizer
+                    // plugins, a common source of post-update false positives.
+                    // Strict-mode users can remove it (CSS injection is still a
+                    // vector, defended primarily by CSP in the headers module).
+                    '.css',
                 ),
                 'suspicious_patterns'     => array(
                     'eval(',

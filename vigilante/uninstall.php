@@ -62,6 +62,9 @@ function vigilante_uninstall() {
         'vigilante_activated_time',
         'vigilante_analyzer_last_scan',
         'vigilante_analyzer_history',
+        'vigilante_legacy_backups_cleaned',
+        'vigilante_css_exclusion_migrated',
+        'vigilante_checksum_cache_flushed_290',
     );
 
     foreach ( $options_to_delete as $option ) {
@@ -97,6 +100,10 @@ function vigilante_uninstall() {
     foreach ( $hooks_to_clear as $hook ) {
         wp_clear_scheduled_hook( $hook );
     }
+
+    // Post-update verification events are scheduled with per-update arguments,
+    // so clear every instance regardless of args.
+    wp_unschedule_hook( 'vigilante_fi_postupdate_verify' );
 
     // Delete all user meta with vigilante_ prefix
     // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching

@@ -219,6 +219,14 @@ class Vigilante_File_Integrity {
             add_action( 'vigilante_file_integrity_scan', array( $this, 'run_scheduled_scan' ) );
             $this->schedule_scan();
         }
+
+        // Post-update verification: verify any just-updated plugin/theme against
+        // WordPress.org immediately, and open a short grace window so the
+        // scheduled scan does not raise false positives while wp.org is still
+        // publishing the new version's checksums. Registered regardless of
+        // auto_scan because it reacts to update events, not to the schedule.
+        add_action( 'upgrader_process_complete', array( $this, 'on_upgrade_complete' ), 20, 2 );
+        add_action( 'vigilante_fi_postupdate_verify', array( $this, 'run_postupdate_verify' ) );
     }
 
     /**
@@ -253,6 +261,239 @@ class Vigilante_File_Integrity {
         // Store last scan time
         update_option( 'vigilante_last_integrity_scan', time() );
         update_option( 'vigilante_last_integrity_results', $results );
+    }
+
+    /**
+     * React to a completed plugin/theme update (upgrader_process_complete).
+     *
+     * Opens a short grace window for each updated slug (so the scheduled scan
+     * skips it and the checksum cache is bypassed) and schedules an immediate
+     * verification against WordPress.org. This stops the post-update "files
+     * don't match WordPress.org" false positives and, when WP-Cron is healthy,
+     * verifies the update against WordPress.org right away instead of waiting
+     * for the next scheduled scan. The grace window is intentionally short (30
+     * minutes) so that if WP-Cron never fires the verification, the normal scan
+     * resumes for the slug rather than leaving it unscanned.
+     *
+     * Runs as the old plugin code with the new files already on disk, so slugs
+     * are read from $hook_extra, not from in-memory version constants.
+     *
+     * @param WP_Upgrader|mixed $upgrader   Upgrader instance (unused).
+     * @param array             $hook_extra Update context.
+     */
+    public function on_upgrade_complete( $upgrader, $hook_extra ) {
+        unset( $upgrader );
+        if ( ! is_array( $hook_extra ) || 'update' !== ( $hook_extra['action'] ?? '' ) ) {
+            return;
+        }
+
+        $type    = $hook_extra['type'] ?? '';
+        $targets = array(); // type => list of slugs.
+
+        if ( 'plugin' === $type ) {
+            $files = array();
+            if ( ! empty( $hook_extra['plugins'] ) && is_array( $hook_extra['plugins'] ) ) {
+                $files = $hook_extra['plugins'];
+            } elseif ( ! empty( $hook_extra['plugin'] ) ) {
+                $files = array( $hook_extra['plugin'] );
+            }
+            foreach ( $files as $file ) {
+                $slug = dirname( (string) $file );
+                if ( '.' !== $slug && '' !== $slug ) {
+                    $targets['plugin'][] = $slug;
+                }
+            }
+        } elseif ( 'theme' === $type && ! empty( $hook_extra['themes'] ) && is_array( $hook_extra['themes'] ) ) {
+            foreach ( $hook_extra['themes'] as $slug ) {
+                $slug = (string) $slug;
+                if ( '' !== $slug ) {
+                    $targets['theme'][] = $slug;
+                }
+            }
+        }
+
+        if ( empty( $targets ) ) {
+            return;
+        }
+
+        // Open a short grace window per slug (30 minutes; closed earlier once the
+        // verifier runs). Kept short on purpose: with WP-Cron disabled the
+        // verifier never fires, so a longer window would leave a just-updated
+        // slug unscanned. After it expires the normal scan resumes.
+        foreach ( $targets as $t => $slugs ) {
+            foreach ( array_unique( $slugs ) as $slug ) {
+                set_transient( 'vigilante_fi_grace_' . $t . '_' . md5( $slug ), 1, 30 * MINUTE_IN_SECONDS );
+            }
+        }
+
+        // Verify shortly after the update settles. A single delayed event keeps
+        // the heavy work out of the update request itself.
+        if ( ! wp_next_scheduled( 'vigilante_fi_postupdate_verify', array( $targets ) ) ) {
+            wp_schedule_single_event( time() + 90, 'vigilante_fi_postupdate_verify', array( $targets ) );
+        }
+    }
+
+    /**
+     * Immediate post-update verification callback (vigilante_fi_postupdate_verify).
+     *
+     * @param array $targets type => list of slugs.
+     */
+    public function run_postupdate_verify( $targets ) {
+        if ( ! is_array( $targets ) ) {
+            return;
+        }
+        foreach ( $targets as $type => $slugs ) {
+            if ( 'plugin' !== $type && 'theme' !== $type ) {
+                continue;
+            }
+            foreach ( array_unique( (array) $slugs ) as $slug ) {
+                $this->verify_updated_slug( $type, (string) $slug );
+            }
+        }
+    }
+
+    /**
+     * Verify a single just-updated plugin/theme against fresh wp.org checksums.
+     *
+     * The grace window forces get_*_checksums() to fetch a live manifest, so this
+     * never compares against a manifest cached during wp.org's propagation lag.
+     * Outcomes: checksums not published yet => leave the window to expire and let
+     * the next scan re-check; all files match => close the window early; a file
+     * matches no published hash => a genuine mismatch (right after a legit update
+     * that points at a tampered package), logged as a warning, and the window is
+     * closed so the finding also surfaces in the normal scan.
+     *
+     * @param string $type 'plugin' or 'theme'.
+     * @param string $slug Slug.
+     */
+    private function verify_updated_slug( $type, $slug ) {
+        $grace_key = 'vigilante_fi_grace_' . $type . '_' . md5( $slug );
+
+        if ( 'plugin' === $type ) {
+            if ( ! function_exists( 'get_plugins' ) ) {
+                require_once ABSPATH . 'wp-admin/includes/plugin.php';
+            }
+            $version = '';
+            $name    = $slug;
+            foreach ( get_plugins() as $file => $data ) {
+                if ( dirname( $file ) === $slug ) {
+                    $version = $data['Version'] ?? '';
+                    $name    = $data['Name'] ?? $slug;
+                    break;
+                }
+            }
+            $checksums = $this->get_plugin_checksums( $slug, $version );
+            $base_dir  = WP_PLUGIN_DIR . '/' . $slug;
+        } else {
+            $theme = wp_get_theme( $slug );
+            if ( ! $theme->exists() ) {
+                delete_transient( $grace_key );
+                return;
+            }
+            $version   = $theme->get( 'Version' );
+            $name      = $theme->get( 'Name' );
+            $checksums = $this->get_theme_checksums( $slug, $version );
+            $base_dir  = $theme->get_stylesheet_directory();
+        }
+
+        // Checksums not available yet (propagation lag): leave the grace window
+        // to expire; the next scheduled scan re-verifies once wp.org publishes.
+        if ( is_wp_error( $checksums ) || 'not_found' === $checksums || ! is_array( $checksums ) ) {
+            if ( $this->activity_log ) {
+                $this->activity_log->log(
+                    'file',
+                    'postupdate_pending',
+                    sprintf(
+                        /* translators: 1: Plugin or theme name. */
+                        __( 'Post-update verification pending for %1$s: WordPress.org has not published the new version checksums yet. It will be re-verified automatically.', 'vigilante' ),
+                        $name
+                    ),
+                    array(
+                        'type'    => $type,
+                        'slug'    => $slug,
+                        'version' => $version,
+                    ),
+                    'info'
+                );
+            }
+            return;
+        }
+
+        // Compare every shipped file against the fresh manifest.
+        $mismatched = array();
+        foreach ( $checksums as $file => $expected ) {
+            if ( in_array( $file, $this->plugin_known_false_positives, true ) ) {
+                continue;
+            }
+            $path = $base_dir . '/' . $file;
+            if ( $this->is_path_excluded( $path ) || $this->is_extension_excluded( $path ) ) {
+                continue;
+            }
+            // Honor the user ignore list, exactly as run_scan()'s filter_ignored()
+            // does, so the verifier never warns about a file the user silenced.
+            $rel = $type . 's/' . $slug . '/' . $file;
+            if ( in_array( $rel, (array) $this->ignored_files, true ) ) {
+                continue;
+            }
+            if ( ! file_exists( $path ) ) {
+                continue;
+            }
+            if ( ! $this->hash_matches_published( $path, $expected ) ) {
+                $mismatched[] = $rel;
+            }
+        }
+
+        // Verified clean: close the grace window so normal scanning resumes.
+        if ( empty( $mismatched ) ) {
+            delete_transient( $grace_key );
+            if ( $this->activity_log ) {
+                $this->activity_log->log(
+                    'file',
+                    'postupdate_verified',
+                    sprintf(
+                        /* translators: 1: Plugin or theme name. */
+                        __( 'Post-update verification passed: %1$s matches the WordPress.org distribution.', 'vigilante' ),
+                        $name
+                    ),
+                    array(
+                        'type'    => $type,
+                        'slug'    => $slug,
+                        'version' => $version,
+                    ),
+                    'info'
+                );
+            }
+            return;
+        }
+
+        // Genuine mismatch right after a legitimate update: likely a tampered
+        // package. Close the window so the normal scan also surfaces it, and log
+        // a warning (Audit Alerts escalates warnings if configured).
+        delete_transient( $grace_key );
+        if ( $this->activity_log ) {
+            $this->activity_log->log(
+                'file',
+                'postupdate_mismatch',
+                sprintf(
+                    /* translators: 1: Number of files, 2: Plugin or theme name. */
+                    _n(
+                        'Post-update integrity check failed: %1$d file in %2$s does not match the WordPress.org distribution.',
+                        'Post-update integrity check failed: %1$d files in %2$s do not match the WordPress.org distribution.',
+                        count( $mismatched ),
+                        'vigilante'
+                    ),
+                    count( $mismatched ),
+                    $name
+                ),
+                array(
+                    'type'    => $type,
+                    'slug'    => $slug,
+                    'version' => $version,
+                    'files'   => array_slice( $mismatched, 0, 50 ),
+                ),
+                'warning'
+            );
+        }
     }
 
     /**
@@ -931,9 +1172,17 @@ class Vigilante_File_Integrity {
             }
 
             $plugin_slug = dirname( $plugin_file );
-            
+
             // Skip single-file plugins
             if ( '.' === $plugin_slug ) {
+                continue;
+            }
+
+            // Skip slugs in their post-update grace window: wp.org may still be
+            // publishing the new version's checksums, so a scheduled scan here
+            // would raise benign "modified/extra" noise. The dedicated post-update
+            // verifier (vigilante_fi_postupdate_verify) handles these instead.
+            if ( $this->in_post_update_grace( 'plugin', $plugin_slug ) ) {
                 continue;
             }
 
@@ -976,15 +1225,13 @@ class Vigilante_File_Integrity {
                     continue; // Some files might not be installed
                 }
 
-                $actual_hash = md5_file( $file_path );
-
-                if ( $actual_hash !== $expected_hash ) {
+                if ( ! $this->hash_matches_published( $file_path, $expected_hash ) ) {
                     $results['modified'][] = array(
                         'file'          => 'plugins/' . $plugin_slug . '/' . $file,
                         'type'          => 'plugin',
                         'plugin'        => $plugin_data['Name'],
-                        'expected_hash' => $expected_hash,
-                        'actual_hash'   => $actual_hash,
+                        'expected_hash' => $this->expected_hash_label( $expected_hash ),
+                        'actual_hash'   => md5_file( $file_path ),
                     );
                 } else {
                     $results['ok']++;
@@ -1008,6 +1255,78 @@ class Vigilante_File_Integrity {
     }
 
     /**
+     * Whether a file on disk matches a hash WordPress.org publishes for it.
+     *
+     * The wp.org checksums JSON gives, per file, an md5 (and usually a sha256)
+     * that may be a single string OR an array of strings: a file whose content
+     * differs across the re-tagged zips that one checksums file covers (e.g. a
+     * release that shares its checksums file with a beta) gets every valid hash
+     * listed as an array. The old `$actual !== $expected` comparison evaluated a
+     * 32-char string against an array as unequal unconditionally, so those files
+     * were always reported as "modified" even when the on-disk hash was one of
+     * the published ones. Match against membership, and accept either md5 or
+     * sha256, so the comparison is correct and strictly stronger than md5-only.
+     *
+     * Robust to both shapes: the new record array( 'md5' => ..., 'sha256' => ... )
+     * and a legacy cached value (a bare md5 string or array), so a transient
+     * cached by an older version still compares correctly until it expires.
+     *
+     * @param string       $file_path Absolute path to the file on disk.
+     * @param array|string $expected  Record array, or a legacy md5 string|array.
+     * @return bool True when the file matches a published hash.
+     */
+    private function hash_matches_published( $file_path, $expected ) {
+        $md5 = $expected;
+        $sha = null;
+        if ( is_array( $expected ) && ( array_key_exists( 'md5', $expected ) || array_key_exists( 'sha256', $expected ) ) ) {
+            $md5 = isset( $expected['md5'] ) ? $expected['md5'] : null;
+            $sha = isset( $expected['sha256'] ) ? $expected['sha256'] : null;
+        }
+
+        if ( null !== $md5 && in_array( md5_file( $file_path ), (array) $md5, true ) ) {
+            return true;
+        }
+        if ( ! empty( $sha ) && in_array( hash_file( 'sha256', $file_path ), (array) $sha, true ) ) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Human-readable expected-hash value for a modified-file result record.
+     *
+     * The published md5 may be a string or an array; flatten it for storage.
+     *
+     * @param array|string $expected Record array or legacy md5 string|array.
+     * @return string
+     */
+    private function expected_hash_label( $expected ) {
+        $md5 = ( is_array( $expected ) && array_key_exists( 'md5', $expected ) ) ? $expected['md5'] : $expected;
+        if ( is_array( $md5 ) ) {
+            return implode( ', ', array_map( 'strval', $md5 ) );
+        }
+        return (string) $md5;
+    }
+
+    /**
+     * Whether a plugin/theme slug is inside its post-update grace window.
+     *
+     * Set by on_upgrade_complete() right after WordPress finishes updating a
+     * plugin or theme. During the window the checksum cache is bypassed (so a
+     * stale manifest cached during wp.org's propagation lag is never reused) and
+     * the scheduled scan skips the slug (the dedicated post-update verifier
+     * handles it instead), which is what stops the "files don't match
+     * WordPress.org" false positives right after an update.
+     *
+     * @param string $type 'plugin' or 'theme'.
+     * @param string $slug Slug.
+     * @return bool
+     */
+    private function in_post_update_grace( $type, $slug ) {
+        return (bool) get_transient( 'vigilante_fi_grace_' . $type . '_' . md5( $slug ) );
+    }
+
+    /**
      * Get plugin checksums from WordPress.org
      *
      * @param string $slug    Plugin slug.
@@ -1015,11 +1334,18 @@ class Vigilante_File_Integrity {
      * @return array|WP_Error|string
      */
     private function get_plugin_checksums( $slug, $version ) {
-        // Check cache first
         $cache_key = 'vigilante_plugin_checksums_' . md5( $slug . $version );
-        $cached = get_transient( $cache_key );
-        if ( false !== $cached ) {
-            return $cached;
+
+        // During the post-update grace window, bypass the cache entirely so a
+        // manifest cached while wp.org was still propagating the new version's
+        // checksums can never be reused. Fetch fresh and do not write it back.
+        $grace = $this->in_post_update_grace( 'plugin', $slug );
+
+        if ( ! $grace ) {
+            $cached = get_transient( $cache_key );
+            if ( false !== $cached ) {
+                return $cached;
+            }
         }
 
         $url = sprintf(
@@ -1036,8 +1362,10 @@ class Vigilante_File_Integrity {
 
         $status = wp_remote_retrieve_response_code( $response );
         if ( 200 !== $status ) {
-            // Cache "not found" to avoid repeated requests
-            set_transient( $cache_key, 'not_found', HOUR_IN_SECONDS );
+            // Cache "not found" to avoid repeated requests (never during grace).
+            if ( ! $grace ) {
+                set_transient( $cache_key, 'not_found', HOUR_IN_SECONDS );
+            }
             return 'not_found';
         }
 
@@ -1047,13 +1375,21 @@ class Vigilante_File_Integrity {
             return new WP_Error( 'no_checksums', __( 'No checksums found', 'vigilante' ) );
         }
 
+        // Store the full per-file record (md5 + sha256). Either value can be a
+        // string or an array of strings; hash_matches_published() handles both.
         $checksums = array();
         foreach ( $body['files'] as $file => $data ) {
-            $checksums[ $file ] = $data['md5'];
+            $checksums[ $file ] = array(
+                'md5'    => isset( $data['md5'] ) ? $data['md5'] : null,
+                'sha256' => isset( $data['sha256'] ) ? $data['sha256'] : null,
+            );
         }
 
-        // Cache for 24 hours
-        set_transient( $cache_key, $checksums, DAY_IN_SECONDS );
+        // Cache for 24 hours (never during grace, to avoid persisting a manifest
+        // wp.org may still be regenerating).
+        if ( ! $grace ) {
+            set_transient( $cache_key, $checksums, DAY_IN_SECONDS );
+        }
 
         return $checksums;
     }
@@ -1079,6 +1415,11 @@ class Vigilante_File_Integrity {
             // Check time limit
             if ( $this->is_time_exceeded() ) {
                 break;
+            }
+
+            // Skip slugs in their post-update grace window (see scan_plugins()).
+            if ( $this->in_post_update_grace( 'theme', $theme_slug ) ) {
+                continue;
             }
 
             $version = $theme->get( 'Version' );
@@ -1119,15 +1460,13 @@ class Vigilante_File_Integrity {
                     continue;
                 }
 
-                $actual_hash = md5_file( $file_path );
-
-                if ( $actual_hash !== $expected_hash ) {
+                if ( ! $this->hash_matches_published( $file_path, $expected_hash ) ) {
                     $results['modified'][] = array(
                         'file'          => 'themes/' . $theme_slug . '/' . $file,
                         'type'          => 'theme',
                         'theme'         => $theme->get( 'Name' ),
-                        'expected_hash' => $expected_hash,
-                        'actual_hash'   => $actual_hash,
+                        'expected_hash' => $this->expected_hash_label( $expected_hash ),
+                        'actual_hash'   => md5_file( $file_path ),
                     );
                 } else {
                     $results['ok']++;
@@ -1156,11 +1495,16 @@ class Vigilante_File_Integrity {
      * @return array|WP_Error
      */
     private function get_theme_checksums( $slug, $version ) {
-        // Check cache first
         $cache_key = 'vigilante_theme_checksums_' . md5( $slug . $version );
-        $cached = get_transient( $cache_key );
-        if ( false !== $cached ) {
-            return $cached;
+
+        // Bypass the cache during the post-update grace window (see plugin path).
+        $grace = $this->in_post_update_grace( 'theme', $slug );
+
+        if ( ! $grace ) {
+            $cached = get_transient( $cache_key );
+            if ( false !== $cached ) {
+                return $cached;
+            }
         }
 
         $url = sprintf(
@@ -1177,8 +1521,10 @@ class Vigilante_File_Integrity {
 
         $status = wp_remote_retrieve_response_code( $response );
         if ( 200 !== $status ) {
-            // Cache "not found" to avoid repeated requests
-            set_transient( $cache_key, 'not_found', HOUR_IN_SECONDS );
+            // Cache "not found" to avoid repeated requests (never during grace).
+            if ( ! $grace ) {
+                set_transient( $cache_key, 'not_found', HOUR_IN_SECONDS );
+            }
             return new WP_Error( 'not_found', __( 'Checksums not available', 'vigilante' ) );
         }
 
@@ -1188,13 +1534,20 @@ class Vigilante_File_Integrity {
             return new WP_Error( 'no_checksums', __( 'No checksums found', 'vigilante' ) );
         }
 
+        // Store the full per-file record (md5 + sha256), either of which may be a
+        // string or an array; hash_matches_published() handles both shapes.
         $checksums = array();
         foreach ( $body['files'] as $file => $data ) {
-            $checksums[ $file ] = $data['md5'];
+            $checksums[ $file ] = array(
+                'md5'    => isset( $data['md5'] ) ? $data['md5'] : null,
+                'sha256' => isset( $data['sha256'] ) ? $data['sha256'] : null,
+            );
         }
 
-        // Cache for 24 hours
-        set_transient( $cache_key, $checksums, DAY_IN_SECONDS );
+        // Cache for 24 hours (never during grace).
+        if ( ! $grace ) {
+            set_transient( $cache_key, $checksums, DAY_IN_SECONDS );
+        }
 
         return $checksums;
     }
@@ -1513,6 +1866,26 @@ class Vigilante_File_Integrity {
         // Deprecated dynamic function constructor, nearly always malicious in modern code
         if ( ! empty( $cf ) && stripos( $content, $cf ) !== false ) {
             return $cf . ')';
+        }
+
+        // Remote fetch piped into unserialize: a PHP object-injection / supply-chain
+        // vector seen in trojanized or nulled plugins (download a payload from a
+        // remote URL and unserialize it). Requires BOTH a remote-fetch call AND
+        // unserialize in the same file, because unserialize() on its own is common
+        // in legitimate code (caches, transients) and would flood results.
+        $us = $fragments['us'] ?? '';
+        if ( ! empty( $us ) && stripos( $content, $us ) !== false ) {
+            $remote_fetchers = array(
+                $fragments['fg'] ?? '', // file_get_contents
+                $fragments['wr'] ?? '', // wp_remote_get
+                $fragments['rb'] ?? '', // wp_remote_retrieve_body
+                $fragments['ce'] ?? '', // curl_exec
+            );
+            foreach ( $remote_fetchers as $rf ) {
+                if ( '' !== $rf && stripos( $content, $rf ) !== false ) {
+                    return $rf . '() + ' . $us . '() remote deserialization';
+                }
+            }
         }
 
         // preg_replace with /e modifier (arbitrary code execution, deprecated)

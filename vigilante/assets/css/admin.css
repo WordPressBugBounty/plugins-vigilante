@@ -1029,6 +1029,14 @@
 #vigilante-activity-log-table .column-ip { width: 120px; white-space: nowrap; }
 #vigilante-activity-log-table .column-details { width: 60px; white-space: nowrap; }
 
+/* IPv6 addresses (and long hashes) are single unbreakable tokens: colons are
+   not break opportunities and WP core's word-wrap:break-word does not lower a
+   cell's min-content. Under table-layout:auto that pushes the IP cell — and the
+   whole table — past the viewport on mid-width screens, so the page scrolls
+   horizontally and slides under the fixed admin menu. Let the value wrap (same
+   technique as the log-details modal). IPv4 is short and unaffected. */
+#vigilante-activity-log-table td code { word-break: break-all; }
+
 /* Badges */
 .vigilante-badge {
     display: inline-block;
@@ -1104,10 +1112,21 @@
 }
 
 .vigilante-notification-submit {
+    /* Flex + gap so the "Send test email" button keeps a gap from "Save
+       Settings" even when a longer translated label wraps it to the next line
+       (inline whitespace collapses on wrap and glues them together otherwise). */
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
     margin: 8px 0 0 !important;
     padding: 0 !important;
     background: none !important;
     border: none !important;
+}
+
+.vigilante-notification-submit .button {
+    margin: 0 !important;
 }
 
 .vigilante-notification-summary h3 {

@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.8.0
+Stable tag: 2.9.0
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -18,17 +18,7 @@ Vigilant provides enterprise-level WordPress security features completely free. 
 
 Protect your site with a complete security suite: firewall, two-factor authentication, brute force protection, security headers, file integrity monitoring, closed plugin detection, malware detection, user management, security audit logging, under attack mode and much more.
 
-### Instant Protection
-
-Once activated, Vigilant immediately applies essential security measures:
-
-* Firewall rules against common attacks (SQL injection, XSS, file inclusion)
-* Security headers for browser protection
-* Login attempt monitoring
-* XML-RPC blocking
-* WordPress version hiding
-* Sensitive file protection (.htaccess, wp-config.php)
-* Automatic backup of your existing configuration files
+Once activated, Vigilant immediately applies firewall rules against common attacks (SQL injection, XSS, file inclusion), security headers, login attempt monitoring, XML-RPC blocking, WordPress version hiding and sensitive file protection (.htaccess, wp-config.php), after automatically backing up your existing configuration files.
 
 ### One-Click Security Presets
 
@@ -40,41 +30,39 @@ Choose a preset and get protected instantly:
 
 You can always customize individual settings after applying a preset.
 
-### Under Attack Mode
+== Under Attack Mode ==
 
 Is your site under active attack? Activate Under Attack mode with one click and stop malicious traffic instantly:
 
 * **JavaScript challenge** - Every visitor must pass an automatic browser verification before accessing your site. Real browsers solve it in seconds, bots get blocked completely
 * **Aggressive rate limiting** - Requests limited to 30 per minute with 15-minute blocks for offenders
-* **HTTP method restriction** - Only GET, POST, and HEAD allowed. PUT, DELETE, PATCH, OPTIONS, and TRACE are blocked
+* **HTTP method restriction** - Only GET, POST and HEAD allowed; PUT, DELETE, PATCH, OPTIONS and TRACE are blocked
 * **Empty user agent blocking** - Requests without a user agent header are rejected
-* **Full XML-RPC lockdown** - All XML-RPC access is blocked during the attack
+* **Full XML-RPC lockdown** during the attack
 * **REST API restriction** - Only authenticated users can access the REST API
-* **Auto-deactivation** - Mode automatically turns off after 4 hours so you never forget it's on
-* **Email notifications** - Get notified when the mode is activated and deactivated
-* **HMAC-signed cookies** - Verified visitors receive a cryptographically signed cookie so they only see the challenge once
+* **Auto-deactivation** - Mode turns off after 4 hours so you never forget it's on
+* **Email notifications** when the mode activates and deactivates
+* **HMAC-signed cookies** - Verified visitors get a signed cookie so they only see the challenge once
 
-Under Attack mode works independently from your preset configuration. Your regular security settings are preserved and restored when the mode deactivates.
+Under Attack mode works independently from your preset configuration. Your regular settings are preserved and restored when the mode deactivates.
 
-### Core Security Features
+== Two-Factor Authentication (2FA) ==
 
-**Two-Factor Authentication (2FA)**
+Add a second verification step to your WordPress login:
 
-Add a second verification step to your WordPress login. Choose the method that works best for your team:
-
-* **Authenticator app (TOTP)** - Google Authenticator, Authy, Microsoft Authenticator, or any TOTP-compatible app
+* **Authenticator app (TOTP)** - Google Authenticator, Authy, Microsoft Authenticator or any TOTP-compatible app
 * **Email codes** - One-time 6-digit verification codes sent via email
 * QR code setup directly in user profiles
 * 10 backup codes for emergency access if you lose your device
 * Configurable grace period for users to set up their authenticator app
-* Trusted devices feature - optionally allow users to skip 2FA on recognized devices for 30 days
-* Role-based enforcement - require 2FA for administrators, editors, or any role
+* Trusted devices - optionally let users skip 2FA on recognized devices for 30 days
+* Role-based enforcement - require 2FA for administrators, editors or any role
 * Exclude specific users from 2FA requirements
 * Admin tool to reset TOTP for users who lost their authenticator
-* Configurable code expiry, attempt limits, and email sender name
-* User notification emails when 2FA is enabled or method changes
+* Configurable code expiry, attempt limits and email sender name
+* User notification emails when 2FA is enabled or the method changes
 
-**Firewall Protection**
+== Firewall Protection ==
 
 Block malicious requests before they reach WordPress:
 
@@ -91,11 +79,11 @@ Block malicious requests before they reach WordPress:
 * User-Agent whitelist and blacklist with partial matching
 * Visitor IP detection control - read the real IP directly from the connection (a spoof-proof default) or from a proxy header when behind Cloudflare, a reverse proxy or a load balancer, with an admin notice if a proxy is detected but not configured
 * HTTP method restriction
-* Server-level file protection via .htaccess: block direct access to wp-config.php, .htaccess, wp-includes/, and sensitive files (.log, .sql, .bak, .ini, debug.log, readme.html, etc.), and optionally wp-cron.php external access
+* Server-level file protection via .htaccess: block direct access to wp-config.php, .htaccess, wp-includes/ and sensitive files (.log, .sql, .bak, .ini, debug.log, readme.html, etc.), and optionally wp-cron.php external access
 * Block PHP execution in /uploads (one of the most common post-exploit vectors)
 * Disable directory browsing
 
-**Login Security**
+== Login Security ==
 
 Stop unauthorized access attempts:
 
@@ -104,23 +92,23 @@ Stop unauthorized access attempts:
 * Custom login URL - hide wp-login.php from bots
 * Login URL change notifications to all admin-area users
 * Hide login error messages - don't reveal valid usernames
-* XML-RPC disable - block this common attack vector, with a separate toggle for just the pingback method if you still need other XML-RPC features
+* XML-RPC disable, with a separate toggle for just the pingback method if you still need other XML-RPC features
 * Application passwords control
 * Email notification when an IP is blocked for exceeding login attempts
 * Admin login notifications via email
 * IP whitelist for trusted locations
 
-**User Security**
+== User Security ==
 
 Comprehensive user account protection:
 
 * Block insecure usernames (admin, test, root, etc.) on new registrations
 * Warn about existing users with insecure usernames so you can rename or remove them
-* Block author scanning — intercept `?author=N` URLs so WordPress doesn't redirect them to `/author/USERNAME/` and leak the login slug
+* Block author scanning - intercept `?author=N` URLs so WordPress doesn't redirect them to `/author/USERNAME/` and leak the login slug
 * Force strong passwords with minimum length
 * Password expiration with configurable intervals
 * Password history - prevent reusing old passwords
-* Force password reset — by specific users, by role, or all users (post-hack recovery)
+* Force password reset - by specific users, by role, or all users (post-hack recovery)
 * Session limits - control concurrent logins per user
 * Session management - view and revoke active sessions
 * Email verification for new registrations
@@ -128,7 +116,7 @@ Comprehensive user account protection:
 * Admin account monitoring - alerts for new admins, email changes, password changes, privilege escalation
 * Display name protection - prevent exposing login username publicly
 
-**Security Headers**
+== Security Headers ==
 
 Achieve Grade A security ratings:
 
@@ -140,31 +128,28 @@ Achieve Grade A security ratings:
 * Permissions Policy (camera, microphone, geolocation, payment, USB)
 * Cross-Origin policies (COEP, COOP, CORP)
 * HTTPS enforcer with automatic mixed content fix
-* Server fingerprint hiding — `Server: Apache/x.y.z` header neutralized, `X-Powered-By` and other fingerprinting headers stripped from responses
+* Server fingerprint hiding - the `Server:` header is neutralized and `X-Powered-By` and other fingerprinting headers are stripped from responses
 
-**File Integrity Monitoring**
+== File Integrity Monitoring ==
 
 Detect unauthorized changes to your files and compromised plugins:
 
 * WordPress core verification against official checksums
 * Plugin and theme file monitoring with WordPress.org checksums
-* Critical config files (wp-config.php, .htaccess) monitored against baseline — detects code injection even in files with no official checksum
-* Closed and removed plugins detection — daily check against the WordPress.org plugin repository, flags any installed plugin closed for malware, security issues, guideline violations or supply chain compromises. Detects two flavors of closure: explicit with closure date and reason, and "removed" (metadata hidden by wp.org, typical of Security Issue takedowns). Per-slug Ignore for legacy plugins you can't uninstall yet
+* Critical config files (wp-config.php, .htaccess) monitored against baseline, detecting code injection even in files with no official checksum
+* Closed and removed plugins detection - daily check against the WordPress.org repository, flagging any installed plugin closed for malware, security issues or guideline violations, including both explicit closures and silent "removed" takedowns, with per-slug Ignore for legacy plugins you can't uninstall yet
 * Line-level diff view of changes, with per-file approval workflow
 * Suspicious code scanning for plugins and themes without checksums
 * Extra file detection in plugins and themes (files not in original distribution)
-* Two-level detection: strict obfuscation combos for plugins, broad patterns for uploads
-* Uploads directory scanning for PHP files, double extensions, and .htaccess
+* Uploads directory scanning for PHP files, double extensions and .htaccess, with smart classification of dangerous rules vs protective ones
 * Root directory scanning for non-core PHP files (common attack vector)
-* Smart .htaccess classification in uploads - distinguishes dangerous rules from protective ones
 * String concatenation obfuscation detection
-* Configurable notification levels (all issues, suspicious only, or disabled)
-* Ignore list to dismiss known files from results
+* Configurable notification levels and an ignore list to dismiss known files
 * Excluded paths and file extensions
 * Scheduled automatic scans (daily, weekly)
 * HTML formatted email alerts with severity sections, including a dedicated section for closed plugins
 
-**Security Audit**
+== Security Audit ==
 
 Track everything happening on your site:
 
@@ -178,58 +163,54 @@ Track everything happening on your site:
 * Enhanced log detail popup with grouped sections and quick actions
 * One-click add IP or User-Agent to firewall whitelist/blacklist from log entries
 * Direct IP lookup links to AbuseIPDB
-* Configurable retention period
-* Export logs to CSV
-* Filter by event type, severity, request method, or date
+* Configurable retention period, CSV export, and filtering by event type, severity, request method or date
 
-**Audit Alerts**
-
-Get an email when the audit log points to something worth your attention — off by default, configured under Security Audit:
+**Audit Alerts** - get an email when the audit log points to something worth your attention, off by default and configured under Security Audit:
 
 * Immediate alerts the moment a serious event is logged, by minimum severity (a new administrator, a closed plugin or a privilege escalation are all logged as Critical)
-* Threshold alerts when a category spikes — firewall blocks, login failures, user, plugin, file integrity, security, system and content events — over a 30-minute, 1, 6 or 24 hour window, counting only warning and critical events so routine activity never trips them
+* Threshold alerts when a category spikes - firewall blocks, login failures, user, plugin, file integrity, security, system and content events - over a 30-minute, 1, 6 or 24 hour window, counting only warning and critical events so routine activity never trips them
 * A single anti-repeat cooldown keeps a storm of events down to one notice instead of flooding your inbox
 * Active alerts surface in Settings & Tools, the Dashboard, the Configuration Score and the Security Check
-* "Send test email" button to confirm delivery, shared by Settings & Tools, File Integrity and Audit Alerts
+* "Send test email" button to confirm delivery
 
-**Security Check**
+== Security Check ==
 
-On-demand security audit built into the Dashboard. No external services, no accounts, no API keys — everything runs on your server:
+On-demand security audit built into the Dashboard. No external services, no accounts, no API keys - everything runs on your server:
 
-* 40+ checks across 6 categories: SSL/TLS, HTTP Headers, WP Exposure, Access & Auth, Sensitive Files, and Internal Checks
-* Single 0–100 score with A–E grade, plus per-category breakdown and explanatory details for every check
-* 15 exclusive internal checks impossible from the outside: PHP end-of-life status, pending updates, inactive plugins, closed or removed plugins in the WordPress.org repository, file permissions, default salts detection, `wp_` table prefix, `admin` username, administrators without 2FA enrolled, module status, recent audit errors, last File Integrity scan result, and whether audit alerts are configured
-* DNS-only reputation lookup against Spamhaus ZEN, Barracuda BRBL and SpamCop SCBL (informational — listings are flagged but don't deduct from the score)
+* 40+ checks across 6 categories: SSL/TLS, HTTP Headers, WP Exposure, Access & Auth, Sensitive Files and Internal Checks
+* Single 0-100 score with A-E grade, plus per-category breakdown and explanatory details for every check
+* 15 exclusive internal checks impossible from the outside: PHP end-of-life status, pending updates, inactive plugins, closed or removed plugins, file permissions, default salts detection, `wp_` table prefix, `admin` username, administrators without 2FA enrolled, module status, recent audit errors, last File Integrity scan result and whether audit alerts are configured
+* DNS-only reputation lookup against Spamhaus ZEN, Barracuda BRBL and SpamCop SCBL (informational - listings are flagged but don't deduct from the score)
 * Two-phase scan: fast local checks appear in under a second, remote checks stream in as they complete
 * Weekly automatic scan with opt-in email alert if the score drops by 10+ points or a new critical check starts failing
-* 30-scan history with sparkline trend and delta chip so you can see how changes to your site affect security over time
-* "Go to setting" fix link on every failing check — jump straight to the exact Vigilant field that resolves it, with a visual pulse on arrival
-* Smart header diagnostics report "configured but not being served" when a cache/CDN overrides your headers, instead of just marking it green or red
+* 30-scan history with sparkline trend and delta chip
+* "Go to setting" fix link on every failing check, jumping straight to the exact Vigilant field that resolves it
+* Smart header diagnostics that report "configured but not being served" when a cache/CDN overrides your headers
 
-**WordPress Hardening**
+== WordPress Hardening ==
 
-Layered protection at the WordPress level — admin, content, head, feeds, and database:
+Layered protection at the WordPress level - admin, content, head, feeds and database:
 
-* Lock down the WordPress admin: disable the built-in plugin and theme file editor, block installations and updates from the admin area, and force HTTPS for the admin area. Compatible with any hosting layout, including managed hosts and custom configurations that already define some of these settings on their own — Vigilant always respects values already in place and never overrides them
-* Disable WordPress's internal page-view cron when you already have a real server-side cron job configured, removing the small performance hit caused by triggering scheduled tasks on every visit
+* Lock down the admin: disable the built-in plugin and theme file editor, block installations and updates from the admin area, and force HTTPS for the admin area. Compatible with any hosting layout, respecting values already in place and never overriding them
+* Disable WordPress's internal page-view cron when you already have a real server-side cron job configured
 * Dashboard warning when debug mode is left enabled in production, so error output never leaks to visitors
-* Hide your WordPress version everywhere it can leak: from the HTML head, from RSS and Atom feeds, and optionally from every script and style URL on the front-end. The asset cleanup is precise — it only strips the WordPress version itself, leaving versions added by plugins and themes intact so their cache busting keeps working
-* Automatic daily removal of readme.html, license.txt, and licencia.txt from the WordPress root, which otherwise expose your WordPress version to anyone visiting them directly
-* HTML head cleanup — remove the RSD link, Windows Live Writer manifest, shortlink header, and REST API discovery link
-* Database hardening — security check for the default `wp_` table prefix and one-click rename tool with full backup before the change
-* Comment security — honeypot field against spam bots, force moderation on every new comment, close comments on old posts after a configurable number of days, disable pingbacks and trackbacks
-* Feed management — completely disable RSS and Atom feeds, or only disable them when the site has no published content
+* Hide your WordPress version everywhere it can leak: from the HTML head, from RSS and Atom feeds, and optionally from every script and style URL on the front-end (stripping only the WordPress version itself, leaving plugin and theme cache busting intact)
+* Automatic daily removal of readme.html, license.txt and licencia.txt from the WordPress root, which otherwise expose your version
+* HTML head cleanup - remove the RSD link, Windows Live Writer manifest, shortlink header and REST API discovery link
+* Database hardening - check for the default `wp_` table prefix and one-click rename tool with full backup before the change
+* Comment security - honeypot field against spam bots, force moderation on every new comment, close comments on old posts, disable pingbacks and trackbacks
+* Feed management - completely disable RSS and Atom feeds, or only disable them when the site has no published content
 
-**REST API Security**
+== REST API Security ==
 
 Control API access to your site:
 
 * Three access modes: public (default WordPress behavior), authenticated only (closes the API to anonymous visitors), or selective (custom allow/block lists)
 * Block user enumeration via `/wp-json/wp/v2/users`
 * Protect any list of sensitive endpoints from anonymous access
-* Per-plugin compatibility toggles so authenticated mode doesn't break the front-end: WooCommerce, Contact Form 7, Gravity Forms, WPForms, Elementor, Jetpack. oEmbed and Site Health endpoints stay accessible by default so embeds and the Tools > Site Health screen keep working
+* Per-plugin compatibility toggles so authenticated mode doesn't break the front-end: WooCommerce, Contact Form 7, Gravity Forms, WPForms, Elementor, Jetpack. oEmbed and Site Health endpoints stay accessible by default
 
-### Security Tools
+== Security Tools ==
 
 Utilities included:
 
@@ -239,25 +220,17 @@ Utilities included:
 * **Manual Backup** - Create backups of .htaccess and wp-config.php on demand
 * **Reset to Defaults** - Start fresh with one click
 
-### Safe by Design
+== Safe by Design ==
 
-**Automatic Backup System**
-
-Your existing .htaccess, wp-config.php, and robots.txt are automatically backed up before any modifications. Backups are stored in the WordPress database, never as files under the web root, and verified with MD5 checksums.
-
-**Clean Rollback**
+Your existing .htaccess, wp-config.php and robots.txt are automatically backed up before any modifications. Backups are stored in the WordPress database, never as files under the web root, and verified with MD5 checksums.
 
 When you deactivate Vigilant, all security rules are automatically removed and your original configuration files are restored. No leftover code, no broken sites.
 
-### Why choose Vigilant?
+== Why Vigilant? ==
 
-Most WordPress security plugins reserve their best features for paid plans. Vigilant gives you everything upfront — no premium tier, no feature locks, no upsells. Firewall, 2FA with authenticator app, security headers, file integrity scanner, security audit, on-demand Security Check with weekly regression alerts, and more. All free, all maintained, all following WordPress coding standards.
+Most WordPress security plugins reserve their best features for paid plans. Vigilant gives you everything upfront - no premium tier, no feature locks, no upsells. Firewall, 2FA with authenticator app, security headers, file integrity scanner, security audit, on-demand Security Check with weekly regression alerts, and more. All free, all maintained, all following WordPress coding standards.
 
-If your current security plugin asks you to pay for features that should be basic, take a look at what Vigilant offers out of the box.
-
-### How does Vigilant compare?
-
-We maintain a detailed feature comparison between Vigilant and other popular security plugins (Wordfence, Solid Security, AIOS, Sucuri, SG Security). See what each plugin offers in its free version and where Vigilant fills the gaps.
+We maintain a detailed feature comparison between Vigilant and other popular security plugins (Wordfence, Solid Security, AIOS, Sucuri, SG Security). See what each offers in its free version and where Vigilant fills the gaps.
 
 &rarr; [View the full comparison](https://vigilante.works/comparison.html)
 
@@ -439,16 +412,18 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
-= 2.8.0 =
-* New: Audit Alerts. Vigilant can now email you when something on the site deserves your attention, configured under Security Audit and off by default. Immediate alerts send an email the moment a serious event is logged, by severity — a new administrator, a closed plugin or a privilege escalation are all logged as Critical. Threshold alerts watch for a spike of warning or critical events in a category (firewall, login, users, plugins, file integrity, security, system, and the content categories) within a 1, 6 or 24 hour window, ignoring routine info-level activity. A per-event and per-category cooldown keeps a storm of events down to a single notice instead of flooding your inbox. The active alerts appear in Settings & Tools next to the other notifications, and the Dashboard, Configuration Score and Security Check now reflect whether alerts are set up.
-* New: "Send test email" button in Settings & Tools, File Integrity and Audit Alerts, so you can confirm that notifications actually reach your inbox.
+= 2.9.0 =
+* New: Vigilant now verifies any plugin or theme against the official WordPress.org files the moment it finishes updating, instead of waiting for the next scheduled scan. If an update has been tampered with, the mismatch is caught and recorded right away.
+* Improved: stylesheets (.css) are excluded from integrity scanning by default. Themes and optimization plugins rewrite them constantly, which was a frequent source of false "modified file" alerts; strict-mode users can re-enable .css in the scan settings.
+* Improved: the scanner detects one more obfuscation technique used by tampered or nulled plugins, downloading a remote payload and unserializing it.
+* Fix: File Integrity no longer reports false "modified" or "extra" files right after you update a plugin or theme. When WordPress.org publishes several valid checksums for a file (common in re-tagged releases) the file is now matched against any of them, and right after an update Vigilant fetches fresh checksums instead of reusing a copy cached while WordPress.org was still publishing the new version. Verification now also uses SHA-256 in addition to MD5.
 
 For older changelog entries, please check the [changelog.txt](https://plugins.svn.wordpress.org/vigilante/trunk/changelog.txt) file
 
 == Upgrade Notice ==
 
-= 2.8.0 =
-New Audit Alerts: get an email when a serious event is logged or when activity spikes in a category (firewall, login, users, plugins), with a cooldown to avoid floods. Set it up under Security Audit; it is off by default.
+= 2.9.0 =
+Fixes the false "modified file" alerts that appeared right after updating a plugin or theme, and now verifies updates against WordPress.org the moment they install. CSS files are excluded by default to cut scan noise.
 
 == Support ==
 
