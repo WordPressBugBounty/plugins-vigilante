@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.9.0
+Stable tag: 2.9.1
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -412,6 +412,10 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 2.9.1 =
+* Fix: the file integrity scanner no longer raises false "suspicious code" or "injected file" alerts on legitimate themes and plugins (for example the Astra theme). It now requires a real unserialize() call sitting next to a remote request before it warns about remote deserialization, instead of firing whenever both merely appear somewhere in the same file, and it matches function names as whole tokens so safe names such as maybe_unserialize() and wpcom_vip_file_get_contents() are no longer mistaken for their dangerous look-alikes.
+* Fix: no more false "modified file" alerts when a host or deployment tool rewrites a file's line endings (CRLF) or adds a UTF-8 byte order mark without changing any code. Those files are now re-checked against a normalized copy before being reported, and files already published on WordPress.org are recognized regardless of path-separator differences.
+
 = 2.9.0 =
 * New: Vigilant now verifies any plugin or theme against the official WordPress.org files the moment it finishes updating, instead of waiting for the next scheduled scan. If an update has been tampered with, the mismatch is caught and recorded right away.
 * Improved: stylesheets (.css) are excluded from integrity scanning by default. Themes and optimization plugins rewrite them constantly, which was a frequent source of false "modified file" alerts; strict-mode users can re-enable .css in the scan settings.
@@ -422,8 +426,8 @@ For older changelog entries, please check the [changelog.txt](https://plugins.sv
 
 == Upgrade Notice ==
 
-= 2.9.0 =
-Fixes the false "modified file" alerts that appeared right after updating a plugin or theme, and now verifies updates against WordPress.org the moment they install. CSS files are excluded by default to cut scan noise.
+= 2.9.1 =
+Clears false security alerts: the scanner no longer flags legitimate themes and plugins (e.g. Astra) that use safe functions like maybe_unserialize() together with wp_remote_get(), and stops false "modified file" warnings when a host rewrites line endings or adds a BOM.
 
 == Support ==
 
