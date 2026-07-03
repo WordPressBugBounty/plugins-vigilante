@@ -1289,6 +1289,31 @@ class Vigilante_File_Integrity {
         if ( ! empty( $sha ) && in_array( hash_file( 'sha256', $file_path ), (array) $sha, true ) ) {
             return true;
         }
+
+        // Fallback: some hosts and deploy pipelines rewrite text files on disk
+        // (prepend a UTF-8 BOM, or convert LF line endings to CRLF) without
+        // changing a single line of code. That alters the raw bytes, so the
+        // md5/sha256 stops matching WordPress.org even though the file is
+        // intact, which surfaced as false "modified file" alerts. Retry the
+        // comparison against a normalized copy (BOM stripped, CRLF/CR collapsed
+        // to LF) for text files only, so a genuine code change is still caught.
+        if ( is_string( $file_path ) && '' !== $file_path && $this->is_text_file( $file_path ) && is_readable( $file_path ) ) {
+            // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Local file read for hashing, not remote.
+            $content = file_get_contents( $file_path );
+            if ( false !== $content ) {
+                if ( "\xEF\xBB\xBF" === substr( $content, 0, 3 ) ) {
+                    $content = substr( $content, 3 );
+                }
+                $content = str_replace( array( "\r\n", "\r" ), "\n", $content );
+                if ( null !== $md5 && in_array( md5( $content ), (array) $md5, true ) ) {
+                    return true;
+                }
+                if ( ! empty( $sha ) && in_array( hash( 'sha256', $content ), (array) $sha, true ) ) {
+                    return true;
+                }
+            }
+        }
+
         return false;
     }
 
@@ -1789,7 +1814,7 @@ class Vigilante_File_Integrity {
         foreach ( $patterns_data['standard_patterns'] as $encoded_needle => $label ) {
             // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_decode -- Decoding pattern definitions, not user input.
             $needle = base64_decode( $encoded_needle );
-            if ( stripos( $content, $needle ) !== false ) {
+            if ( $this->needle_present( $content, $needle ) ) {
                 return $label;
             }
         }
@@ -1864,17 +1889,22 @@ class Vigilante_File_Integrity {
         }
 
         // Deprecated dynamic function constructor, nearly always malicious in modern code
-        if ( ! empty( $cf ) && stripos( $content, $cf ) !== false ) {
+        if ( ! empty( $cf ) && $this->needle_present( $content, $cf ) ) {
             return $cf . ')';
         }
 
         // Remote fetch piped into unserialize: a PHP object-injection / supply-chain
         // vector seen in trojanized or nulled plugins (download a payload from a
-        // remote URL and unserialize it). Requires BOTH a remote-fetch call AND
-        // unserialize in the same file, because unserialize() on its own is common
-        // in legitimate code (caches, transients) and would flood results.
+        // remote URL and unserialize it). Requires a REAL unserialize() call
+        // (not maybe_unserialize() / igbinary_unserialize(), which are common and
+        // safe) sitting CLOSE TO a remote-fetch call. Earlier releases only
+        // checked that both strings appeared somewhere in the file, which
+        // false-positived on legitimate code using both in unrelated methods
+        // (e.g. a theme reading a transient with maybe_unserialize() while
+        // fetching its public IP with wp_remote_get()).
         $us = $fragments['us'] ?? '';
-        if ( ! empty( $us ) && stripos( $content, $us ) !== false ) {
+        if ( '' !== $us ) {
+            $us_regex        = '/(?<![a-z0-9_])' . preg_quote( $us, '/' ) . '\s*\(/i';
             $remote_fetchers = array(
                 $fragments['fg'] ?? '', // file_get_contents
                 $fragments['wr'] ?? '', // wp_remote_get
@@ -1882,7 +1912,11 @@ class Vigilante_File_Integrity {
                 $fragments['ce'] ?? '', // curl_exec
             );
             foreach ( $remote_fetchers as $rf ) {
-                if ( '' !== $rf && stripos( $content, $rf ) !== false ) {
+                if ( '' === $rf ) {
+                    continue;
+                }
+                $rf_regex = '/(?<![a-z0-9_])' . preg_quote( $rf, '/' ) . '\s*\(/i';
+                if ( $this->pattern_near( $content, $us_regex, $rf_regex, 600 ) ) {
                     return $rf . '() + ' . $us . '() remote deserialization';
                 }
             }
@@ -1925,6 +1959,96 @@ class Vigilante_File_Integrity {
         }
 
         return false;
+    }
+
+    /**
+     * Whether a scan needle is present as a real token rather than glued inside
+     * a longer identifier.
+     *
+     * Function-call needles (an identifier followed by "(") are matched with a
+     * left word boundary, so "file_get_contents(" no longer matches
+     * "wpcom_vip_file_get_contents(", "unserialize(" no longer matches
+     * "maybe_unserialize(", and "eval(" no longer matches "retrieval(". Needles
+     * that are not plain identifiers (such as the "$_GET[" superglobal probes)
+     * keep a plain case-insensitive substring search.
+     *
+     * @param string $content File content.
+     * @param string $needle  Decoded needle (e.g. "eval(", "$_GET[").
+     * @return bool
+     */
+    private function needle_present( $content, $needle ) {
+        if ( '' === $needle ) {
+            return false;
+        }
+        if ( preg_match( '/^[a-z_][a-z0-9_]*\($/i', $needle ) ) {
+            $fn = rtrim( $needle, '(' );
+            return (bool) preg_match( '/(?<![a-z0-9_])' . preg_quote( $fn, '/' ) . '\s*\(/i', $content );
+        }
+        return stripos( $content, $needle ) !== false;
+    }
+
+    /**
+     * Whether two patterns both occur within $window bytes of each other.
+     *
+     * Used to require that correlated malware signals (for example a remote
+     * fetch and an unserialize call) sit in the same code path instead of
+     * merely coexisting somewhere in the file, which was a false-positive
+     * source when only their presence was checked.
+     *
+     * @param string $content File content.
+     * @param string $regex_a First anchored pattern (with delimiters and flags).
+     * @param string $regex_b Second anchored pattern (with delimiters and flags).
+     * @param int    $window  Maximum byte distance between a match of each.
+     * @return bool
+     */
+    private function pattern_near( $content, $regex_a, $regex_b, $window ) {
+        if ( ! preg_match_all( $regex_a, $content, $m_a, PREG_OFFSET_CAPTURE ) ) {
+            return false;
+        }
+        if ( ! preg_match_all( $regex_b, $content, $m_b, PREG_OFFSET_CAPTURE ) ) {
+            return false;
+        }
+        foreach ( $m_a[0] as $a ) {
+            foreach ( $m_b[0] as $b ) {
+                if ( abs( $a[1] - $b[1] ) <= $window ) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether a file is a text file worth normalizing before the fallback hash
+     * comparison in hash_matches_published().
+     *
+     * @param string $file_path Absolute path.
+     * @return bool
+     */
+    private function is_text_file( $file_path ) {
+        $text_ext = array(
+            'php', 'php3', 'php4', 'php5', 'php7', 'phtml',
+            'js', 'css', 'html', 'htm', 'xml', 'svg',
+            'txt', 'md', 'json', 'po', 'pot', 'yml', 'yaml', 'ini', 'csv',
+        );
+        return in_array( strtolower( pathinfo( $file_path, PATHINFO_EXTENSION ) ), $text_ext, true );
+    }
+
+    /**
+     * Normalize a relative path for checksum-key comparison: forward slashes,
+     * no doubled slashes, no leading "./" or "/". Case is preserved because
+     * plugin and theme file systems are case-sensitive on most hosts.
+     *
+     * @param string $path Relative path.
+     * @return string
+     */
+    private function normalize_rel_path( $path ) {
+        $path = str_replace( '\\', '/', $path );
+        $path = preg_replace( '#/+#', '/', $path );
+        if ( 0 === strpos( $path, './' ) ) {
+            $path = substr( $path, 2 );
+        }
+        return ltrim( $path, '/' );
     }
 
     /**
@@ -1987,6 +2111,14 @@ class Vigilante_File_Integrity {
         // Only check PHP files for performance
         $php_extensions = array( 'php', 'php3', 'php4', 'php5', 'php7', 'phtml', 'phar' );
 
+        // Pre-normalize the checksum keys once so path-shape differences
+        // (Windows backslashes, a leading "./", doubled slashes) don't make a
+        // known file look "extra" and get scanned or flagged. Case is preserved.
+        $known_normalized = array();
+        foreach ( array_keys( $checksums ) as $known_file ) {
+            $known_normalized[ $this->normalize_rel_path( $known_file ) ] = true;
+        }
+
         try {
             $iterator = new RecursiveIteratorIterator(
                 new RecursiveDirectoryIterator( $directory, RecursiveDirectoryIterator::SKIP_DOTS ),
@@ -2006,11 +2138,14 @@ class Vigilante_File_Integrity {
                     continue;
                 }
 
-                // Get relative path within plugin/theme directory
-                $relative_to_dir = str_replace( $directory . '/', '', $file_path );
+                // Get relative path within plugin/theme directory, normalized so
+                // path-shape quirks don't misclassify a known file as "extra".
+                $norm_path       = str_replace( '\\', '/', $file_path );
+                $norm_dir        = str_replace( '\\', '/', $directory );
+                $relative_to_dir = $this->normalize_rel_path( str_replace( $norm_dir . '/', '', $norm_path ) );
 
                 // Skip if file is in the checksums (it's known)
-                if ( isset( $checksums[ $relative_to_dir ] ) ) {
+                if ( isset( $known_normalized[ $relative_to_dir ] ) ) {
                     continue;
                 }
 

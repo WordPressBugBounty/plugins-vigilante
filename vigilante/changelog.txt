@@ -3,6 +3,9 @@ Vigilant — Full changelog
 For each release, see the entries below. The latest version is always at the top.
 The current release notes also live in readme.txt under "== Changelog ==".
 
+= 2.9.2 =
+* Improved: the proxy/CDN detection notice is now dismissible and no longer shows up on local development environments.
+
 = 2.9.1 =
 * Fix: the file integrity scanner no longer raises false "suspicious code" or "injected file" alerts on legitimate themes and plugins (for example the Astra theme). It now requires a real unserialize() call sitting next to a remote request before it warns about remote deserialization, instead of firing whenever both merely appear somewhere in the same file, and it matches function names as whole tokens so safe names such as maybe_unserialize() and wpcom_vip_file_get_contents() are no longer mistaken for their dangerous look-alikes.
 * Fix: no more false "modified file" alerts when a host or deployment tool rewrites a file's line endings (CRLF) or adds a UTF-8 byte order mark without changing any code. Those files are now re-checked against a normalized copy before being reported, and files already published on WordPress.org are recognized regardless of path-separator differences.

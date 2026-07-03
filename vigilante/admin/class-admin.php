@@ -1556,7 +1556,21 @@ class Vigilante_Admin {
         // arrive with a forwarded-for header carrying a different valid IP, the
         // site is very likely behind a proxy/CDN that has not been declared, so
         // the firewall is seeing the proxy IP for every visitor. Guide the admin.
-        if ( current_user_can( 'manage_options' ) && '' === Vigilante_IP_Utils::trusted_proxy_header() ) {
+        //
+        // Two deliberate silencers (2.9.2):
+        // - A loopback forwarded IP (::1 / 127.x) means the person browsing IS
+        //   the machine itself: that only happens in local development stacks
+        //   (Local's nginx router, Docker...), never behind a production
+        //   proxy/CDN, so the notice would be pure noise there.
+        // - The notice is dismissible and the dismissal persists site-wide via
+        //   the vigilante_dismissed_notices option (the admin evaluated it and
+        //   decided; nagging forever helps nobody).
+        $dismissed_notices = get_option( 'vigilante_dismissed_notices', array() );
+        if (
+            current_user_can( 'manage_options' )
+            && '' === Vigilante_IP_Utils::trusted_proxy_header()
+            && ! isset( $dismissed_notices['proxy_detection'] )
+        ) {
             $remote   = isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) ) : '';
             $detected = '';
             foreach ( Vigilante_IP_Utils::trusted_header_map() as $proxy_label => $server_key ) {
@@ -1568,10 +1582,15 @@ class Vigilante_Admin {
                     $parts     = explode( ',', $candidate );
                     $candidate = trim( $parts[0] );
                 }
-                if ( filter_var( $candidate, FILTER_VALIDATE_IP ) && $candidate !== $remote ) {
-                    $detected = $proxy_label;
-                    break;
+                if ( ! filter_var( $candidate, FILTER_VALIDATE_IP ) || $candidate === $remote ) {
+                    continue;
                 }
+                // Loopback forwarded IP = local development, not a real proxy.
+                if ( '::1' === $candidate || 0 === strpos( $candidate, '127.' ) ) {
+                    continue;
+                }
+                $detected = $proxy_label;
+                break;
             }
 
             if ( '' !== $detected ) {
@@ -1582,7 +1601,7 @@ class Vigilante_Admin {
                     '<code>' . esc_html( strtoupper( $detected ) ) . '</code>'
                 );
                 ?>
-                <div class="notice notice-warning">
+                <div class="notice notice-warning is-dismissible vigilante-proxy-notice">
                     <p>
                         <span class="dashicons dashicons-shield"></span>
                         <strong><?php esc_html_e( 'Vigilant: this site looks like it is behind a proxy or CDN', 'vigilante' ); ?></strong>
@@ -1594,6 +1613,17 @@ class Vigilante_Admin {
                         </a>
                     </p>
                 </div>
+                <script>
+                jQuery( function ( $ ) {
+                    $( document ).on( 'click', '.vigilante-proxy-notice .notice-dismiss', function () {
+                        $.post( ajaxurl, {
+                            action: 'vigilante_dismiss_notice',
+                            notice_id: 'proxy_detection',
+                            nonce: <?php echo wp_json_encode( wp_create_nonce( 'vigilante_dismiss_notice' ) ); ?>
+                        } );
+                    } );
+                } );
+                </script>
                 <?php
             }
         }
