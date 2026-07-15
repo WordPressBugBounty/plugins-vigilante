@@ -122,11 +122,18 @@ trait Vigilante_Admin_Ajax {
             wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
         }
 
-        // Sanitize input and validate against the known critical files whitelist.
-        // Note: sanitize_file_name() strips leading dots (turning .htaccess into htaccess),
-        // so sanitize_text_field() is used instead. The whitelist is the real security gate.
-        $file = isset( $_POST['file'] ) ? sanitize_text_field( wp_unslash( $_POST['file'] ) ) : '';
-        $allowed = array( 'wp-config.php', '.htaccess' );
+        // The request carries an opaque key instead of the file name: hosting
+        // WAFs (e.g. ModSecurity with OWASP CRS rule 930130) reject any POST
+        // whose arguments contain the literal "wp-config.php", which made
+        // this Approve button fail with a generic AJAX error behind such
+        // firewalls. The server-side map below is the real security gate.
+        $file_keys = array(
+            'cfg' => 'wp-config.php',
+            'hta' => '.htaccess',
+        );
+        $file_key = isset( $_POST['file_key'] ) ? sanitize_key( $_POST['file_key'] ) : '';
+        $file     = isset( $file_keys[ $file_key ] ) ? $file_keys[ $file_key ] : '';
+        $allowed  = array( 'wp-config.php', '.htaccess' );
         if ( ! in_array( $file, $allowed, true ) ) {
             wp_send_json_error( __( 'Invalid file.', 'vigilante' ) );
         }
@@ -322,6 +329,25 @@ trait Vigilante_Admin_Ajax {
         wp_cache_delete( Vigilante_Settings::OPTION_NAME, 'options' );
         update_option( Vigilante_Settings::OPTION_NAME, $all_options );
         $this->settings->clear_cache();
+
+        // Whitelist entries feed the .htaccess exception conditions (Server
+        // Protection), so the block must be rewritten with the updated list.
+        // Saving from the Firewall tab does this via apply_section_changes();
+        // this handler writes the option directly, so it regenerates here.
+        if ( 'whitelist' === $list_type ) {
+            $fresh_settings = new Vigilante_Settings();
+            $sh             = $fresh_settings->get_section( 'security_headers' );
+
+            $needs_htaccess_block = ! empty( $all_options['modules']['firewall'] )
+                || ! empty( $sh['hide_server_signature'] )
+                || ! empty( $sh['remove_fingerprinting_headers'] );
+
+            if ( $needs_htaccess_block ) {
+                require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-protection.php';
+                $htaccess = new Vigilante_Htaccess_Protection( $fresh_settings );
+                $htaccess->apply_rules();
+            }
+        }
 
         $list_label = ( 'whitelist' === $list_type )
             ? __( 'whitelist', 'vigilante' )

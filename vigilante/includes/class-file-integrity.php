@@ -1906,7 +1906,6 @@ class Vigilante_File_Integrity {
         if ( '' !== $us ) {
             $us_regex        = '/(?<![a-z0-9_])' . preg_quote( $us, '/' ) . '\s*\(/i';
             $remote_fetchers = array(
-                $fragments['fg'] ?? '', // file_get_contents
                 $fragments['wr'] ?? '', // wp_remote_get
                 $fragments['rb'] ?? '', // wp_remote_retrieve_body
                 $fragments['ce'] ?? '', // curl_exec
@@ -1918,6 +1917,26 @@ class Vigilante_File_Integrity {
                 $rf_regex = '/(?<![a-z0-9_])' . preg_quote( $rf, '/' ) . '\s*\(/i';
                 if ( $this->pattern_near( $content, $us_regex, $rf_regex, 600 ) ) {
                     return $rf . '() + ' . $us . '() remote deserialization';
+                }
+            }
+
+            // file_get_contents() is treated separately from the fetchers
+            // above: those are unambiguously remote, while file_get_contents
+            // is PHP's most common LOCAL file reader, and reading a local
+            // path right next to unserialize() is a legitimate pattern
+            // (settings import/export, PSR-6 file caches shipped in premium
+            // plugins, which have no wp.org checksums so this heuristic is
+            // their only filter). It only acts as a remote fetcher when its
+            // argument is a URL, so the combo additionally requires a
+            // remote-scheme literal near the call before it fires.
+            $fg = $fragments['fg'] ?? '';
+            if ( '' !== $fg ) {
+                $fg_regex     = '/(?<![a-z0-9_])' . preg_quote( $fg, '/' ) . '\s*\(/i';
+                $scheme_regex = '/(?:https?|ftps?):\/\/|php:\/\/input/i';
+
+                if ( $this->pattern_near( $content, $us_regex, $fg_regex, 600 )
+                    && $this->pattern_near( $content, $fg_regex, $scheme_regex, 600 ) ) {
+                    return $fg . '() + ' . $us . '() remote deserialization';
                 }
             }
         }

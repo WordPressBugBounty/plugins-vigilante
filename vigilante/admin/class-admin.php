@@ -325,6 +325,25 @@ class Vigilante_Admin {
 
             update_option( 'vigilante_db_version', '2.6.1' );
         }
+
+        // 2.9.3: Regenerate the .htaccess protection block. The bad-bots
+        // User-Agent list dropped substring-prone tokens that 403'd
+        // legitimate clients (e.g. "rma" matched inside "Performance" and
+        // blocked WP Rocket's page fetch), and the blocking rules now honour
+        // the firewall IP / User-Agent whitelists as negated exceptions.
+        // Existing sites only rewrite the block when Server Protection is
+        // saved, so the upgrade has to refresh it once itself (same pattern
+        // as the 1.12.1 WooCommerce IPN migration).
+        if ( version_compare( $db_version, '2.9.3', '<' ) ) {
+            require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-protection.php';
+            $htaccess = new Vigilante_Htaccess_Protection( $this->settings );
+
+            if ( $htaccess->are_rules_active() ) {
+                $htaccess->apply_rules();
+            }
+
+            update_option( 'vigilante_db_version', '2.9.3' );
+        }
     }
 
     /**
@@ -1187,9 +1206,6 @@ class Vigilante_Admin {
         if ( 'toplevel_page_vigilante' !== $hook ) {
             return;
         }
-
-        // Load thickbox for plugin install modals.
-        add_thickbox();
 
         wp_enqueue_style(
             'vigilante-admin',
@@ -5902,7 +5918,7 @@ class Vigilante_Admin {
      * Render sidebar with promotional widgets
      */
     private function render_sidebar() {
-        $promo_banner = new Vigilante_Promo_Banner( 'vigilante', 'vigilante' );
+        $promo_banner = new Vigilante_Promo_Banner( 'vigilante' );
         $promo_banner->render();
     }
 

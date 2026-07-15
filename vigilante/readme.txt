@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.9.2
+Stable tag: 2.9.3
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -412,6 +412,16 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 2.9.3 =
+* Improved: the firewall IP and User-Agent whitelists now also cover the .htaccess-level protections (Block Bad Bots, bad query strings, HTTP method limits). They only exempted the PHP firewall before, so a legitimate crawler kept getting a 403 straight from Apache even after being whitelisted; the rules are rewritten with exception conditions whenever the lists change, honouring the visitor IP detection setting when the site declares a proxy header.
+* Fix: "Block Bad Bots" no longer returns 403 to legitimate visitors whose User-Agent merely contains a short generic word. The token "rma" matched inside "Performance", so WP Rocket's page fetch ("... for Performance Monitoring ...") was blocked and Rocket Insights could not add pages; rma, custo, disco, library, loader, extract, miner, scan and titan were removed from the list (real scanners such as masscan, linkscan or sqlmap are still covered by their full names), and the .htaccess block refreshes itself on upgrade.
+* Fix: the file integrity scanner no longer flags legitimate premium plugin files that read a local file next to unserialize(), such as the SEOPress PRO settings import/export or the google/auth cache shipped with the Redsys payment gateway. file_get_contents() now only counts as a remote-deserialization signal when a remote URL scheme sits near the call; payloads downloaded with wp_remote_get() or curl and then unserialized are still detected.
+* Fix: approving a modified critical config file (wp-config.php or .htaccess) no longer fails with a generic AJAX error behind hosting firewalls. Web application firewall rules such as OWASP CRS 930130 reject any request whose body contains the literal "wp-config.php", so the Approve request now sends an opaque key that the server maps back to the file.
+* Fix: premium plugins that reuse a folder slug abandoned on WordPress.org, such as WPML (sitepress-multilingual-cms, closed on wp.org when the plugin went commercial), are no longer reported as "closed" with a critical alert and email. Known reused slugs and plugins that declare an external Update URI are treated as premium, like any other plugin that never lived on WordPress.org.
+* Fix: with a custom login URL active, visiting /login no longer answers with a redirect that reveals the hidden login address (WordPress turns that shortcut into a redirect to the login screen, already rewritten to the secret slug). An anonymous POST to /wp-admin leaked it the same way through the authentication redirect. Both now return the same 404 as every other hidden entry point.
+* Fix: the 404 page served when hiding wp-login.php and the custom login URL now uses the theme's 404 template on block themes too. Block themes have no 404.php file, so those sites were getting the plain fallback page instead of their theme's.
+* Fix: "Fix mixed content" now also covers external http:// resources. The rewriter can only fix same-domain URLs, so external images, fonts or scripts kept triggering mixed-content warnings; the front end now also sends the Content-Security-Policy upgrade-insecure-requests directive, which makes browsers load every http:// subrequest over HTTPS, and the Security Check recognizes that directive instead of warning about references the browser already upgrades.
+
 = 2.9.2 =
 * Improved: the proxy/CDN detection notice is now dismissible and no longer shows up on local development environments.
 
@@ -429,8 +439,8 @@ For older changelog entries, please check the [changelog.txt](https://plugins.sv
 
 == Upgrade Notice ==
 
-= 2.9.2 =
-The proxy/CDN detection notice is now dismissible and no longer appears on local development sites.
+= 2.9.3 =
+Fixes user-reported false positives: Block Bad Bots no longer 403s WP Rocket, SEOPress PRO/Redsys/WPML are no longer wrongly flagged, Approve works behind ModSecurity, /login no longer reveals a hidden login URL, and firewall whitelists now cover the .htaccess rules too.
 == Support ==
 
 Need private support or custom development?

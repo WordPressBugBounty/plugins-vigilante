@@ -264,15 +264,37 @@ class Vigilante_SA_Category_SSL {
         preg_match_all( '#(src|href)=["\']http://[^"\']+["\']#i', $probe['body'], $matches );
         $count = isset( $matches[0] ) ? count( $matches[0] ) : 0;
 
+        // An enforced CSP with upgrade-insecure-requests makes the browser
+        // load every subrequest over HTTPS (external references included),
+        // so remaining http:// strings in the HTML are not mixed content in
+        // practice. Measured on the live response, not on settings: a CDN
+        // that strips the header must not count as protected. Report-Only
+        // policies do not upgrade, hence only the enforced header counts.
+        $csp_header = isset( $probe['headers']['content-security-policy'] ) ? $probe['headers']['content-security-policy'] : '';
+        if ( is_array( $csp_header ) ) {
+            $csp_header = implode( ', ', $csp_header );
+        }
+        $upgrades = ( false !== stripos( (string) $csp_header, 'upgrade-insecure-requests' ) );
+
         $args['data'] = array(
             'insecure_refs'      => $count,
             'fix_setting_active' => (bool) $fix_setting,
+            'csp_upgrades'       => $upgrades,
         );
 
         if ( 0 === $count ) {
             $args['detail'] = $fix_setting
                 ? __( 'No insecure references in the homepage HTML; mixed-content fix is enabled in settings.', 'vigilante' )
                 : __( 'No insecure references found in the homepage HTML.', 'vigilante' );
+            return Vigilante_SA_Check_Result::pass( $args );
+        }
+
+        if ( $upgrades ) {
+            $args['detail'] = sprintf(
+                /* translators: %d: number of insecure references */
+                __( '%d http:// references in the HTML, but the response sends a CSP upgrade-insecure-requests directive, so browsers load them over HTTPS.', 'vigilante' ),
+                $count
+            );
             return Vigilante_SA_Check_Result::pass( $args );
         }
 

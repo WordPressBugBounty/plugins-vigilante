@@ -68,6 +68,10 @@ class Vigilante_Https_Enforcer {
             add_filter( 'wp_get_attachment_url', array( $this, 'fix_url_scheme' ), 10, 1 );
             add_filter( 'the_content', array( $this, 'fix_content_urls' ), 999 );
             add_filter( 'widget_text', array( $this, 'fix_content_urls' ), 999 );
+
+            // The rewriters above only cover same-domain URLs; external
+            // http:// references need the browser-side CSP directive.
+            add_action( 'send_headers', array( $this, 'emit_upgrade_insecure_requests' ) );
         }
     }
 
@@ -102,6 +106,32 @@ class Vigilante_Https_Enforcer {
         // Redirect with 301 (permanent)
         wp_safe_redirect( $redirect_url, 301 );
         exit;
+    }
+
+    /**
+     * Send the CSP upgrade-insecure-requests directive on the front end.
+     *
+     * The mixed-content rewriter only fixes same-domain URLs (its patterns
+     * are anchored to home_url()), so references to EXTERNAL http://
+     * resources survived and the Security Check kept flagging them, which
+     * read as "Fix mixed content does nothing". This directive makes the
+     * browser upgrade every subrequest, external ones included.
+     *
+     * Always emitted, without checking the CSP module settings: Vigilant's
+     * own CSP travels via .htaccess, so "csp enabled" in the options does
+     * not guarantee the header is actually served (Nginx, unwritable
+     * .htaccess, mod_headers missing). Multiple CSP headers stack in the
+     * browser (every policy applies) and this directive alone restricts
+     * nothing, so a duplicate is harmless while a missed emission is not.
+     *
+     * @since 2.9.3
+     */
+    public function emit_upgrade_insecure_requests() {
+        if ( ! is_ssl() || headers_sent() ) {
+            return;
+        }
+
+        header( 'Content-Security-Policy: upgrade-insecure-requests', false );
     }
 
     /**

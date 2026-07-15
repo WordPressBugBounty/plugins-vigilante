@@ -231,6 +231,9 @@ class Vigilante_Htaccess_Protection {
         // SECTION: Bot and Request Filtering (htaccess-based)
         // =====================================================================
 
+        // Negated exception conditions shared by every blocking rule below.
+        $whitelist_exceptions = $this->generate_whitelist_exceptions();
+
         // Option: block_bad_bots
         // UI: "Block Bad Bots" checkbox
         if ( ! empty( $this->options['block_bad_bots'] ) ) {
@@ -238,8 +241,14 @@ class Vigilante_Htaccess_Protection {
             $rules[] = '# Exception: WooCommerce IPN callbacks (payment gateways use various User-Agents)';
             $rules[] = '<IfModule mod_rewrite.c>';
             $rules[] = '    RewriteEngine On';
+            $rules   = array_merge( $rules, $whitelist_exceptions );
             $rules[] = '    RewriteCond %{QUERY_STRING} !wc-api= [NC]';
-            $rules[] = '    RewriteCond %{HTTP_USER_AGENT} (ahrefs|alexibot|backlink|bandit|black.hole|blackwidow|blekkobot|blowfish|botalot|buddy|builtbottough|bullseye|bunnyslippers|ccbot|cheesebot|cherrypicker|chinaclaw|collector|copier|copyrightcheck|cosmos|crescent|custo|demon|disco|discobot|dittospyder|dotbot|dragonfly|drip|easydl|ebingbong|ecatch|eirgrabber|emailcollector|emailsiphon|emailwolf|extract|eyenetie|flashget|foobot|frontpage|getright|getweb|go.ahead.got.it|gotit|grabnet|grafula|gsa-crawler|harvest|hloader|hmview|httplib|httrack|humanlinks|id-search|ilsebot|indy.library|infotekies|interget|intraformant|iron33|jennybot|jetbot|jetcar|joc|jorgee|kenjin|keyword|larbin|leechftp|lexibot|library|libweb|libwww|linkextractorpro|linkscan|linkwalker|loader|lwp-trivial|mag-net|magnet|markwatch|mass.downloader|masscan|miner|majestic|mj12bot|morfeus|moget|msiecrawler|navroad|nearsite|netants|netmechanic|netspider|nicerspro|npbot|nutch|octopus|offline.explorer|offline.navigator|openfind|outfoxbot|pagegrabber|papa|pavuk|pcbrowser|pockey|propowerbot|prowebwalker|psbot|pump|queryn|radiation|realdownload|reget|retriever|rma|rogerbot|scan|screaming|semalt|semrush|serpstat|siclab|sistrix|siteexplorer|sitelock|sitesucker|skygrid|smartdownload|snoopy|sogou|sosospider|spankbot|spbot|sqlmap|stackrambler|stripper|sucker|superbot|superhttp|surfbot|surveybot|suzuran|swiftbot|takeout|teleport|telesoft|thenomad|tighttwatbot|titan|tocrawl|true_robot|turingos|turnitinbot|ufoseek|urlspiderpro|vacuum|voidbot|voideye|webauto|webbandit|webcollector|webcopier|webcopy|webfetch|webgo|webleacher|webmasterworldforum|webpictures|webreaper|webripper|websauger|webspider|webster|webstripper|webwhacker|webzip|wget|widow|wisenutbot|wotbox|wwwoffle|xaldon|xenu|zade|zeus|zmeu|zune|zyborg) [NC]';
+            // Tokens must be specific bot names. The pattern matches as a bare
+            // substring anywhere in the UA ([NC], no word anchors), so a short
+            // generic token 403s legitimate clients: "rma" used to match inside
+            // "Performance" and blocked WP Rocket's page fetch (fixed in 2.9.3
+            // together with custo/disco/library/loader/extract/miner/scan/titan).
+            $rules[] = '    RewriteCond %{HTTP_USER_AGENT} (ahrefs|alexibot|backlink|bandit|black.hole|blackwidow|blekkobot|blowfish|botalot|buddy|builtbottough|bullseye|bunnyslippers|ccbot|cheesebot|cherrypicker|chinaclaw|collector|copier|copyrightcheck|cosmos|crescent|demon|discobot|dittospyder|dotbot|dragonfly|drip|easydl|ebingbong|ecatch|eirgrabber|emailcollector|emailsiphon|emailwolf|eyenetie|flashget|foobot|frontpage|getright|getweb|go.ahead.got.it|gotit|grabnet|grafula|gsa-crawler|harvest|hloader|hmview|httplib|httrack|humanlinks|id-search|ilsebot|indy.library|infotekies|interget|intraformant|iron33|jennybot|jetbot|jetcar|joc|jorgee|kenjin|keyword|larbin|leechftp|lexibot|libweb|libwww|linkextractorpro|linkscan|linkwalker|lwp-trivial|mag-net|magnet|markwatch|mass.downloader|masscan|majestic|mj12bot|morfeus|moget|msiecrawler|navroad|nearsite|netants|netmechanic|netspider|nicerspro|npbot|nutch|octopus|offline.explorer|offline.navigator|openfind|outfoxbot|pagegrabber|papa|pavuk|pcbrowser|pockey|propowerbot|prowebwalker|psbot|pump|queryn|radiation|realdownload|reget|retriever|rogerbot|screaming|semalt|semrush|serpstat|siclab|sistrix|siteexplorer|sitelock|sitesucker|skygrid|smartdownload|snoopy|sogou|sosospider|spankbot|spbot|sqlmap|stackrambler|stripper|sucker|superbot|superhttp|surfbot|surveybot|suzuran|swiftbot|takeout|teleport|telesoft|thenomad|tighttwatbot|tocrawl|true_robot|turingos|turnitinbot|ufoseek|urlspiderpro|vacuum|voidbot|voideye|webauto|webbandit|webcollector|webcopier|webcopy|webfetch|webgo|webleacher|webmasterworldforum|webpictures|webreaper|webripper|websauger|webspider|webster|webstripper|webwhacker|webzip|wget|widow|wisenutbot|wotbox|wwwoffle|xaldon|xenu|zade|zeus|zmeu|zune|zyborg) [NC]';
             $rules[] = '    RewriteRule .* - [F,L]';
             $rules[] = '</IfModule>';
             $rules[] = '';
@@ -251,6 +260,7 @@ class Vigilante_Htaccess_Protection {
             $rules[] = '# Block malicious query strings';
             $rules[] = '<IfModule mod_rewrite.c>';
             $rules[] = '    RewriteEngine On';
+            $rules   = array_merge( $rules, $whitelist_exceptions );
             $rules[] = '    # SQL injection patterns';
             $rules[] = '    RewriteCond %{QUERY_STRING} (union.*select) [NC,OR]';
             $rules[] = '    RewriteCond %{QUERY_STRING} (concat\(.*\)) [NC,OR]';
@@ -284,6 +294,7 @@ class Vigilante_Htaccess_Protection {
             $rules[] = '# Exception: REST API endpoints need PUT, PATCH, DELETE';
             $rules[] = '<IfModule mod_rewrite.c>';
             $rules[] = '    RewriteEngine On';
+            $rules   = array_merge( $rules, $whitelist_exceptions );
             $rules[] = '    RewriteCond %{REQUEST_URI} !^/wp-json/ [NC]';
             $rules[] = '    RewriteCond %{REQUEST_METHOD} ^(connect|debug|move|trace|track) [NC]';
             $rules[] = '    RewriteRule .* - [F,L]';
@@ -484,5 +495,165 @@ class Vigilante_Htaccess_Protection {
         }
 
         return $preview;
+    }
+
+    /**
+     * Build negated RewriteCond exception lines from the firewall whitelists.
+     *
+     * The PHP firewall exempts whitelisted IPs and User-Agents from every
+     * check, but the rules this class writes run inside Apache before PHP
+     * even starts, so the same exemptions must be emitted as negated
+     * conditions ahead of each blocking rule. RewriteCond lines are AND-ed
+     * with a following [OR] chain, so a whitelisted visitor short-circuits
+     * the block while everyone else still hits the filters.
+     *
+     * @since 2.9.3
+     * @return array Lines to insert right after "RewriteEngine On".
+     */
+    private function generate_whitelist_exceptions() {
+        $lines = array();
+
+        // The connection address is always checked. When the site declared a
+        // trusted proxy header (Firewall visitor IP detection, v2.7.0), the
+        // real visitor IP travels in that header, so it is checked too.
+        $ip_variables = array( '%{REMOTE_ADDR}' => false );
+
+        $proxy_variables = array(
+            'cf-connecting-ip' => array( '%{HTTP:CF-Connecting-IP}', false ),
+            'x-real-ip'        => array( '%{HTTP:X-Real-IP}', false ),
+            // X-Forwarded-For may carry a comma-separated proxy chain; the
+            // client is the first hop, so a trailing list is allowed.
+            'x-forwarded-for'  => array( '%{HTTP:X-Forwarded-For}', true ),
+        );
+
+        $trusted = isset( $this->options['trusted_proxy_header'] ) ? (string) $this->options['trusted_proxy_header'] : '';
+
+        if ( isset( $proxy_variables[ $trusted ] ) ) {
+            $ip_variables[ $proxy_variables[ $trusted ][0] ] = $proxy_variables[ $trusted ][1];
+        }
+
+        $ip_list = isset( $this->options['ip_whitelist'] ) ? (array) $this->options['ip_whitelist'] : array();
+
+        foreach ( $ip_list as $entry ) {
+            $pattern = $this->ip_entry_to_pattern( trim( (string) $entry ) );
+
+            if ( null === $pattern ) {
+                // Not expressible as a literal match (off-octet CIDR, IPv6
+                // CIDR). The PHP firewall layer still honours the entry.
+                continue;
+            }
+
+            foreach ( $ip_variables as $variable => $is_chain ) {
+                if ( 'exact' === $pattern['type'] && ! $is_chain ) {
+                    $lines[] = '    RewriteCond ' . $variable . ' "!=' . $pattern['ip'] . '" [NC]';
+                } elseif ( 'exact' === $pattern['type'] ) {
+                    $lines[] = '    RewriteCond ' . $variable . ' "!^' . $pattern['regex'] . '(,|$)" [NC]';
+                } else {
+                    $lines[] = '    RewriteCond ' . $variable . ' "!^' . $pattern['regex'] . '" [NC]';
+                }
+            }
+        }
+
+        $ua_list = isset( $this->options['ua_whitelist'] ) ? (array) $this->options['ua_whitelist'] : array();
+
+        foreach ( $ua_list as $ua ) {
+            $ua = trim( (string) $ua );
+
+            // A double quote would break the directive syntax (500 on the
+            // whole site), and "%" is expanded by mod_rewrite. Skip those
+            // entries; the PHP firewall layer still honours them.
+            if ( '' === $ua || false !== strpos( $ua, '"' ) || false !== strpos( $ua, '%' ) || preg_match( '/[^\x20-\x7e]/', $ua ) ) {
+                continue;
+            }
+
+            $lines[] = '    RewriteCond %{HTTP_USER_AGENT} "!' . preg_quote( $ua ) . '" [NC]';
+        }
+
+        if ( ! empty( $lines ) ) {
+            array_unshift( $lines, '    # Exceptions: firewall IP / User-Agent whitelist entries bypass these filters' );
+        }
+
+        return $lines;
+    }
+
+    /**
+     * Translate one firewall IP whitelist entry into a literal form that
+     * mod_rewrite can match in .htaccess context.
+     *
+     * Supported: exact IPv4/IPv6, IPv4 wildcards (203.0.113.*), IPv6
+     * wildcards (2a02:c207:*) and IPv4 CIDR blocks on octet boundaries
+     * (/8, /16, /24, /32). Anything else returns null: .htaccess-level
+     * mod_rewrite has no portable CIDR matching, so those entries are
+     * covered by the PHP firewall layer only.
+     *
+     * @since 2.9.3
+     * @param string $entry Whitelist entry as stored.
+     * @return array|null Array with keys type (exact|prefix), regex and,
+     *                    for exact matches, ip. Null when unsupported.
+     */
+    private function ip_entry_to_pattern( $entry ) {
+        if ( '' === $entry ) {
+            return null;
+        }
+
+        // Exact address. IPv6 is normalized to its compressed lowercase
+        // form, which is how Apache reports REMOTE_ADDR.
+        if ( filter_var( $entry, FILTER_VALIDATE_IP ) ) {
+            $ip = $entry;
+
+            if ( false !== strpos( $entry, ':' ) ) {
+                $packed = inet_pton( $entry );
+
+                if ( false === $packed ) {
+                    return null;
+                }
+
+                $ip = inet_ntop( $packed );
+            }
+
+            return array(
+                'type'  => 'exact',
+                'ip'    => $ip,
+                'regex' => preg_quote( $ip ),
+            );
+        }
+
+        // IPv4 wildcard: 203.0.113.* or 203.0.*
+        if ( preg_match( '/^((?:\d{1,3}\.){1,3})\*$/', $entry, $m ) ) {
+            return array(
+                'type'  => 'prefix',
+                'regex' => preg_quote( $m[1] ),
+            );
+        }
+
+        // IPv6 wildcard: 2a02:c207:*
+        if ( preg_match( '/^([0-9a-f]{1,4}(?::[0-9a-f]{1,4})*:)\*$/i', $entry, $m ) ) {
+            return array(
+                'type'  => 'prefix',
+                'regex' => preg_quote( strtolower( $m[1] ) ),
+            );
+        }
+
+        // IPv4 CIDR on an octet boundary.
+        if ( preg_match( '/^(\d{1,3}(?:\.\d{1,3}){3})\/(8|16|24|32)$/', $entry, $m ) && filter_var( $m[1], FILTER_VALIDATE_IP, FILTER_FLAG_IPV4 ) ) {
+            if ( '32' === $m[2] ) {
+                return array(
+                    'type'  => 'exact',
+                    'ip'    => $m[1],
+                    'regex' => preg_quote( $m[1] ),
+                );
+            }
+
+            $octets = explode( '.', $m[1] );
+            $keep   = (int) $m[2] / 8;
+            $prefix = implode( '.', array_slice( $octets, 0, $keep ) ) . '.';
+
+            return array(
+                'type'  => 'prefix',
+                'regex' => preg_quote( $prefix ),
+            );
+        }
+
+        return null;
     }
 }

@@ -474,8 +474,10 @@ class Vigilante_Firewall {
         // NOTE: Matching is done via strpos() on the full User-Agent string,
         // so entries must be specific enough to avoid false positives with
         // legitimate services, plugins, or WordPress loopback requests.
-        // Generic short words (e.g. 'scan', 'ninja', 'titan') are excluded
-        // here but covered by the htaccess layer with regex patterns.
+        // Generic short words (e.g. 'scan', 'ninja', 'titan') must stay out
+        // of BOTH this list and the htaccess one: the htaccess regex matches
+        // bare substrings too, and unlike this layer it runs before PHP, so
+        // the ua_whitelist cannot rescue a false positive there.
         $bad_bots = array(
             'ahrefsbot',
             'semrushbot',
@@ -500,7 +502,6 @@ class Vigilante_Firewall {
             'copyrightcheck',
             'crescent',
             'curl/',
-            'custo',
             'dittospyder',
             'dragonfly',
             'easydl',

@@ -335,6 +335,7 @@ class Vigilante_Plugin_Status {
      * Logic:
      *  - signal=open                       → state=open
      *  - signal=closed                     → state=closed
+     *  - signal=closed AND reused slug     → state=not_in_repo (premium reusing a dead wp.org slug)
      *  - signal=not_found AND prior=open   → state=removed (high confidence)
      *  - signal=not_found AND prior=null   → state=not_in_repo (premium/custom)
      *  - signal=not_found AND prior=closed → keep state=closed (still closed)
@@ -360,7 +361,10 @@ class Vigilante_Plugin_Status {
                 $new_state = 'open';
                 break;
             case 'closed':
-                $new_state = 'closed';
+                // A closed verdict only matters if the wp.org listing refers
+                // to the plugin actually installed; commercial plugins that
+                // reuse a slug closed years ago are handled as not_in_repo.
+                $new_state = $this->is_reused_premium_slug( $slug, $plugin_data ) ? 'not_in_repo' : 'closed';
                 break;
             case 'not_found':
             default:
@@ -419,6 +423,60 @@ class Vigilante_Plugin_Status {
         }
 
         return $entry;
+    }
+
+    /**
+     * Whether a "closed" verdict from wp.org refers to a DIFFERENT plugin
+     * than the one installed.
+     *
+     * Premium plugins sometimes ship in a folder whose slug once lived on
+     * wp.org and was closed when the product went commercial. The archived
+     * listing then describes the abandoned free version, not the installed
+     * one, so alerting "closed" (critical + email) on it is a false
+     * positive. Real case: WPML installs as sitepress-multilingual-cms, a
+     * slug closed on wp.org in its 2.x days, while the commercial 4.x
+     * updates from wpml.org.
+     *
+     * Two signals, either one is enough:
+     * - The Update URI header (WP 5.8+) points outside wordpress.org (or is
+     *   "false"): updates are not served by wp.org, so the wp.org slug
+     *   status is not about this plugin. Note this only exempts a plugin
+     *   whose own header opts out of wp.org; a plugin genuinely installed
+     *   from wp.org carries no such header and still alerts.
+     * - The slug is in the built-in allowlist of known reused slugs, which
+     *   covers commercial plugins that predate the Update URI header.
+     *
+     * @since 2.9.3
+     * @param string $slug        Plugin folder slug.
+     * @param array  $plugin_data WP plugin header data from get_plugins().
+     * @return bool
+     */
+    private function is_reused_premium_slug( $slug, $plugin_data ) {
+        $known_reused = array(
+            'sitepress-multilingual-cms', // WPML (OnTheGoSystems).
+        );
+
+        if ( in_array( $slug, $known_reused, true ) ) {
+            return true;
+        }
+
+        $update_uri = isset( $plugin_data['UpdateURI'] ) ? trim( (string) $plugin_data['UpdateURI'] ) : '';
+
+        if ( '' === $update_uri ) {
+            return false;
+        }
+
+        if ( 'false' === strtolower( $update_uri ) ) {
+            return true;
+        }
+
+        $host = wp_parse_url( $update_uri, PHP_URL_HOST );
+
+        if ( is_string( $host ) && '' !== $host && ! preg_match( '/(^|\.)(wordpress\.org|w\.org)$/i', $host ) ) {
+            return true;
+        }
+
+        return false;
     }
 
     /**

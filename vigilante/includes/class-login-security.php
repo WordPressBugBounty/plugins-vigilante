@@ -184,9 +184,15 @@ class Vigilante_Login_Security {
         
         // Block wp-admin access for non-logged users - execute immediately
         $this->block_wp_admin_access();
-        
+
         // Intercept redirects to wp-login.php from wp-admin and show 404 instead
         add_filter( 'wp_redirect', array( $this, 'intercept_admin_redirect' ), 1, 2 );
+
+        // Block core's /login and /wp-login.php pretty-URL shortcuts.
+        // Priority 1: must win over redirect_canonical() (10) and
+        // wp_redirect_admin_locations() (1000), which would 302 the
+        // shortcut to wp_login_url() — the hidden URL — leaking the slug.
+        add_action( 'template_redirect', array( $this, 'block_login_shortcuts' ), 1 );
     }
 
     /**
@@ -198,14 +204,19 @@ class Vigilante_Login_Security {
      * @return string
      */
     public function intercept_admin_redirect( $location, $status ) {
-        
+
         // Only intercept if custom login URL is set
         if ( empty( $this->options['custom_login_url'] ) ) {
             return $location;
         }
-        
-        // Check if this is a redirect to wp-login.php
-        if ( strpos( $location, 'wp-login.php' ) === false ) {
+
+        // Check if this is a redirect to the login screen. Besides literal
+        // wp-login.php, auth_redirect() targets wp_login_url(), which the
+        // login_url filter has already rewritten to the hidden slug — so a
+        // redirect to the custom login URL must be caught too, or an
+        // anonymous POST to /wp-admin would leak the slug in the Location
+        // header (the login_url filter runs for every wp_login_url() call).
+        if ( strpos( $location, 'wp-login.php' ) === false && ! $this->is_hidden_login_url( $location ) ) {
             return $location;
         }
         
@@ -236,12 +247,35 @@ class Vigilante_Login_Security {
                     'warning'
                 );
             }
-            
-            // Show simple 404 (WordPress not fully loaded at this point)
-            $this->show_404_simple();
+
+            $this->serve_404();
         }
-        
+
         return $location;
+    }
+
+    /**
+     * Whether a URL points at the hidden custom login screen.
+     *
+     * Matches the exact URL, with or without trailing slash, and with a
+     * query string. Prefix-matching the bare slug is deliberately avoided
+     * so a slug like "acceso" does not match "accesorios".
+     *
+     * @since 2.9.3
+     * @param string $url URL to test.
+     * @return bool
+     */
+    private function is_hidden_login_url( $url ) {
+        if ( empty( $this->custom_login_slug ) ) {
+            return false;
+        }
+
+        $hidden = home_url( $this->custom_login_slug . '/' );
+        $bare   = untrailingslashit( $hidden );
+
+        return 0 === strpos( $url, $hidden )
+            || $url === $bare
+            || 0 === strpos( $url, $bare . '?' );
     }
 
     /**
@@ -295,9 +329,8 @@ class Vigilante_Login_Security {
                 'warning'
             );
         }
-        
-        // Show simple 404 (WordPress not fully loaded at this point)
-        $this->show_404_simple();
+
+        $this->serve_404();
     }
 
     /**
@@ -400,7 +433,50 @@ class Vigilante_Login_Security {
         }
         
         // Return 404
-        $this->show_404();
+        $this->serve_404();
+    }
+
+    /**
+     * Block WordPress' pretty-URL login shortcuts (/login, /wp-login.php).
+     *
+     * Core's wp_redirect_admin_locations() (template_redirect, priority
+     * 1000) turns a 404 on those paths into wp_redirect( wp_login_url() ).
+     * With a custom login URL active wp_login_url() IS the hidden slug, so
+     * that 302 would hand the secret to anyone typing /login, while /admin
+     * correctly ends in a 404. Runs only when the request is already a 404:
+     * if a real page named "login" exists, core does not redirect either
+     * and this must not interfere.
+     *
+     * @since 2.9.3
+     */
+    public function block_login_shortcuts() {
+        if ( ! is_404() ) {
+            return;
+        }
+
+        $request = strtolower( $this->get_request_path() );
+
+        if ( ! in_array( $request, array( 'login', 'wp-login.php' ), true ) ) {
+            return;
+        }
+
+        // Allow whitelisted IPs (e.g. remote managers like MainWP/ManageWP).
+        if ( $this->is_ip_exempt_from_hiding() ) {
+            return;
+        }
+
+        if ( $this->activity_log ) {
+            $request_uri = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
+            $this->activity_log->log(
+                'login',
+                'hidden_login_access',
+                __( 'Attempt to access hidden wp-login.php', 'vigilante' ),
+                array( 'request_uri' => $request_uri ),
+                'warning'
+            );
+        }
+
+        $this->serve_404();
     }
 
     /**
@@ -563,34 +639,64 @@ class Vigilante_Login_Security {
      * Use this only when WordPress is fully loaded (login_init, template_redirect, etc.)
      */
     private function show_404() {
-        
+
         global $wp_query;
-        
+
         // Set 404 status
         status_header( 404 );
         nocache_headers();
-        
+
         // Try to properly set up WordPress 404
         if ( ! isset( $wp_query ) ) {
             // We need to bootstrap WordPress query
             wp();
         }
-        
+
         if ( isset( $wp_query ) && is_object( $wp_query ) ) {
             $wp_query->set_404();
         }
-        
+
         // Try to get the theme's 404 template
         $template = get_query_template( '404' );
-        
-        
+
+
         if ( $template && file_exists( $template ) ) {
             include $template;
             exit;
         }
-        
-        
+
+        // Block themes have no 404.php; resolve their 404 template the same
+        // way core's template-loader does, so those sites also get the
+        // theme's 404 instead of the plain fallback page.
+        if ( function_exists( 'locate_block_template' ) ) {
+            $template = locate_block_template( '', '404', array( '404' ) );
+
+            if ( $template && file_exists( $template ) ) {
+                include $template;
+                exit;
+            }
+        }
+
         // Fallback to simple 404
+        $this->show_404_simple();
+    }
+
+    /**
+     * Serve the hidden-URL 404 through a single decision point.
+     *
+     * All blocking paths call this helper so the response never diverges by
+     * accident. The themed 404 requires the theme to be set up and a front
+     * context; the wp-admin blocking paths run at plugins_loaded or inside
+     * the admin bootstrap, where including a theme template would fatal, so
+     * those fall back to the simple page by construction.
+     *
+     * @since 2.9.3
+     */
+    private function serve_404() {
+        if ( did_action( 'after_setup_theme' ) && ! is_admin() ) {
+            $this->show_404();
+        }
+
         $this->show_404_simple();
     }
 

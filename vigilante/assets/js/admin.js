@@ -806,6 +806,13 @@
             var strings = vigilanteAdmin.strings;
             var originalText = $btn.text();
 
+            // The POST carries an opaque key, never the file name: WAFs like
+            // ModSecurity (OWASP CRS 930130) block any request argument
+            // containing the literal "wp-config.php", which made Approve fail
+            // with a generic AJAX error on hardened hostings. The PHP handler
+            // maps the key back against its own whitelist.
+            var fileKey = { 'wp-config.php': 'cfg', '.htaccess': 'hta' }[ file ] || '';
+
             $btn.prop('disabled', true).text(strings.approving || 'Approving...');
 
             $.ajax({
@@ -814,7 +821,7 @@
                 data: {
                     action: 'vigilante_approve_critical_file',
                     nonce: vigilanteAdmin.nonce,
-                    file: file
+                    file_key: fileKey
                 },
                 success: function(response) {
                     if (response.success) {
