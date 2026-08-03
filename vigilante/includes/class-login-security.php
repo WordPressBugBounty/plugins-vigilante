@@ -225,9 +225,9 @@ class Vigilante_Login_Security {
         
         
         // If accessing wp-admin and being redirected to login, show 404 instead
-        if ( strpos( $request, '/wp-admin' ) !== false ) {
+        if ( $this->is_wp_admin_request() ) {
             // Don't intercept admin-ajax.php or admin-post.php
-            if ( strpos( $request, 'admin-ajax.php' ) !== false || strpos( $request, 'admin-post.php' ) !== false ) {
+            if ( $this->is_open_admin_endpoint() ) {
                 return $location;
             }
 
@@ -279,6 +279,114 @@ class Vigilante_Login_Security {
     }
 
     /**
+     * The request path as sent by the client, query string stripped.
+     *
+     * Unlike get_request_path(), the result is NOT made relative to
+     * home_url(): the admin area can hang from a different path than the
+     * site itself (WP_SITEURL vs WP_HOME), so wp-admin matching needs the
+     * raw path.
+     *
+     * @since 2.9.4
+     * @return string
+     */
+    private function get_request_uri_path() {
+        $request = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
+
+        if ( '' === $request ) {
+            return '';
+        }
+
+        if ( false !== strpos( $request, '?' ) ) {
+            $request = strstr( $request, '?', true );
+        }
+
+        return untrailingslashit( $request );
+    }
+
+    /**
+     * Whether the current request targets the real wp-admin area.
+     *
+     * Replaces a strpos() for "/wp-admin" over the whole REQUEST_URI. That
+     * test also matched the query string, so /?redirect_to=/wp-admin/ turned
+     * the home page into a 404 and an un-encoded redirect_to broke the hidden
+     * login screen itself; it matched any front-end path merely starting with
+     * those characters (/wp-admin-tips/); and it dragged scanner hits on
+     * non-existent subdirectories (/blog/wp-admin/) into the blocking path,
+     * where they were answered from 'init' instead of by WordPress' own 404.
+     *
+     * Two independent signals, ORed so neither is a single point of failure:
+     * is_admin(), set by the wp-admin bootstrap and immune to filters, and a
+     * path comparison against admin_url() for the rare setup that serves the
+     * admin directory through the front controller. Prefix matching requires
+     * a following slash, the same precaution is_hidden_login_url() takes.
+     *
+     * @since 2.9.4
+     * @return bool
+     */
+    private function is_wp_admin_request() {
+        if ( is_admin() ) {
+            return true;
+        }
+
+        $path = $this->get_request_uri_path();
+
+        if ( '' === $path ) {
+            return false;
+        }
+
+        $admin_path = wp_parse_url( admin_url(), PHP_URL_PATH );
+
+        if ( empty( $admin_path ) ) {
+            return false;
+        }
+
+        $admin_path = untrailingslashit( $admin_path );
+
+        return $path === $admin_path || 0 === strpos( $path, $admin_path . '/' );
+    }
+
+    /**
+     * Whether the request targets an admin entry point that must stay open.
+     *
+     * admin-ajax.php and admin-post.php are used by logged-out visitors on
+     * the front end (WooCommerce fragments, form handlers), so hiding
+     * wp-admin must never touch them. Matched as the exact admin path plus
+     * the file name: the old check ran over the whole REQUEST_URI, so
+     * /wp-admin/edit.php?x=admin-ajax.php slipped past the block, and a bare
+     * basename() would do the same for a PATH_INFO style request such as
+     * /wp-admin/options-general.php/admin-ajax.php. Falls back to the file
+     * name only when admin_url() gives nothing to compare against, so a
+     * broken filter can never take AJAX down for logged-out visitors.
+     *
+     * @since 2.9.4
+     * @return bool
+     */
+    private function is_open_admin_endpoint() {
+        $path = $this->get_request_uri_path();
+
+        if ( '' === $path ) {
+            return false;
+        }
+
+        $endpoints  = array( 'admin-ajax.php', 'admin-post.php' );
+        $admin_path = wp_parse_url( admin_url(), PHP_URL_PATH );
+
+        if ( empty( $admin_path ) ) {
+            return in_array( basename( $path ), $endpoints, true );
+        }
+
+        $admin_path = untrailingslashit( $admin_path );
+
+        foreach ( $endpoints as $endpoint ) {
+            if ( $path === $admin_path . '/' . $endpoint ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Block access to wp-admin for non-logged users
      * Shows 404 instead of redirecting to login
      */
@@ -293,12 +401,12 @@ class Vigilante_Login_Security {
         
         
         // Check if accessing wp-admin
-        if ( strpos( $request, '/wp-admin' ) === false ) {
+        if ( ! $this->is_wp_admin_request() ) {
             return;
         }
-        
+
         // Allow admin-ajax.php and admin-post.php
-        if ( strpos( $request, 'admin-ajax.php' ) !== false || strpos( $request, 'admin-post.php' ) !== false ) {
+        if ( $this->is_open_admin_endpoint() ) {
             return;
         }
         
@@ -646,12 +754,11 @@ class Vigilante_Login_Security {
         status_header( 404 );
         nocache_headers();
 
-        // Try to properly set up WordPress 404
-        if ( ! isset( $wp_query ) ) {
-            // We need to bootstrap WordPress query
-            wp();
-        }
-
+        // $wp_query always exists by now: wp-settings.php creates it before
+        // 'init' fires, and serve_404() only routes here once 'wp_loaded' has
+        // passed. Earlier versions called wp() when it was missing, a branch
+        // that was never reachable and that misled a performance analysis into
+        // blaming the main query for the cost of the render.
         if ( isset( $wp_query ) && is_object( $wp_query ) ) {
             $wp_query->set_404();
         }
@@ -685,15 +792,23 @@ class Vigilante_Login_Security {
      * Serve the hidden-URL 404 through a single decision point.
      *
      * All blocking paths call this helper so the response never diverges by
-     * accident. The themed 404 requires the theme to be set up and a front
-     * context; the wp-admin blocking paths run at plugins_loaded or inside
-     * the admin bootstrap, where including a theme template would fatal, so
-     * those fall back to the simple page by construction.
+     * accident. Rendering a theme template is only safe once 'wp_loaded' has
+     * fired: that is the point the rest of the stack assumes has passed
+     * before any template runs, and WooCommerce for one does not set up the
+     * cart until then. block_wp_login_access() runs at 'login_init' and
+     * block_login_shortcuts() at 'template_redirect', both after 'wp_loaded',
+     * so those keep the themed 404; block_wp_admin_access() runs inside
+     * 'init' and gets the simple page.
+     *
+     * 2.9.3 gated this on 'after_setup_theme', which has already fired by
+     * 'init'. The wp-admin path therefore included the theme's 404.php from
+     * inside 'init' on every blocked request, filling debug.log with
+     * _doing_it_wrong notices and costing a full page render per rejection.
      *
      * @since 2.9.3
      */
     private function serve_404() {
-        if ( did_action( 'after_setup_theme' ) && ! is_admin() ) {
+        if ( did_action( 'wp_loaded' ) && ! is_admin() ) {
             $this->show_404();
         }
 
