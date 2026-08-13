@@ -2307,10 +2307,15 @@ class Vigilante_Admin {
                                 <span class="vigilante-module-status"></span>
                                 <span class="vigilante-module-name"><?php echo esc_html( $label ); ?></span>
                                 <label class="vigilante-toggle">
-                                    <input type="checkbox" 
-                                           name="modules[<?php echo esc_attr( $module ); ?>]" 
-                                           value="1" 
+                                    <?php
+                                    /* translators: %s: Security module name, for example Firewall. */
+                                    $toggle_label = sprintf( __( 'Enable %s', 'vigilante' ), $label );
+                                    ?>
+                                    <input type="checkbox"
+                                           name="modules[<?php echo esc_attr( $module ); ?>]"
+                                           value="1"
                                            <?php checked( $enabled ); ?>
+                                           aria-label="<?php echo esc_attr( $toggle_label ); ?>"
                                            data-module="<?php echo esc_attr( $module ); ?>">
                                     <span class="vigilante-toggle-slider"></span>
                                 </label>

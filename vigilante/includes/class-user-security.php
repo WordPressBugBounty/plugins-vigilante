@@ -2209,6 +2209,13 @@ class Vigilante_User_Security {
 
         $users = get_users( $args );
 
+        // Asking for IDs only means WordPress never primes the usermeta cache, so
+        // every get_user_meta() below would hit the database once per user. On a
+        // site with many users in these roles that is one query per user, every day.
+        if ( ! empty( $users ) ) {
+            cache_users( $users );
+        }
+
         foreach ( $users as $user_id ) {
             // Skip if reminder already sent for this cycle
             if ( get_user_meta( $user_id, 'vigilante_password_reminder_sent', true ) ) {

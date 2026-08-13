@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.9.4
+Stable tag: 2.9.5
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -412,6 +412,13 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 2.9.5 =
+* Improved: the daily password expiry cron no longer runs one database query per user. Asking WordPress for user IDs alone leaves the usermeta cache empty, so every reminder check went back to the database; the whole set is now primed up front. Sites with many users in the affected roles will notice it in the daily maintenance run.
+* Improved: the mixed content rewriter no longer opens an output buffer on admin, AJAX and REST requests. It only ever rewrites complete HTML documents, so those responses were paying for a buffer and a callback that discarded them anyway. On a WooCommerce site the cart fragments endpoint alone accounted for dozens of them per visitor.
+* Fix: the firewall rate limiter now measures a real 60-second window. The request counter renewed its own expiry on every hit, so the window never closed while traffic kept arriving and the limit stopped meaning "requests per minute": it became "requests since the last full minute of silence". Legitimate visitors and editors were locked out with a 429 well below the configured limit, and the problem got worse the busier the site was, because the count is per IP and never dropped. With the default of 120 per minute, sustained traffic of 66 per minute blocked itself after 110 seconds. It hit hardest wherever several people share one address, such as an office or mobile CGNAT, and above all on sites behind a CDN with no proxy header declared, where the entire site counts as a single visitor. Counters stored by earlier versions are discarded on upgrade.
+* Fix: the mixed content rewriter no longer closes an output buffer it did not open. On shutdown it only checked whether any buffer was open at all, so when another plugin had opened one after it and not yet closed it, that buffer was flushed instead and Vigilant's own was left behind.
+* Fix: the module on and off switches on the settings page now have an accessible name. A screen reader announced them as an unlabelled checkbox, because the module name sits in an element outside the switch label, which made the module list, the main control of the plugin, unusable without sight.
+
 = 2.9.4 =
 * Fix: with a custom login URL active, blocking access to the hidden wp-admin no longer renders the theme's 404 template from inside the 'init' hook. Every blocked request was paying for a full page render before WordPress had finished booting, costing as much as serving a real page, and it filled debug.log with "called incorrectly" notices from components that expect 'wp_loaded' to have fired first (WooCommerce logged one per hit for the cart). The regression arrived in 2.9.3, when the four blocking paths were unified into a single 404 helper. The hidden wp-login.php and the /login shortcut still return the themed 404, because those run late enough in the request for it to be safe.
 * Fix: hiding wp-admin no longer answers 404 on front-end URLs that merely contain "wp-admin". The check looked for that text anywhere in the request, query string included, so a post published at /wp-admin-tips/, a link such as /?redirect_to=/wp-admin/ and even the hidden login screen itself when its redirect_to value was not URL-encoded were all turned into 404s. Only the real admin path is matched now, and the admin-ajax.php and admin-post.php exemptions are matched on the path too, so a request like /wp-admin/edit.php?x=admin-ajax.php no longer slips past the block. Scanner hits on non-existent subdirectories such as /blog/wp-admin/ are left to WordPress' own 404, so they no longer appear in the activity log.
@@ -443,8 +450,8 @@ For older changelog entries, please check the [changelog.txt](https://plugins.sv
 
 == Upgrade Notice ==
 
-= 2.9.4 =
-Fixes a 2.9.3 regression in the custom login URL: blocked wp-admin requests rendered the theme 404 template from the init hook, costing a full page render each and filling debug.log. Front-end URLs merely containing wp-admin, such as /wp-admin-tips/, are no longer turned into 404s.
+= 2.9.5 =
+Fixes the firewall rate limiter, which never closed its 60 second window: the count kept growing while traffic continued, so visitors got a 429 well below the configured limit. Sites behind a CDN or sharing one IP were hit hardest.
 
 == Support ==
 

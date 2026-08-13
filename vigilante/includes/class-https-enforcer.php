@@ -41,6 +41,15 @@ class Vigilante_Https_Enforcer {
     private $ob_started = false;
 
     /**
+     * Nesting level of the buffer opened by this class.
+     *
+     * Recorded so shutdown can tell whether the buffer on top is still ours.
+     *
+     * @var int
+     */
+    private $ob_level = 0;
+
+    /**
      * Constructor
      *
      * @param Vigilante_Settings $settings Settings instance.
@@ -142,8 +151,41 @@ class Vigilante_Https_Enforcer {
             return;
         }
 
+        // The rewriter only touches complete HTML documents (fix_output_buffer()
+        // bails on anything without <html or <!DOCTYPE), so buffering the admin,
+        // AJAX and REST responses pays for a buffer and a callback that can never
+        // do any work. On a WooCommerce site the cart-fragments endpoint alone is
+        // dozens of those per visitor.
+        if ( is_admin() || wp_doing_ajax() || $this->is_rest_request() ) {
+            return;
+        }
+
         ob_start( array( $this, 'fix_output_buffer' ) );
         $this->ob_started = true;
+        $this->ob_level   = ob_get_level();
+    }
+
+    /**
+     * Whether the current request is a REST API request.
+     *
+     * REST_REQUEST is only defined once the request is being served, which is
+     * after wp_loaded, so the REST route prefix is checked as well.
+     *
+     * @return bool
+     */
+    private function is_rest_request() {
+        if ( defined( 'REST_REQUEST' ) && REST_REQUEST ) {
+            return true;
+        }
+
+        if ( ! isset( $_SERVER['REQUEST_URI'] ) ) {
+            return false;
+        }
+
+        $path   = wp_parse_url( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ), PHP_URL_PATH );
+        $prefix = '/' . trim( rest_get_url_prefix(), '/' ) . '/';
+
+        return is_string( $path ) && 0 === strpos( $path, $prefix );
     }
 
     /**
@@ -153,7 +195,12 @@ class Vigilante_Https_Enforcer {
      * properly closed within the same logical flow.
      */
     public function end_output_buffer() {
-        if ( $this->ob_started && ob_get_level() > 0 ) {
+        // Only flush when the buffer on top is exactly the one we opened. Testing
+        // for "is there any buffer at all" would close somebody else's buffer when
+        // another plugin opened one after ours and had not closed it yet, leaving
+        // ours open on top of that. When the levels do not match, doing nothing is
+        // the safe move: PHP flushes what is left at the end of the request.
+        if ( $this->ob_started && ob_get_level() === $this->ob_level ) {
             ob_end_flush();
             $this->ob_started = false;
         }

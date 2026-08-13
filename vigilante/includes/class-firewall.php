@@ -20,6 +20,15 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Vigilante_Firewall {
 
     /**
+     * Rate limiting window, in seconds.
+     *
+     * The "Requests per Minute" setting is measured over this window.
+     *
+     * @var int
+     */
+    const RATE_LIMIT_WINDOW = 60;
+
+    /**
      * Settings instance
      *
      * @var Vigilante_Settings
@@ -756,19 +765,42 @@ class Vigilante_Firewall {
         // Allow Under Attack mode (or other filters) to override threshold
         $max_requests = absint( apply_filters( 'vigilante_rate_limit_requests', $max_requests ) );
 
-        // Use transients for request counting (1 minute window)
+        // Fixed window, anchored to the timestamp of its first request.
+        //
+        // The count used to live in a transient whose TTL was renewed on every
+        // hit, which is a window that never closes: any IP going less than 60 s
+        // between requests kept accumulating, so the effective limit was not
+        // "requests per minute" but "requests since the last full minute of
+        // silence". A logged-in editor publishing several posts in a row could
+        // pile up 150+ requests while never exceeding 60 in any single minute,
+        // and got a 429. Storing the window start makes the reset explicit
+        // instead of relying on the transient expiring.
         $transient_key = 'vigilante_rate_' . md5( $ip );
-        $request_count = get_transient( $transient_key );
+        $window        = get_transient( $transient_key );
+        $now           = time();
 
-        if ( false === $request_count ) {
-            // First request in this window
-            set_transient( $transient_key, 1, 60 );
-            return;
+        // Counts stored before 2.9.5 were a bare integer with no window start.
+        // There is no way to tell how old such a count is, so open a new window.
+        if ( ! is_array( $window ) || ! isset( $window['start'], $window['count'] ) ) {
+            $window = array(
+                'start' => $now,
+                'count' => 0,
+            );
         }
 
-        $request_count = absint( $request_count );
+        // Window elapsed: start counting again, even under continuous traffic.
+        if ( ( $now - absint( $window['start'] ) ) >= self::RATE_LIMIT_WINDOW ) {
+            $window = array(
+                'start' => $now,
+                'count' => 0,
+            );
+        }
 
-        if ( $request_count >= $max_requests ) {
+        // Count this request, then allow up to $max_requests per window.
+        $window['count'] = absint( $window['count'] ) + 1;
+        $request_count   = $window['count'];
+
+        if ( $request_count > $max_requests ) {
             $base_duration = absint( $rate_limit['block_duration'] );
 
             // Allow Under Attack mode (or other filters) to override duration
@@ -805,8 +837,9 @@ class Vigilante_Firewall {
             $this->block_request( 'rate_limit', __( 'Rate limit exceeded. Please try again later.', 'vigilante' ), 429 );
         }
 
-        // Increment counter
-        set_transient( $transient_key, $request_count + 1, 60 );
+        // The TTL only garbage-collects the payload once the IP goes quiet; what
+        // bounds the count is the window reset above, not the expiry.
+        set_transient( $transient_key, $window, self::RATE_LIMIT_WINDOW );
     }
 
     /**
