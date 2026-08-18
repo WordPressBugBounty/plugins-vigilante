@@ -282,6 +282,18 @@ class Vigilante_Activator {
             return;
         }
 
+        /*
+         * Only rewrite the URLs when the request doing the activation is itself
+         * running over HTTPS, which proves the site answers over it. Without this
+         * check, activating on an HTTP-only site pointed it at an address that
+         * may not respond, locking the owner out of their own admin. is_ssl() is
+         * also false under WP-CLI, where there is no request to learn from, so a
+         * command-line activation leaves the URLs alone as well.
+         */
+        if ( ! is_ssl() ) {
+            return;
+        }
+
         // Check if already HTTPS
         $site_url = get_option( 'siteurl' );
         $home_url = get_option( 'home' );

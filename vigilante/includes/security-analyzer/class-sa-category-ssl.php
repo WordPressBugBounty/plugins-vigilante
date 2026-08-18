@@ -260,9 +260,27 @@ class Vigilante_SA_Category_SSL {
             return Vigilante_SA_Check_Result::skip( $args );
         }
 
+        // Only count references the browser actually loads as subresources.
+        // A plain <a href="http://..."> is a navigation, not mixed content: the
+        // browser does not flag it and nothing insecure is pulled into the page.
+        // Counting every href made ordinary outbound links to http:// sites read
+        // as insecure content, which is a false positive users cannot act on.
         $matches = array();
-        preg_match_all( '#(src|href)=["\']http://[^"\']+["\']#i', $probe['body'], $matches );
+        preg_match_all( '#src=["\']http://[^"\']+["\']#i', $probe['body'], $matches );
         $count = isset( $matches[0] ) ? count( $matches[0] ) : 0;
+
+        // <link> only counts when its rel actually fetches something. Values like
+        // canonical, alternate, pingback or EditURI are metadata, not subresources.
+        $link_tags = array();
+        preg_match_all( '#<link\b[^>]*>#i', $probe['body'], $link_tags );
+        foreach ( $link_tags[0] as $link_tag ) {
+            if ( ! preg_match( '#href=["\']http://#i', $link_tag ) ) {
+                continue;
+            }
+            if ( preg_match( '#rel=["\'][^"\']*\b(stylesheet|preload|modulepreload|prefetch|preconnect|icon|manifest)\b#i', $link_tag ) ) {
+                $count++;
+            }
+        }
 
         // An enforced CSP with upgrade-insecure-requests makes the browser
         // load every subrequest over HTTPS (external references included),

@@ -76,8 +76,7 @@ class Vigilante_Settings {
                 // Bot protection
                 'block_bad_bots'            => true,
                 'block_empty_user_agent'    => false,
-                'block_http_1_0'            => false,
-                
+
                 // Rate limiting
                 'rate_limiting'             => array(
                     'enabled'             => true,
@@ -107,7 +106,6 @@ class Vigilante_Settings {
                 // File protection (htaccess-based)
                 'disable_directory_browsing' => true,
                 'protect_wp_config'          => true,
-                'protect_htaccess'           => true,
                 'protect_wp_includes'        => true,
                 'protect_uploads_php'        => true,
                 'protect_sensitive_files'    => true,
@@ -153,7 +151,11 @@ class Vigilante_Settings {
                 ),
                 
                 // CSP - WordPress/Gutenberg compatible defaults
-                // Note: blob: is required in frame-src and worker-src for the block editor
+                // Note: blob: is required in frame-src and worker-src for the block editor,
+                // and in connect-src for the client-side media processing WordPress 7.1
+                // introduced: @wordpress/vips puts its WebAssembly binary in a blob: URL and
+                // fetches it, and fetch() is governed by connect-src, where 'self' does not
+                // cover blob:. Without it the editor cannot process images before upload.
                 'csp'                     => array(
                     'enabled'     => true,
                     'report_only' => false,
@@ -164,7 +166,7 @@ class Vigilante_Settings {
                         'style-src'                => "'self' 'unsafe-inline' https:",
                         'img-src'                  => "'self' data: https: blob:",
                         'font-src'                 => "'self' data: https:",
-                        'connect-src'              => "'self' https: wss:",
+                        'connect-src'              => "'self' https: wss: blob:",
                         'media-src'                => "'self' https: blob:",
                         'frame-src'                => "'self' https: blob:",
                         'frame-ancestors'          => "'self'",
@@ -184,7 +186,13 @@ class Vigilante_Settings {
                 ),
                 
                 // HTTPS Enforcer (moved from separate module)
-                'force_https'               => true,
+                //
+                // force_https rewrites siteurl/home to https on activation, so it
+                // ships off: a site without working HTTPS would end up pointing at
+                // an address that does not answer. It is an opt-in decision per
+                // site, made from the Security Headers tab. Sites whose URLs a
+                // previous version already rewrote keep them; nothing reverts them.
+                'force_https'               => false,
                 'redirect_http_to_https'    => true,
                 'fix_mixed_content'         => true,
 
@@ -260,7 +268,6 @@ class Vigilante_Settings {
                     'info', 'root', 'adm', 'sysadmin', 'support',
                     'webmaster', 'master', 'owner', 'manager', 'demo',
                 ),
-                'warn_existing_insecure'  => true,
                 'block_author_scanning'   => true,
                 'force_strong_passwords'  => true,
                 'min_password_length'     => 12,
@@ -719,7 +726,7 @@ class Vigilante_Settings {
                             'style-src'       => "'self' 'unsafe-inline'",
                             'img-src'         => "'self' data: https: blob:",
                             'font-src'        => "'self' data:",
-                            'connect-src'     => "'self' https:",
+                            'connect-src'     => "'self' https: blob:",
                             'frame-src'       => "'self' blob:",
                             'frame-ancestors' => "'none'",
                             'worker-src'      => "'self' blob:",

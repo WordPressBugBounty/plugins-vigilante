@@ -3107,6 +3107,16 @@ class Vigilante_Admin {
                         </td>
                     </tr>
                     <tr>
+                        <th scope="row"><?php esc_html_e( 'Disable XML-RPC Pingback', 'vigilante' ); ?></th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="login_security[disable_xmlrpc_pingback]" value="1" <?php checked( ! empty( $options['disable_xmlrpc_pingback'] ) ); ?>>
+                                <?php esc_html_e( 'Remove only the pingback methods and keep the rest of XML-RPC working', 'vigilante' ); ?>
+                            </label>
+                            <p class="description"><?php esc_html_e( 'Pingbacks are the part abused for distributed attacks. Use this when something still needs XML-RPC, such as the WordPress mobile app or Jetpack.', 'vigilante' ); ?></p>
+                        </td>
+                    </tr>
+                    <tr>
                         <th scope="row"><?php esc_html_e( 'Disable Application Passwords', 'vigilante' ); ?></th>
                         <td>
                             <label>
@@ -3686,6 +3696,40 @@ class Vigilante_Admin {
                                 <input type="checkbox" name="security_headers[csp][report_only]" value="1" <?php checked( ! empty( $options['csp']['report_only'] ) ); ?>>
                                 <?php esc_html_e( 'Report violations without blocking (for testing)', 'vigilante' ); ?>
                             </label>
+                        </td>
+                    </tr>
+                </table>
+
+                <h3><?php esc_html_e( 'HTTPS', 'vigilante' ); ?></h3>
+                <p class="description"><?php esc_html_e( 'HTTPS is strongly recommended, but Vigilant will not impose it. Enable only what your site already supports.', 'vigilante' ); ?></p>
+                <table class="form-table">
+                    <tr>
+                        <th scope="row"><?php esc_html_e( 'Redirect HTTP to HTTPS', 'vigilante' ); ?></th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="security_headers[redirect_http_to_https]" value="1" <?php checked( ! empty( $options['redirect_http_to_https'] ) ); ?>>
+                                <?php esc_html_e( 'Send visitors arriving over HTTP to the HTTPS address', 'vigilante' ); ?>
+                            </label>
+                            <p class="description"><?php esc_html_e( 'Only applies when the site address is already an https:// one. On a site still published over HTTP it does nothing, so it cannot leave the site unreachable.', 'vigilante' ); ?></p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e( 'Fix Mixed Content', 'vigilante' ); ?></th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="security_headers[fix_mixed_content]" value="1" <?php checked( ! empty( $options['fix_mixed_content'] ) ); ?>>
+                                <?php esc_html_e( 'Rewrite http:// resources to https:// and ask browsers to upgrade the rest', 'vigilante' ); ?>
+                            </label>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e( 'Rewrite Site Address on Activation', 'vigilante' ); ?></th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="security_headers[force_https]" value="1" <?php checked( ! empty( $options['force_https'] ) ); ?>>
+                                <?php esc_html_e( 'Change the WordPress and site addresses to https:// when the plugin is activated', 'vigilante' ); ?>
+                            </label>
+                            <p class="description"><?php esc_html_e( '&#9888; Off by default. This writes to the WordPress Address and Site Address settings, and turning the plugin off later does not undo it. It only runs on activation, and only when the site answers over HTTPS.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
                 </table>

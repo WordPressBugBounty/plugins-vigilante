@@ -728,6 +728,12 @@ trait Vigilante_Admin_Ajax {
     /**
      * Sanitize CSP directives
      *
+     * NOTE: dead code. Vigilante_Admin declares its own sanitize_section_data(),
+     * which takes precedence over this trait's, so neither that method nor the
+     * per-section sanitizers it calls (this one included) are ever reached. The
+     * live save path is Vigilante_Admin::process_section_data(). Kept as-is
+     * rather than deleted mid-release; scheduled for removal in 3.0.
+     *
      * @param array $directives CSP directives.
      * @return array
      */
@@ -736,7 +742,8 @@ trait Vigilante_Admin_Ajax {
         $allowed_directives = array(
             'default-src', 'script-src', 'style-src', 'img-src', 'font-src',
             'connect-src', 'media-src', 'frame-src', 'frame-ancestors',
-            'base-uri', 'form-action', 'object-src', 'upgrade-insecure-requests',
+            'base-uri', 'form-action', 'object-src', 'worker-src',
+            'upgrade-insecure-requests',
         );
 
         foreach ( $allowed_directives as $directive ) {

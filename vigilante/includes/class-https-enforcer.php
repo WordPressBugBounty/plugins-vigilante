@@ -93,6 +93,20 @@ class Vigilante_Https_Enforcer {
             return;
         }
 
+        /*
+         * Only redirect when the site itself declares HTTPS. A site whose home
+         * URL is still http:// has not moved to HTTPS, and sending every request
+         * to an address that may not answer takes it offline outright. Read from
+         * the home option (which honours the WP_HOME constant through the
+         * option_home filter) rather than home_url(), so the answer is the
+         * address the site declares and not one derived from the current
+         * request. A site already on HTTPS has an https home URL and keeps
+         * redirecting exactly as before.
+         */
+        if ( 0 !== strpos( (string) get_option( 'home' ), 'https://' ) ) {
+            return;
+        }
+
         // Skip CLI
         if ( defined( 'WP_CLI' ) && WP_CLI ) {
             return;

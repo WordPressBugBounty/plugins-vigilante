@@ -65,11 +65,26 @@ function vigilante_uninstall() {
         'vigilante_legacy_backups_cleaned',
         'vigilante_css_exclusion_migrated',
         'vigilante_checksum_cache_flushed_290',
+        // Safety copies taken before writing to the site's configuration files.
+        // The wp-config.php one holds the database credentials and the
+        // authentication salts, so leaving it behind would keep them readable in
+        // the options table long after the plugin is gone.
+        'vigilante_htaccess_backup',
+        'vigilante_wpconfig_backup',
+        'vigilante_plugin_status_state',
+        'vigilante_plugin_status_last_check',
     );
 
     foreach ( $options_to_delete as $option ) {
         delete_option( $option );
     }
+
+    // Per-backup records are named after their timestamp
+    // (vigilante_backup_info_<Y-m-d_H-i-s>), so a fixed list cannot reach them.
+    // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
+    $wpdb->query(
+        "DELETE FROM {$wpdb->options} WHERE option_name LIKE 'vigilante_backup_info_%'"
+    );
 
     // Delete all transients
     // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching

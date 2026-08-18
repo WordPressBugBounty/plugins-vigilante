@@ -671,6 +671,18 @@ class Vigilante_File_Integrity {
                 continue;
             }
 
+            // Skip translations that travel inside the localized core ZIP but do
+            // not belong to core. WordPress.org's localized checksum manifest
+            // lists Akismet and the default themes' language files (8 entries on
+            // every non-en_US locale, none on en_US), yet they are updated on the
+            // plugin and theme cycle and are absent from the core language pack.
+            // Deleting an unused plugin or theme, which this plugin's own audit
+            // recommends, otherwise left permanent "missing core file" findings.
+            if ( 0 === strpos( $file, 'wp-content/languages/plugins/' )
+                || 0 === strpos( $file, 'wp-content/languages/themes/' ) ) {
+                continue;
+            }
+
             $results['scanned']++;
 
             if ( ! file_exists( $file_path ) ) {

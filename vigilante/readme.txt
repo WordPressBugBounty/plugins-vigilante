@@ -1,10 +1,10 @@
-=== Vigilant - 100% Free Security Suite: Firewall, 2FA, Login, Headers, Scanner…   ===
+=== Vigilant - 100% Free Security Suite: Firewall, 2FA, Login, Headers, Scanner… ===
 Contributors: fernandot, ayudawp
 Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
-Tested up to: 7.0
+Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.9.5
+Stable tag: 2.9.6
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -73,7 +73,6 @@ Block malicious requests before they reach WordPress:
 * Bad query string filtering (catches generic suspicious patterns the specific blockers miss)
 * Bad bot detection and blocking
 * Block requests with empty user agent
-* Block legacy HTTP/1.0 requests (almost always automated tools, never modern browsers)
 * Rate limiting against DDoS and brute force, with optional progressive lockouts
 * IP whitelist and blacklist management (IPv4 and IPv6, with CIDR ranges and wildcards)
 * User-Agent whitelist and blacklist with partial matching
@@ -120,7 +119,7 @@ Comprehensive user account protection:
 
 Achieve Grade A security ratings:
 
-* Content Security Policy (CSP) with visual builder and Report-Only mode for safe testing before enforcing
+* Content Security Policy (CSP) with a WordPress-compatible default policy and Report-Only mode for safe testing before enforcing
 * HSTS (HTTP Strict Transport Security) with includeSubdomains and preload options
 * X-Frame-Options - prevent clickjacking
 * X-Content-Type-Options - prevent MIME sniffing
@@ -412,6 +411,20 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 2.9.6 =
+* Improved: the Security Headers tab now has an HTTPS section with the three settings that used to run with no way to see or change them: redirect HTTP to HTTPS, fix mixed content, and rewriting the site address to https on activation. The last one now ships off. It used to be on, so activating the plugin rewrote the WordPress Address and Site Address to https without asking and without checking that the site answered over HTTPS, which on a site published over HTTP left it pointing at an address that may not respond. Deactivating never undid it. It now only runs when it is switched on and the request activating the plugin is itself over HTTPS. Sites whose addresses a previous version already rewrote keep them.
+* Improved: a "Disable XML-RPC Pingback" checkbox in Login Security, for sites that need the rest of XML-RPC for the mobile app or Jetpack. The setting existed and worked, but had no control anywhere in the interface.
+* Improved: the HTTP to HTTPS redirect now only acts on sites whose address is already an https:// one. On a site still published over HTTP it sent every request to an address that might not answer. Sites on HTTPS keep redirecting exactly as before.
+* Improved: the plugin now shows the same name in the plugins list as it does on WordPress.org. Only the displayed name changes; settings, data and updates are untouched.
+* Fix: image uploads from the editor work again on WordPress 7.1 when the Content Security Policy is enabled. WordPress 7.1 processes images in the browser before uploading them, and it loads its WebAssembly engine from a blob: URL, which is governed by the connect-src directive. blob: was missing there, so that load was blocked. WordPress never noticed, because its own support test only checks whether blob: workers are allowed, which this policy already permitted, so it went ahead anyway and the upload failed with an error blaming the file format. blob: has been added to connect-src in the default and Maximum policies, and the compatibility warnings now check that directive too. Reported by Antonio Cambronero.
+* Fix: saving the Security Headers tab no longer switches off the HTTPS redirect and the mixed content fix, and saving Login Security no longer switches off the XML-RPC pingback block. Settings with no field in their own form were treated as unticked checkboxes on every save, so pressing Save quietly turned them off.
+* Fix: File Integrity no longer reports core files as permanently missing on sites that are not in English. The localized checksum manifest published by WordPress.org lists the language files of Akismet and of the default themes, which are not part of core and do not travel in the core language pack, so deleting an unused plugin or theme, exactly what the Security Check recommends, left findings that never cleared.
+* Fix: the Security Check no longer fails its own REST /wp/v2/users/me test on a site with factory settings. Blocking author enumeration, which is on by default, unregisters that route, and a route that does not exist answers 404 instead of the 401 the test demanded. A correctly protected site scored 97 out of 100, and the only way to recover the points was to switch a real protection off. The sibling test on /wp/v2/users already accepted that 404.
+* Fix: the mixed content test no longer counts ordinary links to http:// addresses. It examined every href on the page, so a plain outbound link, or a canonical or feed link, was reported as insecure content. Only resources the page actually loads are counted now.
+* Fix: header values are stripped of line breaks and double quotes before being written to .htaccess. A line break in a value ended the directive and turned the rest into server configuration of its own.
+* Fix: uninstalling the plugin now removes the safety copies it kept of wp-config.php and .htaccess. Those copies are taken in the database before the plugin writes to either file, and they were not on the uninstall list, so a copy of wp-config.php, database credentials and authentication salts included, stayed in the options table after the plugin was deleted. The per-backup records and the plugin status cache are cleared too.
+* Fix: removed three settings that no code ever read: two left over from earlier versions, and one behind a firewall feature the readme described but that was never implemented in any release.
+
 = 2.9.5 =
 * Improved: the daily password expiry cron no longer runs one database query per user. Asking WordPress for user IDs alone leaves the usermeta cache empty, so every reminder check went back to the database; the whole set is now primed up front. Sites with many users in the affected roles will notice it in the daily maintenance run.
 * Improved: the mixed content rewriter no longer opens an output buffer on admin, AJAX and REST requests. It only ever rewrites complete HTML documents, so those responses were paying for a buffer and a callback that discarded them anyway. On a WooCommerce site the cart fragments endpoint alone accounted for dozens of them per visitor.
@@ -450,8 +463,8 @@ For older changelog entries, please check the [changelog.txt](https://plugins.sv
 
 == Upgrade Notice ==
 
-= 2.9.5 =
-Fixes the firewall rate limiter, which never closed its 60 second window: the count kept growing while traffic continued, so visitors got a 429 well below the configured limit. Sites behind a CDN or sharing one IP were hit hardest.
+= 2.9.6 =
+Fixes image uploads from the editor on WordPress 7.1, blocked by the previous Content Security Policy. Also stops several settings switching themselves off when you save their tab, and the three HTTPS settings are now yours to choose instead of being applied on activation.
 
 == Support ==
 

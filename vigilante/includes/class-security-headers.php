@@ -120,6 +120,7 @@ class Vigilante_Security_Headers {
      * - style-src: 'unsafe-inline' (for dynamic styles)
      * - frame-src: blob: (for iframe previews)
      * - worker-src: blob: (for web workers)
+     * - connect-src: blob: (for the client-side media processing of WP 7.1+)
      *
      * @return bool True if CSP would likely break the admin interface.
      */
@@ -183,6 +184,17 @@ class Vigilante_Security_Headers {
             if ( false !== strpos( $worker_src, "'none'" ) ) {
                 return true;
             }
+        }
+
+        // Check connect-src for blob:. WordPress 7.1 processes images in the
+        // browser before uploading them, and @wordpress/vips fetches its
+        // WebAssembly binary from a blob: URL. fetch() answers to connect-src,
+        // and 'self' does not cover blob:, so without it the upload fails while
+        // WordPress still believes the feature is supported (its own detection
+        // only tests blob: workers, which worker-src above already allows).
+        $connect_src = $directives['connect-src'] ?? '';
+        if ( ! empty( $connect_src ) && false === strpos( $connect_src, 'blob:' ) ) {
+            return true;
         }
 
         return false;
@@ -255,7 +267,41 @@ class Vigilante_Security_Headers {
             );
         }
 
+        // Check connect-src
+        $connect_src = $directives['connect-src'] ?? '';
+        if ( ! empty( $connect_src ) && false === strpos( $connect_src, 'blob:' ) ) {
+            $issues[] = array(
+                'directive' => 'connect-src',
+                'issue'     => __( 'Missing \'blob:\' - will break image uploads from the editor on WordPress 7.1 and later', 'vigilante' ),
+                'severity'  => 'high',
+            );
+        }
+
         return $issues;
+    }
+
+    /**
+     * Make a settings value safe to interpolate into an .htaccess directive.
+     *
+     * Every value below is written inside a double-quoted argument of a
+     * "Header always set" line. Two characters break out of that argument:
+     *
+     * - A line break ends the directive and turns whatever follows into a new
+     *   Apache directive, which is arbitrary server configuration.
+     * - A double quote closes the argument early and leaves the remainder as
+     *   stray arguments, which Apache rejects with a 500.
+     *
+     * No header value this plugin writes legitimately contains either: CSP
+     * source expressions use single quotes ('self', 'unsafe-inline'), and the
+     * rest are single-token values from fixed lists. Applied at generation time
+     * rather than at save time so the guard holds however the value reached the
+     * option (a crafted request, an imported settings file, a direct write).
+     *
+     * @param mixed $value Raw settings value.
+     * @return string
+     */
+    private function sanitize_header_value( $value ) {
+        return str_replace( array( '"', "\r", "\n" ), '', (string) $value );
     }
 
     /**
@@ -290,7 +336,7 @@ class Vigilante_Security_Headers {
         if ( ! empty( $this->options['x_frame_options'] ) ) {
             $value = $this->options['x_frame_options'];
             $rules[] = '    # Clickjacking protection';
-            $rules[] = '    Header always set X-Frame-Options "' . esc_attr( $value ) . '"';
+            $rules[] = '    Header always set X-Frame-Options "' . $this->sanitize_header_value( $value ) . '"';
         }
 
         // X-Content-Type-Options
@@ -303,7 +349,7 @@ class Vigilante_Security_Headers {
         if ( ! empty( $this->options['referrer_policy'] ) ) {
             $value = $this->options['referrer_policy'];
             $rules[] = '    # Referrer Policy';
-            $rules[] = '    Header always set Referrer-Policy "' . esc_attr( $value ) . '"';
+            $rules[] = '    Header always set Referrer-Policy "' . $this->sanitize_header_value( $value ) . '"';
         }
 
         // Strict-Transport-Security (HSTS)
@@ -341,7 +387,7 @@ class Vigilante_Security_Headers {
 
             if ( ! empty( $directives ) ) {
                 $rules[] = '    # Permissions Policy';
-                $rules[] = '    Header always set Permissions-Policy "' . implode( ', ', $directives ) . '"';
+                $rules[] = '    Header always set Permissions-Policy "' . $this->sanitize_header_value( implode( ', ', $directives ) ) . '"';
             }
         }
 
@@ -390,8 +436,18 @@ class Vigilante_Security_Headers {
             if ( ! empty( $directives ) ) {
                 $header_value = implode( '; ', $directives );
 
+                // The value travels inside a double-quoted argument of the
+                // "Header always set" line below. A double quote in a directive
+                // would close that argument early and leave the rest of the
+                // policy as stray arguments, which Apache rejects with a 500.
+                // CSP source expressions use single quotes ('self',
+                // 'unsafe-inline'), never double ones, so no legitimate policy
+                // can be affected. Done here rather than at save time so the
+                // guard holds however the value reached the option.
+                $header_value = $this->sanitize_header_value( $header_value );
+
                 if ( ! empty( $csp['report_uri'] ) ) {
-                    $header_value .= '; report-uri ' . esc_url( $csp['report_uri'] );
+                    $header_value .= '; report-uri ' . $this->sanitize_header_value( esc_url( $csp['report_uri'] ) );
                 }
 
                 $header_name = ! empty( $csp['report_only'] ) 
@@ -415,15 +471,15 @@ class Vigilante_Security_Headers {
             $policies = $this->options['cross_origin_policies'];
 
             if ( ! empty( $policies['embedder_policy'] ) && 'unsafe-none' !== $policies['embedder_policy'] ) {
-                $rules[] = '    Header always set Cross-Origin-Embedder-Policy "' . esc_attr( $policies['embedder_policy'] ) . '"';
+                $rules[] = '    Header always set Cross-Origin-Embedder-Policy "' . $this->sanitize_header_value( $policies['embedder_policy'] ) . '"';
             }
 
             if ( ! empty( $policies['opener_policy'] ) ) {
-                $rules[] = '    Header always set Cross-Origin-Opener-Policy "' . esc_attr( $policies['opener_policy'] ) . '"';
+                $rules[] = '    Header always set Cross-Origin-Opener-Policy "' . $this->sanitize_header_value( $policies['opener_policy'] ) . '"';
             }
 
             if ( ! empty( $policies['resource_policy'] ) ) {
-                $rules[] = '    Header always set Cross-Origin-Resource-Policy "' . esc_attr( $policies['resource_policy'] ) . '"';
+                $rules[] = '    Header always set Cross-Origin-Resource-Policy "' . $this->sanitize_header_value( $policies['resource_policy'] ) . '"';
             }
         }
 

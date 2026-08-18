@@ -235,12 +235,28 @@ class Vigilante_SA_Category_Access {
         }
 
         $code = (int) wp_remote_retrieve_response_code( $response );
+        $body = (string) wp_remote_retrieve_body( $response );
+
         if ( 401 === $code ) {
             $args['detail'] = __( 'The endpoint returns 401 to unauthenticated requests.', 'vigilante' );
             return Vigilante_SA_Check_Result::pass( $args );
         }
         if ( 403 === $code ) {
             $args['detail'] = __( 'The endpoint returns 403 to unauthenticated requests.', 'vigilante' );
+            return Vigilante_SA_Check_Result::pass( $args );
+        }
+
+        // 404 with rest_no_route => Vigilant's own rest_endpoints filter removed
+        // the route, which is what "Block user enumeration" does by default. An
+        // unregistered route cannot answer 401, so demanding one made the check
+        // fail on a stock install and pushed users to disable a real protection
+        // to recover the points. Same treatment as the sibling /wp/v2/users check.
+        if ( 404 === $code ) {
+            if ( false !== strpos( $body, 'rest_no_route' ) ) {
+                $args['detail'] = __( 'The /wp/v2/users/me route is unregistered for anonymous clients.', 'vigilante' );
+                return Vigilante_SA_Check_Result::pass( $args );
+            }
+            $args['detail'] = __( 'The /wp/v2/users/me route returned 404 to the anonymous probe (likely a firewall rule).', 'vigilante' );
             return Vigilante_SA_Check_Result::pass( $args );
         }
 
