@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.9.6
+Stable tag: 2.9.7
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -91,7 +91,7 @@ Stop unauthorized access attempts:
 * Custom login URL - hide wp-login.php from bots
 * Login URL change notifications to all admin-area users
 * Hide login error messages - don't reveal valid usernames
-* XML-RPC disable, with a separate toggle for just the pingback method if you still need other XML-RPC features
+* XML-RPC control: leave it on, block only the pingback methods (recommended, it closes the amplification vector while the mobile app and Jetpack keep working), or disable it completely
 * Application passwords control
 * Email notification when an IP is blocked for exceeding login attempts
 * Admin login notifications via email
@@ -411,6 +411,11 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 2.9.7 =
+* Improved: XML-RPC moves to WP Hardening, next to the pingback and trackback settings it relates to, and becomes a single choice with three options instead of two separate checkboxes under Login that could be ticked at the same time and contradict each other. The settings search already pointed to WP Hardening for XML-RPC while the setting itself was under Login, so looking for it led to the wrong tab. A new installation now blocks the pingback methods, which is the part abused for amplification, and leaves the rest reachable so the WordPress app, Jetpack or a remote manager work out of the box; disabling XML-RPC completely is still the recommended choice and one click away. Brute force through XML-RPC stays covered either way, because those logins go through the same lockout as any other. Sites updating keep exactly what they had, and the Security Check resolves the setting the same way the code that enforces it does.
+* Improved: the settings search now covers every setting, and its keywords can be translated. It was a hand-written list that indexed 68 of the 131 rows, so searching for XML-RPC, application passwords, session limits, password expiry or the header settings returned nothing; and its search terms were hardcoded, so only English and Spanish found anything by synonym. Every locale can now supply its own terms.
+* Improved: the Security Headers tab now presents Content Security Policy, HTTPS and HSTS one after another, since the three are related, and HSTS explains what it actually does instead of repeating the HTTPS text. Its warning is the one that matters for HSTS: browsers remember it for the whole max age even if it is switched off later, so a site that loses its certificate stays unreachable until it expires. HSTS can only be enabled on a site whose address already starts with https, because turning it on anywhere else takes the site offline for every browser that honours it.
+
 = 2.9.6 =
 * Improved: the Security Headers tab now has an HTTPS section with the three settings that used to run with no way to see or change them: redirect HTTP to HTTPS, fix mixed content, and rewriting the site address to https on activation. The last one now ships off. It used to be on, so activating the plugin rewrote the WordPress Address and Site Address to https without asking and without checking that the site answered over HTTPS, which on a site published over HTTP left it pointing at an address that may not respond. Deactivating never undid it. It now only runs when it is switched on and the request activating the plugin is itself over HTTPS. Sites whose addresses a previous version already rewrote keep them.
 * Improved: a "Disable XML-RPC Pingback" checkbox in Login Security, for sites that need the rest of XML-RPC for the mobile app or Jetpack. The setting existed and worked, but had no control anywhere in the interface.
@@ -463,8 +468,8 @@ For older changelog entries, please check the [changelog.txt](https://plugins.sv
 
 == Upgrade Notice ==
 
-= 2.9.6 =
-Fixes image uploads from the editor on WordPress 7.1, blocked by the previous Content Security Policy. Also stops several settings switching themselves off when you save their tab, and the three HTTPS settings are now yours to choose instead of being applied on activation.
+= 2.9.7 =
+Mostly interface, with two behaviour notes. XML-RPC moves to WP Hardening, so it now follows that module switch instead of the Login one, and a new installation blocks only the pingback methods rather than all of XML-RPC. Sites updating keep exactly what they had.
 
 == Support ==
 

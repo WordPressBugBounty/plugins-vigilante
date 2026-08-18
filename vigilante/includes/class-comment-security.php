@@ -49,6 +49,22 @@ class Vigilante_Comment_Security {
      * Initialize hooks
      */
     private function init_hooks() {
+        // XML-RPC exposure: one three-way setting. Lives here rather than under
+        // Login because this class already owns the xmlrpc_methods filter, and
+        // because the module gate for this tab is modules.wp_hardening: keeping
+        // the setting and the code it drives under the same gate avoids the trap
+        // of a switch that looks on while the class that reads it never runs.
+        $xmlrpc_mode = self::resolve_xmlrpc_mode( $this->settings );
+
+        if ( 'full' === $xmlrpc_mode ) {
+            add_filter( 'xmlrpc_enabled', '__return_false' );
+            add_filter( 'wp_xmlrpc_server_class', array( $this, 'disable_xmlrpc_server' ) );
+            remove_action( 'wp_head', 'rsd_link' );
+            remove_action( 'wp_head', 'wlwmanifest_link' );
+        } elseif ( 'pingback' === $xmlrpc_mode ) {
+            add_filter( 'xmlrpc_methods', array( $this, 'disable_pingback_methods' ) );
+        }
+
         // Disable pingbacks/trackbacks
         if ( ! empty( $this->options['disable_pingbacks'] ) ) {
             add_filter( 'xmlrpc_methods', array( $this, 'disable_pingback_methods' ) );
@@ -93,6 +109,58 @@ class Vigilante_Comment_Security {
      * @param array $methods XML-RPC methods.
      * @return array
      */
+    /**
+     * Resolve the XML-RPC mode.
+     *
+     * The setting used to be two independent checkboxes under Login that could
+     * be on at the same time and contradict each other ("disable everything"
+     * plus "disable only pingback"). It is now a single three-way choice stored
+     * in wp_hardening.xmlrpc_mode, next to the pingback settings it relates to.
+     *
+     * Sites upgrading have neither, only the old pair under login_security, so
+     * their choice is read from there and nothing changes for them until they
+     * save the tab. An install with none of the three gets 'full', which is what
+     * the old defaults did (disable_xmlrpc shipped on and took precedence).
+     *
+     * Public and static so this class, the settings screen and the Security
+     * Check all resolve the value the same way and cannot drift apart.
+     *
+     * @param Vigilante_Settings $settings Settings instance.
+     * @return string 'full', 'pingback' or 'none'.
+     */
+    public static function resolve_xmlrpc_mode( $settings ) {
+        $hardening = $settings->get_section( 'wp_hardening' );
+        $mode      = isset( $hardening['xmlrpc_mode'] ) ? (string) $hardening['xmlrpc_mode'] : '';
+
+        if ( in_array( $mode, array( 'full', 'pingback', 'none' ), true ) ) {
+            return $mode;
+        }
+
+        // Legacy pair under Login, only meaningful when one of them was stored.
+        $login = $settings->get_section( 'login_security' );
+        if ( array_key_exists( 'disable_xmlrpc', $login )
+            || array_key_exists( 'disable_xmlrpc_pingback', $login ) ) {
+            if ( ! empty( $login['disable_xmlrpc'] ) ) {
+                return 'full';
+            }
+            if ( ! empty( $login['disable_xmlrpc_pingback'] ) ) {
+                return 'pingback';
+            }
+            return 'none';
+        }
+
+        return 'full';
+    }
+
+    /**
+     * Replace the XML-RPC server class with one that answers nothing.
+     *
+     * @return string
+     */
+    public function disable_xmlrpc_server() {
+        return 'wp_xmlrpc_server_disabled';
+    }
+
     public function disable_pingback_methods( $methods ) {
         unset( $methods['pingback.ping'] );
         unset( $methods['pingback.extensions.getPingbacks'] );

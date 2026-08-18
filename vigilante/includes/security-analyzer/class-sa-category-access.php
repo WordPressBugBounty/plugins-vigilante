@@ -83,16 +83,34 @@ class Vigilante_SA_Category_Access {
             'category' => self::SLUG,
             'max'      => 5,
             'label'    => __( 'XML-RPC status', 'vigilante' ),
-            'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'login', 'field-disable-xmlrpc' ),
+            'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'wp-hardening', 'vigilante-section-hardening-xmlrpc' ),
         );
 
-        $disabled = (int) $this->settings->get_option( 'login_security', 'disable_xmlrpc', 0 );
-        if ( $disabled ) {
-            $args['detail'] = __( 'Vigilant XML-RPC block is enabled in settings; brute-force and pingback amplification vectors closed.', 'vigilante' );
+        // Read the setting through the module's own resolver rather than the raw
+        // option: XML-RPC is now a three-way choice, and sites upgrading from the
+        // old pair of checkboxes still store only those. Reading disable_xmlrpc
+        // directly made this check fail on sites whose XML-RPC was in fact fully
+        // blocked, which is the contradiction the /wp/v2/users/me check had.
+        $mode = 'none';
+        if ( class_exists( 'Vigilante_Comment_Security' ) ) {
+            $mode = Vigilante_Comment_Security::resolve_xmlrpc_mode( $this->settings );
+        } elseif ( $this->settings->get_option( 'login_security', 'disable_xmlrpc', 0 ) ) {
+            $mode = 'full';
+        }
+
+        $args['data'] = array( 'mode' => $mode );
+
+        if ( 'full' === $mode ) {
+            $args['detail'] = __( 'XML-RPC is fully disabled; brute-force and pingback amplification vectors closed.', 'vigilante' );
             return Vigilante_SA_Check_Result::pass( $args );
         }
 
-        $args['detail'] = __( 'XML-RPC is still enabled. Unless Jetpack or a mobile app requires it, disable it under Login.', 'vigilante' );
+        if ( 'pingback' === $mode ) {
+            $args['detail'] = __( 'Pingback methods are blocked, which closes the amplification vector, and the rest of XML-RPC stays available for the mobile app or Jetpack.', 'vigilante' );
+            return Vigilante_SA_Check_Result::pass( $args );
+        }
+
+        $args['detail'] = __( 'XML-RPC is fully enabled. Under WP Hardening, disable it completely, or block at least the pingback methods if something still needs XML-RPC.', 'vigilante' );
         return Vigilante_SA_Check_Result::fail( $args );
     }
 

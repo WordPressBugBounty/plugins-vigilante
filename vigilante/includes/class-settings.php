@@ -209,8 +209,15 @@ class Vigilante_Settings {
                 'lockout_increment'           => true,
                 'max_lockout_duration'        => 86400,
                 'hide_login_errors'           => true,
-                'disable_xmlrpc'              => true,
-                'disable_xmlrpc_pingback'     => true,
+                // XML-RPC se movio a wp_hardening en la 2.9.7; lo resuelve
+                // Vigilante_Comment_Security::resolve_xmlrpc_mode(), que
+                // sustituye a las dos casillas anteriores (disable_xmlrpc y
+                // disable_xmlrpc_pingback), que podian estar activas a la vez y
+                // contradecirse. A proposito NO se declara aqui ningun default: si se
+                // declarara, el merge con los defaults lo rellenaria siempre y taparia el
+                // respaldo que lee el ajuste antiguo de los sitios que aun no han vuelto a
+                // guardar la pestana. Sin nada guardado, el resolutor devuelve 'full', que
+                // es lo que hacia el default anterior.
                 'disable_application_passwords' => false,
                 'notify_on_lockout'           => false,
                 'notify_on_admin_login'       => false,
@@ -669,7 +676,6 @@ class Vigilante_Settings {
                 'login_security' => array(
                     'max_attempts'     => 5,
                     'lockout_duration' => 1800,
-                    'disable_xmlrpc'   => true,
                 ),
                 'rest_api_security' => array(
                     'mode' => 'selective',
@@ -679,6 +685,9 @@ class Vigilante_Settings {
                 ),
                 'file_integrity' => array(
                     'notify_level' => 'suspicious_only',
+                ),
+                'wp_hardening' => array(
+                    'xmlrpc_mode' => 'full',
                 ),
             ),
 
@@ -742,11 +751,11 @@ class Vigilante_Settings {
                     'max_attempts'        => 3,
                     'lockout_duration'    => 3600,
                     'lockout_increment'   => true,
-                    'disable_xmlrpc'      => true,
                     'notify_on_lockout'   => true,
                     'notify_on_admin_login' => true,
                 ),
                 'wp_hardening' => array(
+                    'xmlrpc_mode'        => 'full',
                     'disallow_file_edit' => true,
                     'disallow_file_mods' => true,
                     // close_old_comments is intentionally NOT touched by Maximum:

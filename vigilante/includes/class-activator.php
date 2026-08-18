@@ -42,7 +42,29 @@ class Vigilante_Activator {
         
         if ( false === $current_options ) {
             // First installation - set defaults
-            update_option( Vigilante_Settings::OPTION_NAME, $settings->get_default_options() );
+            $first_run = $settings->get_default_options();
+
+            /*
+             * XML-RPC on a brand new install: block the pingback methods, which is
+             * what gets abused for amplification, and leave the rest reachable so
+             * the WordPress app, Jetpack or a remote manager keep working out of
+             * the box. Disabling it completely is the stricter choice and the one
+             * the settings screen recommends, but it is not imposed on a site that
+             * never asked for it. Brute force through XML-RPC stays covered either
+             * way, because those logins go through wp_authenticate() and the login
+             * lockout hooks into it.
+             *
+             * Only written here, on a first installation. Sites upgrading keep
+             * whatever they had: the activation hook does not run on an update, and
+             * Vigilante_Comment_Security::resolve_xmlrpc_mode() answers 'full' when
+             * nothing is stored, which is what every version since 1.0.0 did.
+             */
+            if ( ! isset( $first_run['wp_hardening'] ) || ! is_array( $first_run['wp_hardening'] ) ) {
+                $first_run['wp_hardening'] = array();
+            }
+            $first_run['wp_hardening']['xmlrpc_mode'] = 'pingback';
+
+            update_option( Vigilante_Settings::OPTION_NAME, $first_run );
             // Refresh settings instance to get new values
             $settings->clear_cache();
             $settings = new Vigilante_Settings();

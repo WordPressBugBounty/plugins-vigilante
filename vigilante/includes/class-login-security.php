@@ -112,19 +112,6 @@ class Vigilante_Login_Security {
             add_filter( 'shake_error_codes', array( $this, 'remove_shake_errors' ) );
         }
 
-        // Disable XML-RPC
-        if ( ! empty( $this->options['disable_xmlrpc'] ) ) {
-            add_filter( 'xmlrpc_enabled', '__return_false' );
-            add_filter( 'wp_xmlrpc_server_class', array( $this, 'disable_xmlrpc_server' ) );
-            remove_action( 'wp_head', 'rsd_link' );
-            remove_action( 'wp_head', 'wlwmanifest_link' );
-        }
-
-        // Disable XML-RPC pingback method specifically
-        if ( ! empty( $this->options['disable_xmlrpc_pingback'] ) ) {
-            add_filter( 'xmlrpc_methods', array( $this, 'disable_xmlrpc_pingback' ) );
-        }
-
         // Disable application passwords
         if ( ! empty( $this->options['disable_application_passwords'] ) ) {
             add_filter( 'wp_is_application_passwords_available', '__return_false' );
@@ -1245,15 +1232,6 @@ class Vigilante_Login_Security {
         );
     }
 
-    /**
-     * Disable XML-RPC server
-     *
-     * @param string $class Server class.
-     * @return string
-     */
-    public function disable_xmlrpc_server( $class ) {
-        return 'Vigilante_Disabled_XMLRPC_Server';
-    }
 
     /**
      * Disable XML-RPC pingback method
@@ -1261,12 +1239,6 @@ class Vigilante_Login_Security {
      * @param array $methods XML-RPC methods.
      * @return array
      */
-    public function disable_xmlrpc_pingback( $methods ) {
-        unset( $methods['pingback.ping'] );
-        unset( $methods['pingback.extensions.getPingbacks'] );
-        return $methods;
-    }
-
     /**
      * Notify admin of admin login
      *
