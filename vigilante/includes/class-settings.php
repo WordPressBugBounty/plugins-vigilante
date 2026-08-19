@@ -193,8 +193,31 @@ class Vigilante_Settings {
                 // site, made from the Security Headers tab. Sites whose URLs a
                 // previous version already rewrote keep them; nothing reverts them.
                 'force_https'               => false,
-                'redirect_http_to_https'    => true,
-                'fix_mixed_content'         => true,
+                // Off by default for the same reason as force_https above: the
+                // plugin does not decide that a site is on HTTPS. It only
+                // redirects when the site's own home URL already says https, so
+                // shipping it on was harmless in practice, but it is still a
+                // decision that belongs to the site owner, not to us. Sites that
+                // already have it on keep it.
+                'redirect_http_to_https'    => false,
+                // Rewrites http:// URLs of this same site to https://, and only
+                // on a site already served over HTTPS, so it cannot reach a third
+                // party and cannot make a resource fail. It still ships off: a
+                // setting whose own description says it rewrites http to https
+                // does not belong in the factory configuration of a plugin that
+                // deliberately does not decide whether a site is on HTTPS. Every
+                // https-related setting here is the owner's call, and this one is
+                // one click away for anyone who has just migrated and wants their
+                // old content rewritten.
+                'fix_mixed_content'         => false,
+                // The Content-Security-Policy directive that tells the browser to
+                // upgrade every http:// request, including the ones pointing at
+                // other people's servers. If any of those has no HTTPS the
+                // resource simply stops loading, so this is the one piece of
+                // mixed content handling that can break a page, and it is off by
+                // default like everything else here that forces HTTPS. It used to
+                // ride along with fix_mixed_content with no way to separate them.
+                'upgrade_insecure_requests' => false,
 
                 // Server Protection (moved from firewall in v2.0.0)
                 'hide_server_signature'         => true,
@@ -280,28 +303,36 @@ class Vigilante_Settings {
                 'min_password_length'     => 12,
 
                 // Granular password policy. Applies only while
-                // force_strong_passwords is on. Defaults reproduce the previous
-                // all-requirements behaviour so existing sites keep the same
-                // rules until the admin relaxes them. block_username is the only
-                // new opt-in rule (off by default to avoid rejecting passwords
-                // that were valid before). affected_roles empty = all roles.
+                // force_strong_passwords is on. The defaults follow current
+                // guidance (NIST SP 800-63B): what makes a password weak is being
+                // guessable, not lacking a symbol, and composition rules push
+                // people towards predictable substitutions and towards writing
+                // the password down. So out of the box only the two rules that
+                // block genuinely guessable passwords are on, and the four
+                // character-class requirements ship off for anyone to turn on.
+                // Existing sites keep whatever they have stored.
+                // affected_roles empty = all roles.
                 'password_policy'         => array(
-                    'require_uppercase' => true,
-                    'require_lowercase' => true,
-                    'require_number'    => true,
-                    'require_special'   => true,
+                    'require_uppercase' => false,
+                    'require_lowercase' => false,
+                    'require_number'    => false,
+                    'require_special'   => false,
                     'block_common'      => true,
-                    'block_username'    => false,
+                    'block_username'    => true,
                     'affected_roles'    => array(),
                 ),
 
                 'prevent_display_name_login_match' => true,
                 
                 // Admin monitoring
+                // The two alerts that report someone gaining power ship on: a
+                // new administrator and a role being raised are the signature of
+                // an account takeover, and they are rare enough not to be noise.
+                // The other two are ordinary admin housekeeping and stay opt-in.
                 'admin_monitoring'        => array(
-                    'alert_new_admin'              => false,
+                    'alert_new_admin'              => true,
                     'alert_admin_email_change'     => false,
-                    'alert_permission_elevation'   => false,
+                    'alert_permission_elevation'   => true,
                     'alert_admin_password_change'  => false,
                 ),
                 
@@ -323,15 +354,21 @@ class Vigilante_Settings {
 
                 // Session limits
                 'session_limits'          => array(
-                    'enabled'           => false,
+                    'enabled'           => true,
                     'max_sessions'      => 3,
                     'behavior'          => 'close_oldest',
                     'exclude_admins'    => false,
                 ),
 
-                // Password expiration
+                // Password expiration ships OFF. Forced rotation is no longer
+                // recommended (NIST SP 800-63B advises against it) and it is by
+                // far the biggest source of support here: people locked out mid
+                // task, cron reminders that never arrive, roles nobody meant to
+                // include. The feature stays for anyone who has to comply with a
+                // policy that still demands it, and the Configuration Score keeps
+                // pointing at it, which is what that score is for.
                 'password_expiration'     => array(
-                    'enabled'           => true,
+                    'enabled'           => false,
                     'expire_days'       => 90,
                     'warning_days'      => 14,
                     'affected_roles'    => array( 'administrator', 'editor' ),
@@ -356,7 +393,13 @@ class Vigilante_Settings {
                 // wp-config security
                 'disallow_file_edit'    => true,
                 'disallow_file_mods'    => false,
-                'force_ssl_admin'       => true,
+                // Off by default. This one writes FORCE_SSL_ADMIN into
+                // wp-config.php, and it used to do so on activation with no
+                // check that the site answers over HTTPS at all, which locks the
+                // owner out of their own admin. Forcing HTTPS is an opt-in
+                // decision per site, consistent with force_https and with HSTS,
+                // both of which already ship off.
+                'force_ssl_admin'       => false,
                 'wp_debug'              => true,
                 // Off by default — only safe when host has a real server-side cron job;
                 // pairs with firewall.protect_wp_cron to block both internal triggering
@@ -645,50 +688,269 @@ class Vigilante_Settings {
     }
 
     /**
+     * Whether this context is allowed to write the files a network shares
+     *
+     * wp-config.php and the root .htaccess are single files for the whole
+     * network, while Vigilant's settings are per site. Without a gate, every
+     * save, activation and deactivation from any site rewrites those files from
+     * that site's own options, so the last one to save wins and silently undoes
+     * the rest. Measured on a real network: the main site enables "disable file
+     * editing", a subsite admin presses Save on their own screen without
+     * touching it, and the constant disappears from wp-config.php while the main
+     * site's screen keeps showing the box ticked.
+     *
+     * So on a network only the main site decides, and only a network
+     * administrator. WP-CLI on the main site counts too: there is no user to ask
+     * there, but the site is the right one, and a network admin running
+     * `wp plugin activate --network` expects the files to be written.
+     *
+     * On a single site this is always true and nothing changes.
+     *
+     * @since 2.9.8
+     *
+     * @return bool
+     */
+    public static function can_write_shared_files() {
+        if ( ! is_multisite() ) {
+            return true;
+        }
+
+        if ( ! is_main_site() ) {
+            return false;
+        }
+
+        // WP-CLI with nobody logged in: there is no user to ask, and the site is
+        // the right one, so a network admin running `wp plugin activate --network`
+        // gets the files written. With a user set (wp --user=...) the capability
+        // is checked like anywhere else, so the gate cannot be side-stepped by
+        // running as a subsite administrator.
+        if ( defined( 'WP_CLI' ) && WP_CLI && ! get_current_user_id() ) {
+            return true;
+        }
+
+        return current_user_can( 'manage_network_options' );
+    }
+
+    /**
+     * The one message shown wherever a shared-file setting is out of reach
+     *
+     * Deliberately a single string reused by every section, instead of one per
+     * section: it says the same thing everywhere and there is no reason to make
+     * translators write it four times.
+     *
+     * @since 2.9.8
+     *
+     * @return string
+     */
+    public static function get_shared_files_notice() {
+        return __( 'These settings are written to wp-config.php and .htaccess, files the whole network shares. So that one site cannot overwrite another, they are managed from the main site of the network by a network administrator.', 'vigilante' );
+    }
+
+    /**
+     * Apply the tweaks a brand new installation gets on top of the raw defaults
+     *
+     * A few keys are deliberately missing from get_default_options() because
+     * declaring them would break something else. XML-RPC is the one case today:
+     * declaring wp_hardening.xmlrpc_mode would make the defaults merge fill it in
+     * always and hide the fallback that reads the old pair of settings on sites
+     * that have not re-saved the tab. With nothing stored the resolver answers
+     * 'full', which blocks XML-RPC completely, and that is not what we want a new
+     * site to get.
+     *
+     * Everything that seeds a clean configuration has to run this: the activation
+     * hook, the per-section reset and the global reset to defaults. Otherwise the
+     * defaults you get by pressing a button are not the defaults you get by
+     * installing the plugin, which is exactly what happened until 2.9.8.
+     *
+     * @since 2.9.8
+     *
+     * @param array $options Options array to adjust.
+     * @return array
+     */
+    public static function apply_install_tweaks( $options ) {
+        if ( ! isset( $options['wp_hardening'] ) || ! is_array( $options['wp_hardening'] ) ) {
+            $options['wp_hardening'] = array();
+        }
+
+        $options['wp_hardening']['xmlrpc_mode'] = 'pingback';
+
+        return $options;
+    }
+
+    /**
+     * Keys that hold what the site owner typed in, never wiped by a restore
+     *
+     * Putting the security posture back to its defaults is one thing; deleting
+     * an IP whitelist, the secret login address, the two factor setup or the
+     * addresses that receive the alerts is another, and nobody presses a button
+     * called "restore defaults" expecting that. Both the Standard preset and the
+     * two reset buttons leave these alone.
+     *
+     * @since 2.9.8
+     *
+     * @return array<string,string[]>
+     */
+    public static function get_user_data_keys() {
+        return array(
+            'firewall'       => array( 'ip_whitelist', 'ip_blacklist', 'ua_whitelist', 'ua_blacklist', 'trusted_proxy_header', 'country_blocking' ),
+            'login_security' => array( 'ip_whitelist', 'custom_login_url', 'two_factor' ),
+            'user_security'  => array( 'insecure_usernames' ),
+            'file_integrity' => array( 'excluded_paths', 'excluded_extensions', 'suspicious_patterns' ),
+            'email'          => array( 'additional_recipients' ),
+        );
+    }
+
+    /**
+     * Settings whose only effect is written to a file the network shares
+     *
+     * true for a whole section, or the list of keys inside it. Used to keep a
+     * subsite from resetting settings it does not control: the file is written
+     * from the main site, so resetting the local copy would only make the two
+     * disagree.
+     *
+     * Note this is not every setting that reaches .htaccess. Blocking bad bots
+     * or empty user agents also runs in PHP, per site, so those stay editable on
+     * a subsite: the PHP half protects that site and the .htaccess half is
+     * refused, leaving the main site's rules standing.
+     *
+     * @since 2.9.8
+     *
+     * @return array<string,true|string[]>
+     */
+    public static function get_shared_file_settings() {
+        return array(
+            'security_headers' => true,
+            'wp_hardening'     => array( 'disallow_file_edit', 'disallow_file_mods', 'force_ssl_admin', 'force_ssl_login', 'wp_debug', 'disable_wp_cron' ),
+            'firewall'         => array( 'disable_directory_browsing', 'protect_wp_config', 'protect_wp_includes', 'protect_uploads_php', 'protect_sensitive_files', 'protect_wp_cron', 'limit_http_methods' ),
+        );
+    }
+
+    /**
+     * Put a configuration back to the defaults without deleting what the owner typed
+     *
+     * @since 2.9.8
+     *
+     * @param array $current Configuration being replaced.
+     * @return array
+     */
+    public static function get_defaults_preserving_user_data( $current ) {
+        $instance = new self();
+        $defaults = self::apply_install_tweaks( $instance->get_default_options() );
+
+        foreach ( self::get_user_data_keys() as $section => $keys ) {
+            foreach ( $keys as $key ) {
+                if ( isset( $current[ $section ] ) && array_key_exists( $key, (array) $current[ $section ] ) ) {
+                    $defaults[ $section ][ $key ] = $current[ $section ][ $key ];
+                }
+            }
+        }
+
+        return $defaults;
+    }
+
+    /**
+     * The values the Standard preset applies
+     *
+     * Standard is the configuration a new installation gets, with every module
+     * on. It is built from the defaults rather than written out by hand, because
+     * a hand-written copy drifts: until 2.9.8 Standard named a dozen fields and
+     * left everything else alone, so applying it after Maximum kept Maximum's
+     * password rules, its administrator alerts, its session limits and its
+     * password expiry, and the preset that says it applies sensible defaults
+     * applied almost none of them.
+     *
+     * The only thing it does not touch is what the site owner typed in: IP and
+     * user agent lists, the custom login address, two factor configuration, the
+     * integrity scan exclusions and the extra notification recipients. Putting
+     * the security posture back to the defaults is one thing, throwing away
+     * someone's whitelist is another, and "Reset to Defaults" is right there for
+     * that.
+     *
+     * @since 2.9.8
+     *
+     * @return array
+     */
+    private function get_standard_preset_values() {
+        $values = self::apply_install_tweaks( $this->get_default_options() );
+
+        foreach ( array_keys( $values['modules'] ) as $module ) {
+            $values['modules'][ $module ] = true;
+        }
+
+        foreach ( self::get_user_data_keys() as $section => $keys ) {
+            foreach ( $keys as $key ) {
+                unset( $values[ $section ][ $key ] );
+            }
+        }
+
+        unset( $values['user_security']['password_expiration']['excluded_users'] );
+
+        return $values;
+    }
+
+    /**
+     * Merge a preset over a configuration
+     *
+     * Not array_replace_recursive(), which is wrong for this in two ways. A list
+     * of roles in the preset is merged position by position instead of replacing
+     * the stored one, so applying Standard over Maximum turned the two roles
+     * Standard expires passwords for into Maximum's five with the first two
+     * overwritten. And an empty list in the preset clears nothing at all,
+     * because there is no element to replace with.
+     *
+     * So: associative arrays are merged key by key, and lists and scalars are
+     * replaced outright.
+     *
+     * @since 2.9.8
+     *
+     * @param array $base    Current configuration.
+     * @param array $overlay Preset values.
+     * @return array
+     */
+    public static function merge_preset( $base, $overlay ) {
+        foreach ( $overlay as $key => $value ) {
+            if ( is_array( $value ) && isset( $base[ $key ] ) && is_array( $base[ $key ] ) && ! self::is_list( $value ) ) {
+                $base[ $key ] = self::merge_preset( $base[ $key ], $value );
+                continue;
+            }
+
+            $base[ $key ] = $value;
+        }
+
+        return $base;
+    }
+
+    /**
+     * Whether an array is a plain list (0..n-1 keys)
+     *
+     * array_is_list() is PHP 8.1 and this plugin supports 7.4.
+     *
+     * @since 2.9.8
+     *
+     * @param array $value Array to inspect.
+     * @return bool
+     */
+    private static function is_list( $value ) {
+        if ( array() === $value ) {
+            return true;
+        }
+
+        return array_keys( $value ) === range( 0, count( $value ) - 1 );
+    }
+
+    /**
      * Get presets with descriptions
      *
      * @return array Presets configuration.
      */
     public function get_presets() {
         return array(
-            'standard' => array(
-                'name'        => __( 'Standard', 'vigilante' ),
-                'description' => __( 'Balanced security suitable for most websites. Enables all modules with sensible defaults.', 'vigilante' ),
-                'modules' => array(
-                    'firewall'         => true,
-                    'security_headers' => true,
-                    'login_security'   => true,
-                    'rest_api_security'=> true,
-                    'user_security'    => true,
-                    'wp_hardening'     => true,
-                    'file_integrity'   => true,
-                    'activity_log'     => true,
+            'standard' => array_merge(
+                array(
+                    'name'        => __( 'Standard', 'vigilante' ),
+                    'description' => __( 'Balanced security suitable for most websites. Enables every module and puts every setting back to the value a new installation gets.', 'vigilante' ),
                 ),
-                'firewall' => array(
-                    'block_bad_query_strings'   => true,
-                    'block_sql_injection'       => true,
-                    'block_xss_attacks'         => true,
-                    'rate_limiting' => array(
-                        'enabled'             => true,
-                        'requests_per_minute' => 120,
-                    ),
-                ),
-                'login_security' => array(
-                    'max_attempts'     => 5,
-                    'lockout_duration' => 1800,
-                ),
-                'rest_api_security' => array(
-                    'mode' => 'selective',
-                ),
-                'user_security' => array(
-                    'prevent_display_name_login_match' => true,
-                ),
-                'file_integrity' => array(
-                    'notify_level' => 'suspicious_only',
-                ),
-                'wp_hardening' => array(
-                    'xmlrpc_mode' => 'full',
-                ),
+                $this->get_standard_preset_values()
             ),
 
             'maximum' => array(
@@ -817,6 +1079,21 @@ class Vigilante_Settings {
                     'scan_frequency'       => 'daily',
                     'notify_level'         => 'all',
                     'instant_alert'        => true,
+                ),
+                // A configuration called Maximum Security that never tells you
+                // anything happened is half a product, so the audit alerts ship
+                // on with it. The shared cooldown keeps a sustained attack from
+                // turning into a flood. Under Attack mode builds on this preset,
+                // so it inherits them for as long as it is on and gives them back
+                // when it is switched off.
+                'audit_alerts' => array(
+                    'immediate' => array(
+                        'enabled'      => true,
+                        'min_severity' => 'critical',
+                    ),
+                    'threshold' => array(
+                        'enabled' => true,
+                    ),
                 ),
                 'activity_log' => array(
                     'log_logins'         => true,

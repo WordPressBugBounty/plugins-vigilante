@@ -97,6 +97,11 @@ class Vigilante_Wpconfig_Security {
      * @return bool|WP_Error
      */
     public function apply_security_constants() {
+        // Safety check 0: on a network this file belongs to the main site
+        if ( ! Vigilante_Settings::can_write_shared_files() ) {
+            return new WP_Error( 'network_not_owner', Vigilante_Settings::get_shared_files_notice() );
+        }
+
         // Safety check 1: File must exist and be writable
         if ( ! $this->is_wpconfig_writable() ) {
             return new WP_Error( 'not_writable', __( 'wp-config.php is not writable', 'vigilante' ) );
@@ -364,9 +369,15 @@ class Vigilante_Wpconfig_Security {
     /**
      * Remove our security constants from wp-config.php and restore originals
      *
-     * @return bool
+     * @return bool|WP_Error
      */
     public function remove_constants() {
+        // On a network, a subsite deactivating the plugin must not strip the
+        // constants the main site put there for everyone.
+        if ( ! Vigilante_Settings::can_write_shared_files() ) {
+            return new WP_Error( 'network_not_owner', Vigilante_Settings::get_shared_files_notice() );
+        }
+
         if ( ! file_exists( $this->wpconfig_path ) ) {
             return true;
         }

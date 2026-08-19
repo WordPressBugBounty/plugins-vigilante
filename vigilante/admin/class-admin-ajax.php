@@ -1722,6 +1722,12 @@ trait Vigilante_Admin_Ajax {
 
         $db_prefix = new Vigilante_Database_Prefix();
 
+        // On a network the prefix is shared by every site: main site + network admin only
+        $allowed = $db_prefix->can_change_prefix();
+        if ( is_wp_error( $allowed ) ) {
+            wp_send_json_error( $allowed->get_error_message() );
+        }
+
         // Validate first
         $valid = $db_prefix->validate_prefix( $new_prefix );
         if ( is_wp_error( $valid ) ) {

@@ -78,8 +78,11 @@ class Vigilante_Https_Enforcer {
             add_filter( 'the_content', array( $this, 'fix_content_urls' ), 999 );
             add_filter( 'widget_text', array( $this, 'fix_content_urls' ), 999 );
 
-            // The rewriters above only cover same-domain URLs; external
-            // http:// references need the browser-side CSP directive.
+        }
+
+        // Its own setting since 2.9.8: the rewriters above are same-domain and
+        // harmless, this one governs everybody else's resources too.
+        if ( ! empty( $this->options['upgrade_insecure_requests'] ) ) {
             add_action( 'send_headers', array( $this, 'emit_upgrade_insecure_requests' ) );
         }
     }

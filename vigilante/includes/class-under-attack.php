@@ -458,7 +458,10 @@ class Vigilante_Under_Attack {
             ),
         );
 
-        $hardened = array_replace_recursive( $base_options, $maximum_preset, $ua_overrides );
+        // Same list-aware merge the presets use: array_replace_recursive() would
+        // combine the role lists position by position instead of replacing them.
+        $hardened = Vigilante_Settings::merge_preset( $base_options, $maximum_preset );
+        $hardened = Vigilante_Settings::merge_preset( $hardened, $ua_overrides );
 
         update_option( Vigilante_Settings::OPTION_NAME, $hardened );
         $this->settings->clear_cache();

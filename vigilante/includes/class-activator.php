@@ -59,10 +59,7 @@ class Vigilante_Activator {
              * Vigilante_Comment_Security::resolve_xmlrpc_mode() answers 'full' when
              * nothing is stored, which is what every version since 1.0.0 did.
              */
-            if ( ! isset( $first_run['wp_hardening'] ) || ! is_array( $first_run['wp_hardening'] ) ) {
-                $first_run['wp_hardening'] = array();
-            }
-            $first_run['wp_hardening']['xmlrpc_mode'] = 'pingback';
+            $first_run = Vigilante_Settings::apply_install_tweaks( $first_run );
 
             update_option( Vigilante_Settings::OPTION_NAME, $first_run );
             // Refresh settings instance to get new values

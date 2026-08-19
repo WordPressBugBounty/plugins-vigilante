@@ -344,6 +344,34 @@ class Vigilante_Admin {
 
             update_option( 'vigilante_db_version', '2.9.3' );
         }
+
+        /*
+         * 2.9.8: the mixed content handling changes shape. "Upgrade Insecure
+         * Requests" becomes a setting of its own, and Fix Mixed Content ships
+         * off, where before it shipped on and carried the directive with it.
+         * Both have to be written down for sites that are updating, so their
+         * pages keep loading exactly what they loaded yesterday.
+         *
+         * Read the RAW stored options, not get_section(): that one merges the
+         * defaults, so a site that never stored the key would be read with the
+         * new default and silently lose the behaviour it had. Absent means the
+         * site was running on the old default, which was on.
+         */
+        if ( version_compare( $db_version, '2.9.8', '<' ) ) {
+            $raw     = get_option( Vigilante_Settings::OPTION_NAME, array() );
+            $stored  = ( is_array( $raw ) && isset( $raw['security_headers'] ) && is_array( $raw['security_headers'] ) ) ? $raw['security_headers'] : array();
+            $had_fix = array_key_exists( 'fix_mixed_content', $stored ) ? ! empty( $stored['fix_mixed_content'] ) : true;
+
+            $this->settings->update_section(
+                'security_headers',
+                array(
+                    'fix_mixed_content'         => $had_fix,
+                    'upgrade_insecure_requests' => $had_fix,
+                )
+            );
+
+            update_option( 'vigilante_db_version', '2.9.8' );
+        }
     }
 
     /**
@@ -1244,6 +1272,7 @@ class Vigilante_Admin {
             array( 'tab' => 'headers', 'tab_label' => __( 'Security Headers', 'vigilante' ), 'section' => __( 'Security Headers', 'vigilante' ), 'anchor' => 'vigilante-section-headers-main', 'label' => __( 'Report Only Mode', 'vigilante' ), 'label_en' => 'Report Only Mode', 'keywords' => _x( 'report only mode', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'headers', 'tab_label' => __( 'Security Headers', 'vigilante' ), 'section' => __( 'Security Headers', 'vigilante' ), 'anchor' => 'vigilante-section-headers-main', 'label' => __( 'Redirect HTTP to HTTPS', 'vigilante' ), 'label_en' => 'Redirect HTTP to HTTPS', 'keywords' => _x( 'redirect http to https redirection forward ssl tls secure', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'headers', 'tab_label' => __( 'Security Headers', 'vigilante' ), 'section' => __( 'Security Headers', 'vigilante' ), 'anchor' => 'vigilante-section-headers-main', 'label' => __( 'Fix Mixed Content', 'vigilante' ), 'label_en' => 'Fix Mixed Content', 'keywords' => _x( 'fix mixed content insecure http', 'settings search keywords', 'vigilante' ) ),
+            array( 'tab' => 'headers', 'tab_label' => __( 'Security Headers', 'vigilante' ), 'section' => __( 'Security Headers', 'vigilante' ), 'anchor' => 'field-upgrade-insecure-requests', 'label' => __( 'Upgrade Insecure Requests', 'vigilante' ), 'label_en' => 'Upgrade Insecure Requests', 'keywords' => _x( 'upgrade insecure requests mixed content csp https external resources', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'headers', 'tab_label' => __( 'Security Headers', 'vigilante' ), 'section' => __( 'Security Headers', 'vigilante' ), 'anchor' => 'vigilante-section-headers-main', 'label' => __( 'Rewrite Site Address on Activation', 'vigilante' ), 'label_en' => 'Rewrite Site Address on Activation', 'keywords' => _x( 'rewrite site address on activation', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'headers', 'tab_label' => __( 'Security Headers', 'vigilante' ), 'section' => __( 'Security Headers', 'vigilante' ), 'anchor' => 'vigilante-section-headers-main', 'label' => __( 'Enable HSTS', 'vigilante' ), 'label_en' => 'Enable HSTS', 'keywords' => _x( 'enable hsts strict transport security', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'headers', 'tab_label' => __( 'Security Headers', 'vigilante' ), 'section' => __( 'Security Headers', 'vigilante' ), 'anchor' => 'vigilante-section-headers-main', 'label' => __( 'Max Age', 'vigilante' ), 'label_en' => 'Max Age', 'keywords' => _x( 'max age', 'settings search keywords', 'vigilante' ) ),
@@ -1859,6 +1888,68 @@ class Vigilante_Admin {
         <div class="vigilante-settings-section">
             <h2><?php esc_html_e( 'Coming Soon', 'vigilante' ); ?></h2>
             <p><?php esc_html_e( 'This section is under development.', 'vigilante' ); ?></p>
+        </div>
+        <?php
+    }
+
+    /**
+     * Values to display for a section that this site does not control
+     *
+     * On a subsite the stored options are its own copy, which nothing acts on:
+     * wp-config.php and .htaccess are written from the main site. Painting the
+     * local copy describes a configuration that is not running, so a subsite
+     * admin sees a box ticked here and the constant absent from the file, or the
+     * other way round. Read the main site's values instead, which are the ones in
+     * force, and fall back to the local ones if they cannot be read.
+     *
+     * @since 2.9.8
+     *
+     * @param string $section Settings section.
+     * @return array
+     */
+    private function get_section_for_display( $section ) {
+        $local = $this->settings->get_section( $section );
+
+        if ( ! $this->shared_files_locked() ) {
+            return $local;
+        }
+
+        // shared_files_locked() is only true on multisite, where get_blog_option() exists.
+        $main = get_blog_option( get_main_site_id(), Vigilante_Settings::OPTION_NAME, array() );
+
+        if ( ! is_array( $main ) || empty( $main[ $section ] ) || ! is_array( $main[ $section ] ) ) {
+            return $local;
+        }
+
+        return wp_parse_args( $main[ $section ], $local );
+    }
+
+    /**
+     * Whether the sections that write wp-config.php and .htaccess are read-only here
+     *
+     * True on a network when this is not the main site, or the user is not a
+     * network administrator. See Vigilante_Settings::can_write_shared_files().
+     *
+     * @since 2.9.8
+     *
+     * @return bool
+     */
+    private function shared_files_locked() {
+        return ! Vigilante_Settings::can_write_shared_files();
+    }
+
+    /**
+     * Print the shared-files notice for a section that cannot be edited here
+     *
+     * @since 2.9.8
+     */
+    private function render_shared_files_notice() {
+        if ( ! $this->shared_files_locked() ) {
+            return;
+        }
+        ?>
+        <div class="notice notice-info inline" style="margin:10px 0 16px;padding:8px 12px;">
+            <p style="margin:0;"><?php echo esc_html( Vigilante_Settings::get_shared_files_notice() ); ?></p>
         </div>
         <?php
     }
@@ -2737,7 +2828,7 @@ class Vigilante_Admin {
 
             <div class="vigilante-tool-card">
                 <h3><?php esc_html_e( 'Reset to Defaults', 'vigilante' ); ?></h3>
-                <p><?php esc_html_e( 'Reset all the Vigilant security settings to default values.', 'vigilante' ); ?></p>
+                <p><?php esc_html_e( 'Reset all the Vigilant security settings to default values. Your IP lists, custom login address, two-factor setup, scan exclusions and extra alert recipients are kept.', 'vigilante' ); ?></p>
                 <button type="button" class="button vigilante-reset-settings" style="color: #a00;">
                     <?php esc_html_e( 'Reset All Settings', 'vigilante' ); ?>
                 </button>
@@ -2746,10 +2837,16 @@ class Vigilante_Admin {
             <div class="vigilante-tool-card">
                 <h3><?php esc_html_e( 'Download Config Backup', 'vigilante' ); ?></h3>
                 <p><?php esc_html_e( 'Download a ZIP backup of your wp-config.php and .htaccess (plus robots.txt if present) before making security changes. The archive is built on the fly and sent to your browser, so nothing is left on the server.', 'vigilante' ); ?></p>
+                <?php if ( $this->shared_files_locked() ) : ?>
+                    <p class="description"><?php esc_html_e( 'Both files belong to the whole network, and wp-config.php carries the database credentials and the authentication salts of every site. The copy is taken from the main site.', 'vigilante' ); ?></p>
+                <?php else : ?>
                 <button type="button" class="button vigilante-create-backup">
                     <?php esc_html_e( 'Download Backup', 'vigilante' ); ?>
                 </button>
+                <?php endif; ?>
             </div>
+
+            <?php if ( ! $this->shared_files_locked() ) : ?>
 
             <div class="vigilante-tool-card vigilante-tool-card-wide">
                 <h3><?php esc_html_e( 'Database Backup', 'vigilante' ); ?></h3>
@@ -2791,6 +2888,13 @@ class Vigilante_Admin {
                     </div>
                 </div>
             </div>
+            <?php else : ?>
+            <div class="vigilante-tool-card vigilante-tool-card-wide">
+                <h3><?php esc_html_e( 'Database Backup', 'vigilante' ); ?></h3>
+                <p><?php esc_html_e( 'Download a backup of your database as a ZIP file. Select which tables to include.', 'vigilante' ); ?></p>
+                <p class="description"><?php esc_html_e( 'The database is shared by the whole network, so a backup taken here would carry every other site and all of the network users. The copy is taken from the main site.', 'vigilante' ); ?></p>
+            </div>
+            <?php endif; ?>
         </div>
         <?php
     }
@@ -3065,7 +3169,14 @@ class Vigilante_Admin {
                 </table>
             </div>
 
-            <div id="vigilante-section-firewall-server" class="vigilante-settings-section">
+            <?php
+            $vg_shared_locked = $this->shared_files_locked();
+            // Paint what is actually in force, not this site's unused copy.
+            $vg_local_options = $options;
+            $options = $this->get_section_for_display( 'firewall' );
+            ?>
+            <?php $this->render_shared_files_notice(); ?>
+            <div id="vigilante-section-firewall-server" class="vigilante-settings-section <?php echo $vg_shared_locked ? 'vigilante-form-disabled' : ''; ?>" <?php echo $vg_shared_locked ? 'inert' : ''; ?>>
                 <h2>
                     <?php esc_html_e( 'Server Protection', 'vigilante' ); ?>
                     <span class="vigilante-method-badge htaccess"><?php esc_html_e( 'HTACCESS', 'vigilante' ); ?></span>
@@ -3148,6 +3259,7 @@ class Vigilante_Admin {
                     </tr>
                 </table>
             </div>
+            <?php $options = $vg_local_options; ?>
 
             <p class="submit vigilante-submit-buttons">
                 <button type="submit" class="button button-primary vigilante-save-btn" data-original-text="<?php esc_attr_e( 'Save Settings', 'vigilante' ); ?>">
@@ -3695,10 +3807,14 @@ class Vigilante_Admin {
      */
     private function render_tab_headers() {
         $is_disabled = $this->render_module_disabled_notice( 'security_headers' );
-        $options = $this->settings->get_section( 'security_headers' );
+        // Every setting on this tab ends up in .htaccess, so on a subsite the
+        // whole tab is somebody else's, values included.
+        $vg_shared_locked = $this->shared_files_locked();
+        $options = $this->get_section_for_display( 'security_headers' );
         ?>
         <form class="vigilante-settings-form <?php echo $is_disabled ? 'vigilante-form-disabled' : ''; ?>" data-section="security_headers" <?php echo $is_disabled ? 'inert' : ''; ?>>
-            <div id="vigilante-section-headers-main" class="vigilante-settings-section">
+            <?php $this->render_shared_files_notice(); ?>
+            <div id="vigilante-section-headers-main" class="vigilante-settings-section <?php echo $vg_shared_locked ? 'vigilante-form-disabled' : ''; ?>" <?php echo $vg_shared_locked ? 'inert' : ''; ?>>
                 <h2>
                     <?php esc_html_e( 'Security Headers', 'vigilante' ); ?>
                     <span class="vigilante-method-badge htaccess"><?php esc_html_e( 'HTACCESS', 'vigilante' ); ?></span>
@@ -3779,8 +3895,19 @@ class Vigilante_Admin {
                         <td>
                             <label>
                                 <input type="checkbox" name="security_headers[fix_mixed_content]" value="1" <?php checked( ! empty( $options['fix_mixed_content'] ) ); ?>>
-                                <?php esc_html_e( 'Rewrite http:// resources to https:// and ask browsers to upgrade the rest', 'vigilante' ); ?>
+                                <?php esc_html_e( 'Rewrite this site http:// resources to https://', 'vigilante' ); ?>
                             </label>
+                            <p class="description"><?php esc_html_e( 'Off by default. Only touches addresses of this same site, and only when the site is already served over HTTPS, so it cannot break an external resource. Useful right after moving a site to HTTPS, when old content still points at http:// addresses.', 'vigilante' ); ?></p>
+                        </td>
+                    </tr>
+                    <tr id="field-upgrade-insecure-requests">
+                        <th scope="row"><?php esc_html_e( 'Upgrade Insecure Requests', 'vigilante' ); ?></th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="security_headers[upgrade_insecure_requests]" value="1" <?php checked( ! empty( $options['upgrade_insecure_requests'] ) ); ?>>
+                                <?php esc_html_e( 'Ask browsers to upgrade every http:// request to https://', 'vigilante' ); ?>
+                            </label>
+                            <p class="description"><?php esc_html_e( '&#9888; Off by default. This one also covers resources hosted elsewhere: anything served from a domain with no HTTPS stops loading instead of loading insecurely. Turn it on once you know every external resource the site uses is available over HTTPS.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
                     <tr>
@@ -3863,12 +3990,15 @@ class Vigilante_Admin {
             </div>
 
             <p class="submit vigilante-submit-buttons">
+                <?php if ( ! $vg_shared_locked ) : ?>
                 <button type="submit" class="button button-primary vigilante-save-btn" data-original-text="<?php esc_attr_e( 'Save Settings', 'vigilante' ); ?>">
                     <?php esc_html_e( 'Save Settings', 'vigilante' ); ?>
                 </button>
                 <button type="button" class="button vigilante-reset-section-btn" data-original-text="<?php esc_attr_e( 'Reset to Defaults', 'vigilante' ); ?>">
                     <?php esc_html_e( 'Reset to Defaults', 'vigilante' ); ?>
                 </button>
+                <?php endif; ?>
+                <?php /* Testing what the server actually sends is read-only and useful from any site of a network. */ ?>
                 <button type="button" class="button vigilante-test-headers">
                     <?php esc_html_e( 'Test Headers', 'vigilante' ); ?>
                 </button>
@@ -3979,12 +4109,12 @@ class Vigilante_Admin {
                     $pw_policy = wp_parse_args(
                         ( isset( $options['password_policy'] ) && is_array( $options['password_policy'] ) ) ? $options['password_policy'] : array(),
                         array(
-                            'require_uppercase' => true,
-                            'require_lowercase' => true,
-                            'require_number'    => true,
-                            'require_special'   => true,
+                            'require_uppercase' => false,
+                            'require_lowercase' => false,
+                            'require_number'    => false,
+                            'require_special'   => false,
                             'block_common'      => true,
-                            'block_username'    => false,
+                            'block_username'    => true,
                             'affected_roles'    => array(),
                         )
                     );
@@ -4705,7 +4835,9 @@ class Vigilante_Admin {
         ?>
         <form class="vigilante-settings-form <?php echo $is_disabled ? 'vigilante-form-disabled' : ''; ?>" data-section="wp_hardening" <?php echo $is_disabled ? 'inert' : ''; ?>>
             <!-- Database Hardening (outside form save flow - uses its own AJAX action) -->
-            <div id="vigilante-section-hardening-database" class="vigilante-settings-section">
+            <?php $vg_shared_locked = $this->shared_files_locked(); ?>
+            <?php $this->render_shared_files_notice(); ?>
+            <div id="vigilante-section-hardening-database" class="vigilante-settings-section <?php echo $vg_shared_locked ? 'vigilante-form-disabled' : ''; ?>" <?php echo $vg_shared_locked ? 'inert' : ''; ?>>
                 <h2>
                     <?php esc_html_e( 'Database Hardening', 'vigilante' ); ?>
                     <span class="vigilante-method-badge database"><?php esc_html_e( 'Database', 'vigilante' ); ?></span>
@@ -4718,6 +4850,12 @@ class Vigilante_Admin {
                 $current_prefix = $db_prefix->get_current_prefix();
                 $is_default = $db_prefix->is_default_prefix();
                 ?>
+
+                <?php if ( is_multisite() && ! $vg_shared_locked ) : ?>
+                    <div class="notice notice-warning inline" style="margin:10px 0 16px;padding:8px 12px;">
+                        <p style="margin:0;"><?php esc_html_e( 'Network-wide operation: it renames the tables of every site in the network and rewrites the wp-config.php they all share. Back up the whole database first, not just the main site.', 'vigilante' ); ?></p>
+                    </div>
+                <?php endif; ?>
 
                 <table class="form-table">
                     <tr>
@@ -4775,7 +4913,14 @@ class Vigilante_Admin {
             </div>
 
             <!-- wp-config Security -->
-            <div id="vigilante-section-hardening-wpconfig" class="vigilante-settings-section">
+            <?php
+            $vg_shared_locked = $this->shared_files_locked();
+            // Paint what is actually in force, not this site's unused copy.
+            $vg_local_options = $options;
+            $options = $this->get_section_for_display( 'wp_hardening' );
+            ?>
+            <?php $this->render_shared_files_notice(); ?>
+            <div id="vigilante-section-hardening-wpconfig" class="vigilante-settings-section <?php echo $vg_shared_locked ? 'vigilante-form-disabled' : ''; ?>" <?php echo $vg_shared_locked ? 'inert' : ''; ?>>
                 <h2>
                     <?php esc_html_e( 'wp-config.php Security', 'vigilante' ); ?>
                     <span class="vigilante-method-badge config"><?php esc_html_e( 'WP-CONFIG', 'vigilante' ); ?></span>
@@ -4842,6 +4987,7 @@ class Vigilante_Admin {
                     </tr>
                 </table>
             </div>
+            <?php $options = $vg_local_options; ?>
 
             <!-- Comment Security -->
             <div id="vigilante-section-hardening-xmlrpc" class="vigilante-settings-section">
@@ -6750,7 +6896,7 @@ class Vigilante_Admin {
         
         // Handle reset to defaults
         if ( 'reset' === $preset ) {
-            $defaults = $this->settings->get_default_options();
+            $defaults = Vigilante_Settings::get_defaults_preserving_user_data( get_option( Vigilante_Settings::OPTION_NAME, array() ) );
             update_option( Vigilante_Settings::OPTION_NAME, $defaults );
             $this->settings->clear_cache();
             
@@ -6783,11 +6929,11 @@ class Vigilante_Admin {
         if ( ! is_array( $current ) ) {
             $current = array();
         }
-        // Make sure all known keys exist before merging — array_replace_recursive
-        // does not invent keys that are missing on both sides.
-        $current = array_replace_recursive( $this->settings->get_default_options(), $current );
+        // Make sure all known keys exist before merging — the merge does not
+        // invent keys that are missing on both sides.
+        $current = Vigilante_Settings::merge_preset( $this->settings->get_default_options(), $current );
 
-        $merged = array_replace_recursive( $current, $preset_options );
+        $merged = Vigilante_Settings::merge_preset( $current, $preset_options );
 
         update_option( Vigilante_Settings::OPTION_NAME, $merged );
         $this->settings->clear_cache();
@@ -6817,17 +6963,43 @@ class Vigilante_Admin {
             wp_send_json_error( __( 'No section specified.', 'vigilante' ) );
         }
 
-        // Get current options and defaults
+        // Get current options and defaults. get_defaults_preserving_user_data()
+        // applies the tweaks a fresh installation gets, so the button and a new
+        // install agree, and keeps whatever the owner typed in.
         $current_options = $this->settings->get_all_options();
-        $defaults = $this->settings->get_default_options();
+        $defaults        = Vigilante_Settings::get_defaults_preserving_user_data( $current_options );
 
         // Check if section exists in defaults
         if ( ! isset( $defaults[ $section ] ) ) {
             wp_send_json_error( __( 'Invalid section.', 'vigilante' ) );
         }
 
-        // Reset only this section to defaults
-        $current_options[ $section ] = $defaults[ $section ];
+        $new_values = $defaults[ $section ];
+
+        /*
+         * On a subsite, the settings written to wp-config.php and .htaccess are
+         * the main site's business. Resetting the local copy of those would only
+         * make this screen disagree with the file, so they are carried over
+         * untouched, and a section that is nothing but shared settings is not
+         * reset at all.
+         */
+        if ( ! Vigilante_Settings::can_write_shared_files() ) {
+            $shared = Vigilante_Settings::get_shared_file_settings();
+
+            if ( isset( $shared[ $section ] ) ) {
+                if ( true === $shared[ $section ] ) {
+                    wp_send_json_error( Vigilante_Settings::get_shared_files_notice() );
+                }
+
+                foreach ( $shared[ $section ] as $shared_key ) {
+                    if ( array_key_exists( $shared_key, (array) $current_options[ $section ] ) ) {
+                        $new_values[ $shared_key ] = $current_options[ $section ][ $shared_key ];
+                    }
+                }
+            }
+        }
+
+        $current_options[ $section ] = $new_values;
 
         // Save
         update_option( Vigilante_Settings::OPTION_NAME, $current_options );

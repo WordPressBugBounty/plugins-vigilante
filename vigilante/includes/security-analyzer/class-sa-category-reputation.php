@@ -82,11 +82,21 @@ class Vigilante_SA_Category_Reputation {
 
         $ip = $this->resolve_site_ip();
 
-        // Intro/diagnostic row telling the user what was tested and on what IP.
-        $results[] = $this->build_intro( $ip );
+        // A site on a private or reserved address (a local install, a staging box
+        // on an intranet, anything behind NAT resolving to its LAN address) has no
+        // public reputation to query. Sending those to a DNSBL leaks the internal
+        // address to a third party and can only ever answer nonsense.
+        $is_public = '' !== $ip && filter_var(
+            $ip,
+            FILTER_VALIDATE_IP,
+            FILTER_FLAG_IPV4 | FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE
+        );
 
-        if ( '' === $ip ) {
-            // Without an IP we can't query — return just the intro (already explains why).
+        // Intro/diagnostic row telling the user what was tested and on what IP.
+        $results[] = $this->build_intro( $ip, $is_public );
+
+        if ( '' === $ip || ! $is_public ) {
+            // Nothing public to query — the intro row already explains why.
             return $results;
         }
 
@@ -103,7 +113,7 @@ class Vigilante_SA_Category_Reputation {
      * @param string $ip
      * @return Vigilante_SA_Check_Result
      */
-    private function build_intro( $ip ) {
+    private function build_intro( $ip, $is_public = true ) {
         $args = array(
             'id'       => 'reputation_overview',
             'category' => self::SLUG,
@@ -114,6 +124,17 @@ class Vigilante_SA_Category_Reputation {
 
         if ( '' === $ip ) {
             $args['detail'] = __( 'Could not resolve the site\'s public IP (DNS lookup failed). Reputation checks skipped — this is typically a transient resolver issue.', 'vigilante' );
+            return Vigilante_SA_Check_Result::skip( $args );
+        }
+
+        if ( ! $is_public ) {
+            $args['detail'] = sprintf(
+                /* translators: 1: site host, 2: resolved IPv4 */
+                __( '%1$s resolves to %2$s, a private or reserved address. Public blacklists only track addresses reachable from the internet, so these checks were skipped.', 'vigilante' ),
+                wp_parse_url( home_url(), PHP_URL_HOST ),
+                $ip
+            );
+            $args['data'] = array( 'ip' => $ip );
             return Vigilante_SA_Check_Result::skip( $args );
         }
 
@@ -157,7 +178,7 @@ class Vigilante_SA_Category_Reputation {
         $hostname = $reversed . '.' . $meta['zone'];
 
         // Use gethostbynamel() to avoid long single-host timeouts and get all A records back.
-        // Listings typically respond with 127.0.0.x codes; non-listings return no record.
+        // A listing answers with a 127.0.0.x code; a clean address answers nothing.
         $records = @gethostbynamel( $hostname ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
 
         if ( false === $records || empty( $records ) ) {
@@ -169,16 +190,48 @@ class Vigilante_SA_Category_Reputation {
             return Vigilante_SA_Check_Result::info( $args );
         }
 
-        // Any returned record (typically 127.0.0.x) means listed. Informational in terms
-        // of scoring (max=0), but visually flagged as a warning so it stands out.
-        $codes = array_filter( (array) $records, 'is_string' );
+        $codes = array_values( array_filter( (array) $records, 'is_string' ) );
+
+        /*
+         * An answer is not the same as a listing. The DNSBLs reserve 127.255.255.x
+         * to say "I am not answering you": Spamhaus returns 127.255.255.252 for a
+         * typo in the query, .254 for a query coming from an open or public
+         * resolver (Google DNS, Cloudflare and the like, which is what most shared
+         * hosting uses) and .255 for too many queries. Reading those as a listing
+         * told sites they were on Spamhaus when they were not, and there was no way
+         * for the owner to act on it because there was nothing to delist.
+         */
+        $refused = array();
+        $listed  = array();
+
+        foreach ( $codes as $code ) {
+            if ( 0 === strpos( $code, '127.255.255.' ) ) {
+                $refused[] = $code;
+            } else {
+                $listed[] = $code;
+            }
+        }
+
+        if ( empty( $listed ) ) {
+            $args['detail'] = sprintf(
+                /* translators: 1: blacklist name, 2: response codes (127.255.255.x) */
+                __( '%1$s did not answer the query (response: %2$s). That code means the blacklist refused the lookup, usually because the server asks through a public DNS resolver, not that the address is listed. Nothing to fix on the site.', 'vigilante' ),
+                $meta['label'],
+                implode( ', ', $refused )
+            );
+            $args['data'] = array( 'refused' => $refused );
+            return Vigilante_SA_Check_Result::skip( $args );
+        }
+
+        // Genuinely listed. Informational in terms of scoring (max=0), but flagged
+        // as a warning so it stands out.
         $args['detail'] = sprintf(
             /* translators: 1: blacklist name, 2: response codes (127.0.0.x) */
             __( 'Listed on %1$s (response: %2$s). Shared hosting? Check if the listing belongs to your IP range and request delisting from the blacklist operator.', 'vigilante' ),
             $meta['label'],
-            implode( ', ', $codes )
+            implode( ', ', $listed )
         );
-        $args['data'] = array( 'response' => array_values( $codes ) );
+        $args['data'] = array( 'response' => $listed );
         return Vigilante_SA_Check_Result::warn( $args );
     }
 

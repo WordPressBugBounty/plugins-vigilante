@@ -74,6 +74,12 @@ class Vigilante_Htaccess_Manager {
      * @return bool|WP_Error
      */
     public function add_block( $marker_start, $marker_end, $rules, $position = 'top' ) {
+        // On a network the root .htaccess is shared by every site, so only the
+        // main site writes it. See Vigilante_Settings::can_write_shared_files().
+        if ( ! Vigilante_Settings::can_write_shared_files() ) {
+            return new WP_Error( 'network_not_owner', Vigilante_Settings::get_shared_files_notice() );
+        }
+
         // Read current content
         $content = $this->read_file();
         if ( false === $content ) {
@@ -115,6 +121,10 @@ class Vigilante_Htaccess_Manager {
      * @return bool|WP_Error
      */
     public function remove_block( $marker_start, $marker_end ) {
+        if ( ! Vigilante_Settings::can_write_shared_files() ) {
+            return new WP_Error( 'network_not_owner', Vigilante_Settings::get_shared_files_notice() );
+        }
+
         // Read current content
         $content = $this->read_file();
         
