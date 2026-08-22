@@ -2147,20 +2147,48 @@
                 return;
             }
 
-            var matches = [];
+            // Score every entry and sort before cutting. It used to stop at the
+            // first 30 matches in index order, so a broad query ("password"
+            // already returns 19) could hide the very row the user was after
+            // behind whatever happened to be declared first.
+            var scored = [];
             for (var i = 0; i < index.length; i++) {
                 var entry = index[i];
                 var label = (entry.label || '').toLowerCase();
                 var labelEn = (entry.label_en || '').toLowerCase();
                 var section = (entry.section || '').toLowerCase();
+                var tabLabel = (entry.tab_label || '').toLowerCase();
                 var keywords = (entry.keywords || '').toLowerCase();
-                if (label.indexOf(query) !== -1 || labelEn.indexOf(query) !== -1 || section.indexOf(query) !== -1 || keywords.indexOf(query) !== -1) {
-                    matches.push(entry);
+                var score = 0;
+
+                if (label === query || labelEn === query) {
+                    score = 100;
+                } else if (label.indexOf(query) === 0 || labelEn.indexOf(query) === 0) {
+                    score = 80;
+                } else if (label.indexOf(query) !== -1 || labelEn.indexOf(query) !== -1) {
+                    score = 60;
+                } else if (section.indexOf(query) !== -1) {
+                    score = 40;
+                } else if (tabLabel.indexOf(query) !== -1) {
+                    score = 35;
+                } else if (keywords.indexOf(query) !== -1) {
+                    score = 30;
                 }
-                if (matches.length >= 30) {
-                    break;
+
+                if (score > 0) {
+                    scored.push({ entry: entry, score: score, order: i });
                 }
             }
+
+            scored.sort(function(a, b) {
+                return (b.score - a.score) || (a.order - b.order);
+            });
+
+            var matches = [];
+            for (var t = 0; t < scored.length && matches.length < 30; t++) {
+                matches.push(scored[t].entry);
+            }
+            var hiddenCount = scored.length - matches.length;
 
             if (!matches.length) {
                 $results.html('<div class="vigilante-search-empty">' + (vigilanteAdmin.strings.searchNoResults || 'No results') + '</div>').attr('hidden', false);
@@ -2199,6 +2227,11 @@
                     flatIdx++;
                 }
                 html += '</div>';
+            }
+
+            if (hiddenCount > 0) {
+                var moreTpl = vigilanteAdmin.strings.searchMoreResults || '%d more results, refine the search';
+                html += '<div class="vigilante-search-more">' + this.escapeHtml(moreTpl.replace('%d', hiddenCount)) + '</div>';
             }
 
             $results.html(html).attr('hidden', false);

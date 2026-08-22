@@ -220,6 +220,14 @@
     text-align: center;
 }
 
+.vigilante-search-more {
+    padding: 12px 14px;
+    font-size: 13px;
+    color: #646970;
+    text-align: center;
+    border-top: 1px solid #dcdcde;
+}
+
 /* Tabs */
 .vigilante-nav-tabs {
     margin-bottom: 20px;

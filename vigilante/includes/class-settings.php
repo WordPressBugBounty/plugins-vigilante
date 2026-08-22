@@ -97,11 +97,6 @@ class Vigilante_Settings {
                 // User-Agent management
                 'ua_whitelist'              => array(),
                 'ua_blacklist'              => array(),
-                'country_blocking'          => array(
-                    'enabled'   => false,
-                    'mode'      => 'blacklist',
-                    'countries' => array(),
-                ),
                 
                 // File protection (htaccess-based)
                 'disable_directory_browsing' => true,
@@ -117,10 +112,6 @@ class Vigilante_Settings {
                 'limit_http_methods'         => true,
                 // All methods needed for WordPress core, Gutenberg, REST API, and page builders
                 'allowed_http_methods'       => array( 'GET', 'POST', 'HEAD', 'OPTIONS', 'PUT', 'PATCH', 'DELETE' ),
-                'protected_file_extensions'  => array(
-                    'htaccess', 'htpasswd', 'ini', 'log', 'sql', 
-                    'bak', 'old', 'tmp', 'swp', 'save', 'backup'
-                ),
             ),
 
             // Security Headers settings (includes HTTPS enforcer)
@@ -455,17 +446,6 @@ class Vigilante_Settings {
                     // vector, defended primarily by CSP in the headers module).
                     '.css',
                 ),
-                'suspicious_patterns'     => array(
-                    'eval(',
-                    'base64_decode(',
-                    'gzinflate(',
-                    'str_rot13(',
-                    'exec(',
-                    'shell_exec(',
-                    'system(',
-                    'passthru(',
-                    'assert(',
-                ),
             ),
 
             // Activity Log settings
@@ -489,8 +469,6 @@ class Vigilante_Settings {
 
             // Backup settings
             'backup' => array(
-                'auto_backup'            => true,
-                'backup_before_update'   => true,
                 'keep_backups'           => 5,
             ),
 
@@ -505,10 +483,6 @@ class Vigilante_Settings {
             'advanced' => array(
                 'remove_readme'          => true,
                 'remove_license'         => true,
-                'block_author_archives'  => false,
-                'disable_embeds'         => false,
-                'uninstall_cleanup'      => true,
-                'debug_mode'             => false,
             ),
 
             // Security Analyzer (v2.1.0) — on-demand + weekly Security Check
@@ -792,10 +766,10 @@ class Vigilante_Settings {
      */
     public static function get_user_data_keys() {
         return array(
-            'firewall'       => array( 'ip_whitelist', 'ip_blacklist', 'ua_whitelist', 'ua_blacklist', 'trusted_proxy_header', 'country_blocking' ),
+            'firewall'       => array( 'ip_whitelist', 'ip_blacklist', 'ua_whitelist', 'ua_blacklist', 'trusted_proxy_header' ),
             'login_security' => array( 'ip_whitelist', 'custom_login_url', 'two_factor' ),
             'user_security'  => array( 'insecure_usernames' ),
-            'file_integrity' => array( 'excluded_paths', 'excluded_extensions', 'suspicious_patterns' ),
+            'file_integrity' => array( 'excluded_paths', 'excluded_extensions' ),
             'email'          => array( 'additional_recipients' ),
         );
     }

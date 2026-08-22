@@ -707,7 +707,73 @@ class Vigilante_File_Integrity {
             }
         }
 
+        $results['modified'] = $this->drop_stale_language_mismatches( $results['modified'], $results );
+
         return $results;
+    }
+
+    /**
+     * Drop language files that only mismatch because the manifest was stale
+     *
+     * wp.org rebuilds the checksum manifest every time GlotPress rebuilds a
+     * language pack, and that happens without the WordPress version moving. The
+     * cache key here is version plus locale, so it does not expire when that
+     * happens, and the site spends up to a day comparing today's translation
+     * files against yesterday's manifest. That is where the bursts of "modified
+     * core files" under wp-content/languages/ come from, and they are not
+     * modifications at all.
+     *
+     * So before reporting one, the manifest is fetched again bypassing the
+     * cache, once per scan, and whatever matches the fresh copy is dropped.
+     * Anything still mismatching is reported as before.
+     *
+     * @since 2.9.9
+     *
+     * @param array $modified Entries flagged as modified.
+     * @param array $results  Scan results, to move the recovered files to 'ok'.
+     * @return array Entries that are still modified.
+     */
+    private function drop_stale_language_mismatches( $modified, &$results ) {
+        if ( empty( $modified ) ) {
+            return $modified;
+        }
+
+        $suspects = array();
+        foreach ( $modified as $entry ) {
+            if ( 0 === strpos( $entry['file'], 'wp-content/languages/' ) ) {
+                $suspects[ $entry['file'] ] = true;
+            }
+        }
+
+        if ( empty( $suspects ) ) {
+            return $modified;
+        }
+
+        $fresh = $this->get_core_checksums( true );
+
+        if ( is_wp_error( $fresh ) || empty( $fresh ) ) {
+            return $modified;
+        }
+
+        $kept = array();
+
+        foreach ( $modified as $entry ) {
+            $file = $entry['file'];
+
+            if ( ! isset( $suspects[ $file ] ) || ! isset( $fresh[ $file ] ) ) {
+                $kept[] = $entry;
+                continue;
+            }
+
+            if ( $this->hash_matches_published( ABSPATH . $file, $fresh[ $file ] ) ) {
+                $results['ok']++;
+                continue;
+            }
+
+            $kept[] = $entry;
+        }
+
+        return $kept;
     }
 
     /**
@@ -1110,14 +1176,20 @@ class Vigilante_File_Integrity {
     /**
      * Get core checksums from WordPress.org API
      *
+     * @param bool $force_refresh Skip the cached copy and ask wp.org again.
      * @return array|WP_Error Checksums or error.
      */
-    private function get_core_checksums() {
+    private function get_core_checksums( $force_refresh = false ) {
         $locale = get_locale();
         $version = $this->wp_version;
         
         // Check cache first
         $cache_key = 'vigilante_core_checksums_' . md5( $version . $locale );
+
+        if ( $force_refresh ) {
+            delete_transient( $cache_key );
+        }
+
         $cached = get_transient( $cache_key );
         if ( false !== $cached ) {
             return $cached;
@@ -2281,15 +2353,70 @@ class Vigilante_File_Integrity {
      */
     private function is_path_excluded( $path ) {
         $excluded = $this->options['excluded_paths'] ?? array();
-        $relative = str_replace( ABSPATH, '', $path );
+
+        if ( empty( $excluded ) ) {
+            return false;
+        }
+
+        $relative = $this->relative_path( $path );
 
         foreach ( $excluded as $exclude ) {
-            if ( strpos( $relative, $exclude ) !== false ) {
+            $exclude = trim( trim( str_replace( '\\', '/', (string) $exclude ) ), '/' );
+
+            if ( '' === $exclude ) {
+                continue;
+            }
+
+            /*
+             * Two forms, both with real boundaries. Until 2.9.9 this was a plain
+             * strpos() over the relative path, so an exclusion matched anywhere
+             * inside it: "cache" also silenced a plugin folder named mycache,
+             * "logs" silenced catalogs, and nothing told the user how much had
+             * stopped being watched.
+             *
+             * Anything with a slash is a path: it excludes exactly that file, or
+             * everything under it, anchored at the root of the installation.
+             */
+            if ( false !== strpos( $exclude, '/' ) ) {
+                if ( $relative === $exclude || 0 === strpos( $relative, $exclude . '/' ) ) {
+                    return true;
+                }
+
+                continue;
+            }
+
+            /*
+             * A bare name excludes any folder called exactly that, at any depth,
+             * which is what someone typing "languages" means. It has to be the
+             * whole segment, not a fragment of one.
+             */
+            if ( $relative === $exclude
+                || 0 === strpos( $relative, $exclude . '/' )
+                || false !== strpos( $relative, '/' . $exclude . '/' ) ) {
                 return true;
             }
         }
 
         return false;
+    }
+
+    /**
+     * Path relative to the WordPress directory, with forward slashes
+     *
+     * @since 2.9.9
+     *
+     * @param string $path Absolute path.
+     * @return string
+     */
+    private function relative_path( $path ) {
+        $path = str_replace( '\\', '/', (string) $path );
+        $root = str_replace( '\\', '/', ABSPATH );
+
+        if ( 0 === strpos( $path, $root ) ) {
+            $path = substr( $path, strlen( $root ) );
+        }
+
+        return ltrim( $path, '/' );
     }
 
     /**
@@ -2306,14 +2433,48 @@ class Vigilante_File_Integrity {
         }
 
         $extension = '.' . strtolower( pathinfo( $path, PATHINFO_EXTENSION ) );
+        $relative  = strtolower( $this->relative_path( $path ) );
 
         foreach ( $excluded as $exclude ) {
-            $exclude = strtolower( trim( $exclude ) );
+            $exclude = strtolower( trim( (string) $exclude ) );
+
+            if ( '' === $exclude ) {
+                continue;
+            }
+
+            /*
+             * An extension on its own is global, as it has always been. Since
+             * 2.9.9 it can also be scoped to a folder, written as
+             * wp-content/languages/*.json, because the global form is a blunt
+             * instrument: excluding .json to quiet the translation files also
+             * stopped watching the 173 block.json files of core.
+             */
+            $scope = '';
+
+            if ( false !== strpos( $exclude, '*' ) ) {
+                $parts   = explode( '*', $exclude, 2 );
+                $scope   = trim( $parts[0], '/' );
+                $exclude = $parts[1];
+            }
+
+            if ( '' === $exclude ) {
+                continue;
+            }
+
             // Support both ".log" and "log" formats
             if ( 0 !== strpos( $exclude, '.' ) ) {
                 $exclude = '.' . $exclude;
             }
-            if ( $exclude === $extension ) {
+
+            if ( $exclude !== $extension ) {
+                continue;
+            }
+
+            if ( '' === $scope ) {
+                return true;
+            }
+
+            if ( $relative === $scope || 0 === strpos( $relative, $scope . '/' ) ) {
                 return true;
             }
         }

@@ -251,6 +251,7 @@ class Vigilante_Activator {
     private static function apply_htaccess_protection( $settings ) {
         // Only apply if Apache server
         if ( ! self::is_apache() ) {
+            self::mark_server_files_pending();
             return;
         }
 
@@ -268,6 +269,7 @@ class Vigilante_Activator {
     private static function apply_security_headers( $settings ) {
         // Only apply if Apache server
         if ( ! self::is_apache() ) {
+            self::mark_server_files_pending();
             return;
         }
 
@@ -472,11 +474,49 @@ class Vigilante_Activator {
      * @return bool
      */
     private static function is_apache() {
-        if ( ! function_exists( 'apache_get_modules' ) ) {
-            // Check server software
-            $server = isset( $_SERVER['SERVER_SOFTWARE'] ) ? sanitize_text_field( wp_unslash( $_SERVER['SERVER_SOFTWARE'] ) ) : '';
-            return stripos( $server, 'apache' ) !== false || stripos( $server, 'litespeed' ) !== false;
+        require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-manager.php';
+
+        // One detection for the whole plugin. This used to be a second copy of
+        // the same logic, so fixing one never fixed the other.
+        return Vigilante_Htaccess_Manager::get_instance()->is_apache();
+    }
+
+    /**
+     * Leave the server layer pending when the server could not be identified
+     *
+     * An activation from WP-CLI has no request to read the server software
+     * from, so before 2.9.9 the two apply_* guards below simply returned and
+     * the site was left without the .htaccess layer, with every switch showing
+     * as on. Now it is written down, so the first web request applies it, and
+     * it is logged, so it is visible that it happened.
+     *
+     * @since 2.9.9
+     */
+    private static function mark_server_files_pending() {
+        require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-manager.php';
+
+        // On a server known not to be Apache there is nothing to write, ever.
+        if ( ! Vigilante_Htaccess_Manager::get_instance()->server_is_unknown() ) {
+            return;
         }
-        return true;
+
+        update_option( 'vigilante_server_files_pending', 1 );
+
+        // The activation runs before the plugin has loaded its own files, so
+        // every link of the chain has to be pulled in: the log asks the database
+        // for the client IP, and that resolves it through the IP helper.
+        require_once VIGILANTE_INCLUDES_DIR . 'class-ip-utils.php';
+        require_once VIGILANTE_INCLUDES_DIR . 'class-database.php';
+        require_once VIGILANTE_INCLUDES_DIR . 'class-activity-log.php';
+
+        $settings     = new Vigilante_Settings();
+        $activity_log = new Vigilante_Activity_Log( $settings, new Vigilante_Database() );
+        $activity_log->log(
+            'system',
+            'server_rules_pending',
+            __( 'The server type could not be identified from this request, so the .htaccess rules were left pending and will be written on the first web request.', 'vigilante' ),
+            array( 'sapi' => PHP_SAPI ),
+            'warning'
+        );
     }
 }

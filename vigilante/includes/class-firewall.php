@@ -57,6 +57,15 @@ class Vigilante_Firewall {
     private $request_data = array();
 
     /**
+     * Memoized haystack the pattern checks run against
+     *
+     * @since 2.9.9
+     *
+     * @var string|null
+     */
+    private $haystack = null;
+
+    /**
      * Constructor
      *
      * @param Vigilante_Settings    $settings     Settings instance.
@@ -137,9 +146,36 @@ class Vigilante_Firewall {
      * Gather current request data
      */
     private function gather_request_data() {
+        $this->haystack = null;
+
         $this->request_data = array(
             'uri'         => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
             'query_string'=> isset( $_SERVER['QUERY_STRING'] ) ? sanitize_text_field( wp_unslash( $_SERVER['QUERY_STRING'] ) ) : '',
+            /*
+             * Copies that keep the percent encoding, used only as the haystack
+             * of the pattern checks and never logged, printed or stored.
+             *
+             * They exist because sanitize_text_field() deletes every %XX
+             * sequence instead of decoding it: the copies above are the payload
+             * with the evidence removed, so an encoded attack was invisible to
+             * every rule that reads them. Measured on 22 aug 2026 against 2.9.8,
+             * ?x=%3Cscript%3E, javascript%3A, php%3A%2F%2F and GLOBALS%5B all
+             * reached the checks as harmless text and went straight through.
+             *
+             * No sanitizer is applied, and that is the point: every one of them
+             * destroys exactly what has to be matched. sanitize_text_field()
+             * deletes the %XX sequences and strips tags. esc_url_raw() is worse
+             * here: measured on 22 aug 2026, it returns an empty string for a
+             * query that carries an unencoded :// , which is precisely the
+             * remote inclusion shape, so it would blind the firewall instead of
+             * arming it. These two values are never echoed, never stored and
+             * never reach a query; they are the haystack of preg_match() and
+             * nothing else.
+             */
+            // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- inspection buffer for the pattern checks, see the note above. Sanitizing it is what hid the attacks. Never output, stored nor queried.
+            'uri_raw'     => isset( $_SERVER['REQUEST_URI'] ) ? wp_unslash( $_SERVER['REQUEST_URI'] ) : '',
+            // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- same as uri_raw.
+            'query_raw'   => isset( $_SERVER['QUERY_STRING'] ) ? wp_unslash( $_SERVER['QUERY_STRING'] ) : '',
             'user_agent'  => isset( $_SERVER['HTTP_USER_AGENT'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) ) : '',
             'referer'     => isset( $_SERVER['HTTP_REFERER'] ) ? esc_url_raw( wp_unslash( $_SERVER['HTTP_REFERER'] ) ) : '',
             'method'      => isset( $_SERVER['REQUEST_METHOD'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) : 'GET',
@@ -148,16 +184,48 @@ class Vigilante_Firewall {
     }
 
     /**
+     * What the pattern checks run against: the request as it arrived, plus its decoded form
+     *
+     * Both forms on purpose. Some patterns look for the encoded shape, such as
+     * the null byte %00 or the %5b of GLOBALS[, and others for the decoded one,
+     * such as <script or ../. Feeding only one of the two leaves half the rules
+     * looking at something that cannot match.
+     *
+     * Decoded once, not twice: a second pass catches a bit more evasion and
+     * brings in false positives that are not worth it.
+     *
+     * @since 2.9.9
+     *
+     * @return string
+     */
+    private function inspection_haystack() {
+        if ( null !== $this->haystack ) {
+            return $this->haystack;
+        }
+
+        $raw     = trim( (string) $this->request_data['uri_raw'] . ' ' . (string) $this->request_data['query_raw'] );
+        $decoded = rawurldecode( $raw );
+
+        $this->haystack = ( $raw === $decoded ) ? $raw : $raw . ' ' . $decoded;
+
+        return $this->haystack;
+    }
+
+    /**
      * Check for malicious query strings
      *
      * @return string|false Error message or false if safe.
      */
     private function check_query_strings() {
-        $query = $this->request_data['query_string'];
+        $query = $this->request_data['query_raw'];
 
         if ( empty( $query ) ) {
             return false;
         }
+
+        // Length is measured on the query alone, the rest of the patterns run
+        // against the whole request in both its raw and decoded forms.
+        $haystack = $this->inspection_haystack();
 
         // Dangerous patterns
         $patterns = array(
@@ -184,7 +252,11 @@ class Vigilante_Firewall {
         );
 
         foreach ( $patterns as $pattern => $message ) {
-            if ( preg_match( $pattern, $query ) ) {
+            // The length rule is anchored, so it has to see the query on its
+            // own; every other pattern gets the whole request.
+            $subject = ( '/^.{4000,}$/s' === $pattern ) ? $query : $haystack;
+
+            if ( preg_match( $pattern, $subject ) ) {
                 return $message;
             }
         }
@@ -205,8 +277,7 @@ class Vigilante_Firewall {
         }
 
         $to_check = array(
-            $this->request_data['query_string'],
-            $this->request_data['uri'],
+            $this->inspection_haystack(),
         );
 
         // Check POST data, but exclude content fields that may contain legitimate code/text
@@ -291,27 +362,29 @@ class Vigilante_Firewall {
      * @return string|false Error message or false if safe.
      */
     private function check_xss_attacks() {
-        $to_check = array(
-            $this->request_data['query_string'],
-            $this->request_data['uri'],
-        );
-
-        $combined = implode( ' ', array_filter( $to_check ) );
+        $combined = $this->inspection_haystack();
 
         if ( empty( $combined ) ) {
             return false;
         }
 
-        // URL decode for checking
-        $decoded = urldecode( $combined );
+        // Already carries the decoded form, see inspection_haystack().
+        $decoded = $combined;
 
         // XSS patterns
         $patterns = array(
             // Script tags
             '/<script[^>]*>/i' => __( 'Script tag detected', 'vigilante' ),
             
-            // Event handlers
-            '/\bon\w+\s*=/i' => __( 'Event handler detected', 'vigilante' ),
+            /*
+             * Event handlers. Two shapes, because the rule used to be a bare
+             * \bon\w+\s*= and that matches any parameter whose name starts
+             * with "on": only=, once=, online= and onboarding= were all
+             * answered with a 403 on every site with the firewall on, and the
+             * owner never saw it because it only hits visitors.
+             */
+            '/<[^>]*\bon\w+\s*=/i' => __( 'Event handler detected', 'vigilante' ),
+            '/\bon(abort|blur|change|click|contextmenu|copy|cut|dblclick|drag\w*|drop|error|focus\w*|input|invalid|key\w+|load\w*|mouse\w+|paste|pointer\w+|reset|resize|scroll|select|submit|toggle|touch\w+|transitionend|animation\w+|wheel)\s*=\s*["\']?\s*[\w.$]+\s*\(/i' => __( 'Event handler detected', 'vigilante' ),
             
             // JavaScript protocol
             '/javascript\s*:/i' => __( 'JavaScript protocol detected', 'vigilante' ),
@@ -347,19 +420,24 @@ class Vigilante_Firewall {
      * @return string|false Error message or false if safe.
      */
     private function check_file_inclusion() {
-        $uri = $this->request_data['uri'];
-        $query = $this->request_data['query_string'];
-        $combined = $uri . ' ' . $query;
+        $combined = $this->inspection_haystack();
 
         if ( empty( $combined ) ) {
             return false;
         }
 
+        // Remote inclusion is decided on the parsed values, not on the raw
+        // string. Until 2.9.9 any '=' followed by an absolute URL tripped this
+        // rule, and legitimate links carry those all the time: a redirect_to
+        // back to the site itself, a return_url, a payment gateway callback.
+        // What makes it an inclusion attempt is the target being somewhere
+        // else, so a URL pointing at this very site is left alone.
+        if ( $this->has_remote_inclusion() ) {
+            return __( 'Remote file inclusion attempt', 'vigilante' );
+        }
+
         // File inclusion patterns
         $patterns = array(
-            // Remote file inclusion
-            '/=\s*(https?|ftp):\/\//i' => __( 'Remote file inclusion attempt', 'vigilante' ),
-            
             // PHP wrappers
             '/(php|zip|glob|phar|ssh2|rar|ogg|expect):\/\//i' => __( 'PHP wrapper detected', 'vigilante' ),
             
@@ -381,14 +459,81 @@ class Vigilante_Firewall {
     }
 
     /**
+     * Whether the request carries a URL that points outside this site
+     *
+     * Works on the parsed parameters rather than on a pattern match over the
+     * whole string, for two reasons: a link back to the site itself is not
+     * mistaken for an attack, and an encoded payload is seen for what it is.
+     * The copy of the query string kept for logging goes through
+     * sanitize_text_field(), which strips every %XX sequence instead of
+     * decoding it, so the encoded form never looked like a URL there.
+     *
+     * @since 2.9.9
+     *
+     * @return bool
+     */
+    private function has_remote_inclusion() {
+        $query = $this->request_data['query_raw'];
+
+        if ( '' === $query ) {
+            return false;
+        }
+
+        // parse_str() decodes as it splits, so this sees the same values PHP
+        // would have put in $_GET, without reading the superglobal.
+        $params = array();
+        parse_str( $query, $params );
+
+        $values = array();
+        array_walk_recursive(
+            $params,
+            function ( $value ) use ( &$values ) {
+                if ( is_scalar( $value ) ) {
+                    $values[] = (string) $value;
+                }
+            }
+        );
+
+        $home_host = $this->normalize_host( wp_parse_url( home_url(), PHP_URL_HOST ) );
+
+        foreach ( $values as $value ) {
+            if ( ! preg_match_all( '/(?:https?|ftp):\/\/[^\s\'"<>]+/i', $value, $matches ) ) {
+                continue;
+            }
+
+            foreach ( $matches[0] as $url ) {
+                $host = $this->normalize_host( wp_parse_url( $url, PHP_URL_HOST ) );
+
+                if ( '' === $host || $host !== $home_host ) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Host in a comparable form: lowercase and without a leading www.
+     *
+     * @since 2.9.9
+     *
+     * @param string|null $host Host to normalize.
+     * @return string
+     */
+    private function normalize_host( $host ) {
+        $host = strtolower( trim( (string) $host ) );
+
+        return ( 0 === strpos( $host, 'www.' ) ) ? substr( $host, 4 ) : $host;
+    }
+
+    /**
      * Check for directory traversal attacks
      *
      * @return string|false Error message or false if safe.
      */
     private function check_directory_traversal() {
-        $uri = $this->request_data['uri'];
-        $query = $this->request_data['query_string'];
-        $combined = urldecode( $uri . ' ' . $query );
+        $combined = $this->inspection_haystack();
 
         if ( empty( $combined ) ) {
             return false;
@@ -417,51 +562,11 @@ class Vigilante_Firewall {
      * @return string|false Error message or false if safe.
      */
     private function check_php_in_uploads() {
-        $uri = $this->request_data['uri'];
+        $uri = $this->inspection_haystack();
 
         // Check if accessing PHP in uploads directory
         if ( preg_match( '/\/wp-content\/uploads\/.*\.ph(p[345s]?|tml)/i', $uri ) ) {
             return __( 'PHP execution in uploads blocked', 'vigilante' );
-        }
-
-        return false;
-    }
-
-    /**
-     * Check for access to sensitive files
-     *
-     * @return string|false Error message or false if safe.
-     */
-    private function check_sensitive_files() {
-        $uri = strtolower( $this->request_data['uri'] );
-
-        // Sensitive file patterns
-        $sensitive_patterns = array(
-            '/\.htaccess$/i',
-            '/\.htpasswd$/i',
-            '/wp-config\.php$/i',
-            '/wp-config-sample\.php$/i',
-            '/readme\.html$/i',
-            '/licen(se|cia)\.txt$/i',
-            '/xmlrpc\.php$/i', // If XML-RPC is disabled
-            '/\.git/i',
-            '/\.svn/i',
-            '/\.env$/i',
-            '/composer\.(json|lock)$/i',
-            '/package(-lock)?\.json$/i',
-            '/\.sql$/i',
-            '/\.bak$/i',
-            '/\.old$/i',
-            '/\.log$/i',
-            '/\.ini$/i',
-            '/debug\.log$/i',
-            '/error_log$/i',
-        );
-
-        foreach ( $sensitive_patterns as $pattern ) {
-            if ( preg_match( $pattern, $uri ) ) {
-                return __( 'Access to sensitive file blocked', 'vigilante' );
-            }
         }
 
         return false;

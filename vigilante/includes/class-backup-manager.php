@@ -209,7 +209,10 @@ class Vigilante_Backup_Manager {
     private function cleanup_old_backups() {
         $settings        = new Vigilante_Settings();
         $backup_settings = $settings->get_section( 'backup' );
-        $this->max_backups = isset( $backup_settings['max_backups'] ) ? absint( $backup_settings['max_backups'] ) : 5;
+        // The default is stored as keep_backups. Until 2.9.9 this read max_backups,
+        // a key nothing ever wrote, so the configured value was ignored and the
+        // hardcoded 5 always won.
+        $this->max_backups = isset( $backup_settings['keep_backups'] ) ? absint( $backup_settings['keep_backups'] ) : 5;
 
         global $wpdb;
 

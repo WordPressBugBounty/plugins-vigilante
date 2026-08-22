@@ -313,29 +313,6 @@ class Vigilante_Https_Enforcer {
     }
 
     /**
-     * Update WordPress site URLs to HTTPS
-     *
-     * @return bool
-     */
-    public function update_site_urls() {
-        $siteurl = get_option( 'siteurl' );
-        $home = get_option( 'home' );
-        $updated = false;
-
-        if ( strpos( $siteurl, 'http://' ) === 0 ) {
-            update_option( 'siteurl', str_replace( 'http://', 'https://', $siteurl ) );
-            $updated = true;
-        }
-
-        if ( strpos( $home, 'http://' ) === 0 ) {
-            update_option( 'home', str_replace( 'http://', 'https://', $home ) );
-            $updated = true;
-        }
-
-        return $updated;
-    }
-
-    /**
      * Check if site is properly configured for HTTPS
      *
      * @return array Status information.

@@ -28,6 +28,18 @@ class Vigilante_Htaccess_Manager {
     private static $instance = null;
 
     /**
+     * Option where the server software seen in a web request is remembered
+     *
+     * WP-CLI has no request to look at, so the detection made from the web is
+     * kept here and used as the fallback. See is_apache().
+     *
+     * @since 2.9.9
+     *
+     * @var string
+     */
+    const SERVER_OPTION = 'vigilante_server_software';
+
+    /**
      * Path to .htaccess file
      *
      * @var string
@@ -399,15 +411,162 @@ class Vigilante_Htaccess_Manager {
      * @return bool
      */
     public function is_apache() {
+        $detected = null;
+
         if ( function_exists( 'apache_get_modules' ) ) {
-            return true;
+            $detected = true;
+        } else {
+            $server = isset( $_SERVER['SERVER_SOFTWARE'] )
+                ? sanitize_text_field( wp_unslash( $_SERVER['SERVER_SOFTWARE'] ) )
+                : '';
+
+            if ( '' !== $server ) {
+                $detected = self::looks_like_apache( $server );
+
+                // Remember it, because a WP-CLI run has no request to look at.
+                if ( get_option( self::SERVER_OPTION ) !== $server ) {
+                    update_option( self::SERVER_OPTION, $server, false );
+                }
+            }
         }
 
-        $server = isset( $_SERVER['SERVER_SOFTWARE'] ) 
-            ? sanitize_text_field( wp_unslash( $_SERVER['SERVER_SOFTWARE'] ) ) 
-            : '';
+        /*
+         * Nothing in this request to go on, which is exactly what happens under
+         * WP-CLI: apache_get_modules() only exists under mod_php and
+         * SERVER_SOFTWARE is not defined on the command line. Until 2.9.9 that
+         * answered "not Apache" and every .htaccess write was refused, so a site
+         * activated with `wp plugin activate` silently got no server layer at
+         * all while the switches showed as on. So fall back to what a web
+         * request taught us earlier.
+         */
+        if ( null === $detected ) {
+            $remembered = (string) get_option( self::SERVER_OPTION, '' );
 
-        return ( stripos( $server, 'apache' ) !== false || stripos( $server, 'litespeed' ) !== false );
+            if ( '' !== $remembered ) {
+                $detected = self::looks_like_apache( $remembered );
+            }
+        }
+
+        /**
+         * Filter the Apache/LiteSpeed detection.
+         *
+         * The escape hatch for a site deployed entirely from the command line,
+         * where there has never been a web request to learn from.
+         *
+         * @since 2.9.9
+         *
+         * @param bool|null $detected True, false, or null when it could not be told.
+         */
+        $detected = apply_filters( 'vigilante_is_apache', $detected );
+
+        return ( true === $detected );
+    }
+
+    /**
+     * Vigilant blocks sitting in .htaccess files above the WordPress directory
+     *
+     * Apache applies the .htaccess of every directory above the one being
+     * served, and this class only ever writes and reads the one in ABSPATH. So
+     * a WordPress in a subfolder can be receiving rules from the block that the
+     * Vigilant of the parent installation left in the document root: the
+     * settings screen says the header is off, headers_list() does not show it,
+     * and the browser receives it all the same. Costed two rounds of diagnosis
+     * on a real site before it was understood, so it is worth naming the file.
+     *
+     * @since 2.9.9
+     *
+     * @return array<string,string[]> Absolute file path => markers found inside.
+     */
+    public function find_blocks_above() {
+        global $wp_filesystem;
+
+        if ( ! function_exists( 'WP_Filesystem' ) ) {
+            require_once ABSPATH . 'wp-admin/includes/file.php';
+        }
+        WP_Filesystem();
+
+        if ( ! $wp_filesystem ) {
+            return array();
+        }
+
+        $found   = array();
+        $markers = array_keys( $this->known_blocks );
+        $dir     = dirname( $this->htaccess_path );
+
+        // Bounded walk up to the filesystem root. Eight levels is well past any
+        // real docroot and keeps this cheap on a deep path.
+        for ( $level = 0; $level < 8; $level++ ) {
+            $parent = dirname( $dir );
+
+            if ( $parent === $dir || '' === $parent || '.' === $parent ) {
+                break;
+            }
+
+            $dir  = $parent;
+            $file = $dir . '/.htaccess';
+
+            if ( ! $wp_filesystem->exists( $file ) || ! $wp_filesystem->is_readable( $file ) ) {
+                continue;
+            }
+
+            $content = $wp_filesystem->get_contents( $file );
+
+            if ( ! is_string( $content ) || '' === $content ) {
+                continue;
+            }
+
+            $hits = array();
+            foreach ( $markers as $marker ) {
+                // The WordPress block is not ours, only the Vigilant ones count.
+                if ( false === strpos( $marker, 'Vigilante' ) ) {
+                    continue;
+                }
+                if ( false !== strpos( $content, $marker ) ) {
+                    $hits[] = $marker;
+                }
+            }
+
+            if ( ! empty( $hits ) ) {
+                $found[ $file ] = $hits;
+            }
+        }
+
+        return $found;
+    }
+
+    /**
+     * Whether a SERVER_SOFTWARE string is Apache or LiteSpeed
+     *
+     * @since 2.9.9
+     *
+     * @param string $server Server software string.
+     * @return bool
+     */
+    private static function looks_like_apache( $server ) {
+        return ( false !== stripos( $server, 'apache' ) || false !== stripos( $server, 'litespeed' ) );
+    }
+
+    /**
+     * Whether the server could not be identified in this request
+     *
+     * Tells "we know it is not Apache" apart from "we cannot tell from here",
+     * which is what a WP-CLI run gets. The caller uses it to leave the work
+     * pending for the first web request instead of dropping it.
+     *
+     * @since 2.9.9
+     *
+     * @return bool
+     */
+    public function server_is_unknown() {
+        if ( function_exists( 'apache_get_modules' ) ) {
+            return false;
+        }
+
+        if ( ! empty( $_SERVER['SERVER_SOFTWARE'] ) ) {
+            return false;
+        }
+
+        return ( '' === (string) get_option( self::SERVER_OPTION, '' ) );
     }
 
     /**

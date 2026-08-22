@@ -57,8 +57,15 @@ class Vigilante_Comment_Security {
         $xmlrpc_mode = self::resolve_xmlrpc_mode( $this->settings );
 
         if ( 'full' === $xmlrpc_mode ) {
+            // Answer the XML-RPC endpoint here, before core gets as far as
+            // building the server object. Until 2.9.9 this pointed the
+            // wp_xmlrpc_server_class filter at a class that does not exist,
+            // which is not a block but an uncaught Error: xmlrpc.php answered
+            // 500 with an empty body and wrote a PHP fatal to the log on every
+            // hit, and that endpoint is one of the most hammered by bots.
+            $this->block_xmlrpc_request();
+
             add_filter( 'xmlrpc_enabled', '__return_false' );
-            add_filter( 'wp_xmlrpc_server_class', array( $this, 'disable_xmlrpc_server' ) );
             remove_action( 'wp_head', 'rsd_link' );
             remove_action( 'wp_head', 'wlwmanifest_link' );
         } elseif ( 'pingback' === $xmlrpc_mode ) {
@@ -153,12 +160,32 @@ class Vigilante_Comment_Security {
     }
 
     /**
-     * Replace the XML-RPC server class with one that answers nothing.
+     * Answer an XML-RPC request with a plain 403 and stop
      *
-     * @return string
+     * Does nothing outside an XML-RPC request, so it is safe to call while the
+     * module is wiring its hooks. XMLRPC_REQUEST is defined at the top of
+     * xmlrpc.php, before wp-load.php, so it is already there by the time
+     * plugins load.
+     *
+     * The modules are built on init priority 1, which is inside init, so the
+     * translation functions are safe to use here.
+     *
+     * @since 2.9.9
      */
-    public function disable_xmlrpc_server() {
-        return 'wp_xmlrpc_server_disabled';
+    private function block_xmlrpc_request() {
+        if ( ! defined( 'XMLRPC_REQUEST' ) || ! XMLRPC_REQUEST ) {
+            return;
+        }
+
+        if ( ! headers_sent() ) {
+            status_header( 403 );
+            nocache_headers();
+            $charset = sanitize_text_field( (string) get_option( 'blog_charset', 'UTF-8' ) );
+            header( 'Content-Type: text/plain; charset=' . ( '' !== $charset ? $charset : 'UTF-8' ) );
+        }
+
+        echo esc_html__( 'XML-RPC services are disabled on this site.', 'vigilante' );
+        exit;
     }
 
     public function disable_pingback_methods( $methods ) {

@@ -83,6 +83,32 @@ class Vigilante_SA_Category_Headers {
         $header     = $this->header_value( $headers, array( 'content-security-policy', 'content-security-policy-report-only' ) );
 
         if ( $header ) {
+            // A policy is arriving that Vigilant is not sending. Usually another
+            // plugin or the server itself, which is fine. But it is also what a
+            // site in a subfolder gets from the block a Vigilant installed one
+            // directory up left behind, and then the settings screen and the
+            // browser disagree with no way to tell why from here.
+            if ( ! $setting_on ) {
+                $ghosts = $this->vigilant_blocks_above();
+
+                if ( ! empty( $ghosts ) ) {
+                    $args['detail'] = sprintf(
+                        /* translators: 1: CSP header value (truncated), 2: absolute path of the .htaccess file. */
+                        __( 'A Content-Security-Policy is reaching the browser (%1$s) while CSP is off in Vigilant. It comes from a Vigilant block in %2$s, a directory above this site: Apache applies it here too, and this installation neither sees nor controls it. Remove that block, or manage the policy from the site that owns it.', 'vigilante' ),
+                        $this->truncate( $header, 60 ),
+                        implode( ', ', array_keys( $ghosts ) )
+                    );
+                    return Vigilante_SA_Check_Result::warn( $args );
+                }
+
+                $args['detail'] = sprintf(
+                    /* translators: %s: header value (truncated) */
+                    __( 'CSP delivered by something other than Vigilant: %s', 'vigilante' ),
+                    $this->truncate( $header, 80 )
+                );
+                return Vigilante_SA_Check_Result::pass( $args );
+            }
+
             $args['detail'] = sprintf(
                 /* translators: %s: header value (truncated) */
                 __( 'CSP delivered: %s', 'vigilante' ),
@@ -315,4 +341,20 @@ class Vigilante_SA_Category_Headers {
         }
         return substr( $text, 0, $len ) . '…';
     }
+
+    /**
+     * Vigilant blocks found in .htaccess files above this installation
+     *
+     * @since 2.9.9
+     *
+     * @return array<string,string[]> Absolute file path => markers found inside.
+     */
+    private function vigilant_blocks_above() {
+        if ( ! class_exists( 'Vigilante_Htaccess_Manager' ) ) {
+            require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-manager.php';
+        }
+
+        return Vigilante_Htaccess_Manager::get_instance()->find_blocks_above();
+    }
+
 }

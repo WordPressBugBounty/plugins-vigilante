@@ -212,9 +212,9 @@ class Vigilante_Login_Security {
         
         
         // If accessing wp-admin and being redirected to login, show 404 instead
-        if ( $this->is_wp_admin_request() ) {
+        if ( self::is_wp_admin_request() ) {
             // Don't intercept admin-ajax.php or admin-post.php
-            if ( $this->is_open_admin_endpoint() ) {
+            if ( self::is_open_admin_endpoint() ) {
                 return $location;
             }
 
@@ -276,7 +276,7 @@ class Vigilante_Login_Security {
      * @since 2.9.4
      * @return string
      */
-    private function get_request_uri_path() {
+    private static function get_request_uri_path() {
         $request = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
 
         if ( '' === $request ) {
@@ -310,12 +310,12 @@ class Vigilante_Login_Security {
      * @since 2.9.4
      * @return bool
      */
-    private function is_wp_admin_request() {
+    private static function is_wp_admin_request() {
         if ( is_admin() ) {
             return true;
         }
 
-        $path = $this->get_request_uri_path();
+        $path = self::get_request_uri_path();
 
         if ( '' === $path ) {
             return false;
@@ -348,8 +348,8 @@ class Vigilante_Login_Security {
      * @since 2.9.4
      * @return bool
      */
-    private function is_open_admin_endpoint() {
-        $path = $this->get_request_uri_path();
+    private static function is_open_admin_endpoint() {
+        $path = self::get_request_uri_path();
 
         if ( '' === $path ) {
             return false;
@@ -388,12 +388,12 @@ class Vigilante_Login_Security {
         
         
         // Check if accessing wp-admin
-        if ( ! $this->is_wp_admin_request() ) {
+        if ( ! self::is_wp_admin_request() ) {
             return;
         }
 
         // Allow admin-ajax.php and admin-post.php
-        if ( $this->is_open_admin_endpoint() ) {
+        if ( self::is_open_admin_endpoint() ) {
             return;
         }
         
@@ -509,12 +509,6 @@ class Vigilante_Login_Security {
             exit;
         }
 
-        // Allow whitelisted IPs (e.g. remote managers like MainWP/ManageWP).
-        if ( $this->is_ip_exempt_from_hiding() ) {
-            return;
-        }
-        
-        
         // Log the attempt
         if ( $this->activity_log ) {
             $request = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
@@ -552,11 +546,6 @@ class Vigilante_Login_Security {
         $request = strtolower( $this->get_request_path() );
 
         if ( ! in_array( $request, array( 'login', 'wp-login.php' ), true ) ) {
-            return;
-        }
-
-        // Allow whitelisted IPs (e.g. remote managers like MainWP/ManageWP).
-        if ( $this->is_ip_exempt_from_hiding() ) {
             return;
         }
 
@@ -1351,14 +1340,127 @@ class Vigilante_Login_Security {
     }
 
     /**
+     * Turn away an anonymous wp-admin request before WordPress finishes booting
+     *
+     * The modules are built on init priority 1, so a request that was going to
+     * be refused had already paid for the whole boot: the theme, every plugin
+     * and every init callback. Measured on a real site, a rejected
+     * /wp-admin/index.php cost as much as serving a page.
+     *
+     * Only the case that can be judged with certainty this early is handled
+     * here, an anonymous GET with no session cookie at all; everything else
+     * falls through to the usual path untouched. The cookie is only checked for
+     * presence: resolving the user here would run is_user_logged_in() before
+     * other plugins register their determine_current_user filters, which is how
+     * token, JWT and SSO logins are wired.
+     *
+     * @since 2.9.9
+     *
+     * @param array $options The plugin options, already read by the caller.
+     */
+    public static function maybe_block_hidden_admin_early( $options ) {
+        if ( self::is_open_admin_endpoint() ) {
+            return;
+        }
+
+        if ( '' === sanitize_title( $options['login_security']['custom_login_url'] ) ) {
+            return;
+        }
+
+        if ( self::has_session_cookie() ) {
+            return;
+        }
+
+        $whitelist = isset( $options['firewall']['ip_whitelist'] ) ? (array) $options['firewall']['ip_whitelist'] : array();
+
+        if ( ! empty( $whitelist ) && Vigilante_IP_Utils::in_list( Vigilante_IP_Utils::get_client_ip(), $whitelist ) ) {
+            return;
+        }
+
+        self::log_early_hidden_admin_attempt();
+
+        status_header( 404 );
+        nocache_headers();
+
+        /*
+         * Deliberately not translated. This runs on plugins_loaded, where asking
+         * for a translation triggers the just in time text domain notice of
+         * WordPress 6.7 and returns the English string anyway. The reader is an
+         * anonymous request to an address that is supposed to look absent.
+         */
+        wp_die(
+            '<h1>Page not found</h1><p>The page you are looking for does not exist.</p>',
+            '404 Not Found',
+            array(
+                'response'  => 404,
+                'back_link' => false,
+            )
+        );
+    }
+
+    /**
+     * Whether the request carries a WordPress session cookie, without resolving it
+     *
+     * @since 2.9.9
+     *
+     * @return bool
+     */
+    private static function has_session_cookie() {
+        if ( defined( 'LOGGED_IN_COOKIE' ) && isset( $_COOKIE[ LOGGED_IN_COOKIE ] ) ) {
+            return true;
+        }
+
+        foreach ( array_keys( (array) $_COOKIE ) as $name ) {
+            if ( 0 === strpos( (string) $name, 'wordpress_logged_in_' ) || 0 === strpos( (string) $name, 'wordpress_sec_' ) ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Record an early rejection in the activity log
+     *
+     * @since 2.9.9
+     */
+    private static function log_early_hidden_admin_attempt() {
+        require_once VIGILANTE_INCLUDES_DIR . 'class-settings.php';
+        require_once VIGILANTE_INCLUDES_DIR . 'class-database.php';
+        require_once VIGILANTE_INCLUDES_DIR . 'class-activity-log.php';
+
+        $request = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
+
+        $activity_log = new Vigilante_Activity_Log( new Vigilante_Settings(), new Vigilante_Database() );
+        $activity_log->log(
+            'login',
+            'hidden_admin_access',
+            'Attempt to access hidden wp-admin',
+            array( 'request_uri' => $request ),
+            'warning'
+        );
+    }
+
+    /**
      * Whether the current request comes from an IP that may bypass the
-     * hidden-login / hidden-wp-admin masking.
+     * hidden wp-admin masking.
      *
      * Reads the firewall's global IP whitelist (the visible "IP whitelist"
      * box) so trusted services such as MainWP or ManageWP, which reach
      * wp-admin without a WordPress session cookie, are not turned away with
      * a 404. This relaxes only the URL masking, never authentication: an
      * exempt IP still has to log in normally.
+     *
+     * wp-admin only, and that is the point. Until 2.9.9 the same exemption
+     * also applied to the two wp-login.php paths, where it did not serve that
+     * purpose and did real harm: block_wp_login_access() handed the real login
+     * form to any whitelisted IP with the custom login URL active, and
+     * block_login_shortcuts() is precisely what stops core's
+     * wp_redirect_admin_locations() from answering /login with a 302 to
+     * wp_login_url(), which under a custom login URL is the secret slug. So
+     * exempting it did not merely expose the form, it handed the slug over in
+     * the Location header. Remote managers never needed either one: both
+     * blockers already let every POST through, which is how they authenticate.
      *
      * @return bool
      */

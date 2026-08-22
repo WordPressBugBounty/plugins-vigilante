@@ -3,7 +3,7 @@
  * Plugin Name: Vigilant - 100% Free Security Suite: Firewall, 2FA, Login, Headers, Scanner…
  * Plugin URI: https://servicios.ayudawp.com
  * Description: Complete security solution for WordPress. Firewall, 2FA, security headers, login protection, file integrity monitoring, activity logging and more.
- * Version: 2.9.8
+ * Version: 2.9.9
  * Author: Fernando Tellado
  * Author URI: https://ayudawp.com
  * Text Domain: vigilante
@@ -24,7 +24,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Plugin constants
  */
-define( 'VIGILANTE_VERSION', '2.9.8' );
+define( 'VIGILANTE_VERSION', '2.9.9' );
 define( 'VIGILANTE_PLUGIN_FILE', __FILE__ );
 define( 'VIGILANTE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'VIGILANTE_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -417,6 +417,128 @@ final class Vigilante_Main {
 
         // Regenerate critical file baseline after Vigilante modifies wp-config.php or .htaccess
         add_action( 'vigilante_critical_file_written', array( $this, 'on_critical_file_written' ) );
+
+        // Keep the server layer in step with the installed version.
+        add_action( 'init', array( $this, 'maybe_sync_server_files' ), 20 );
+    }
+
+    /**
+     * Rewrite the .htaccess block when the installed version has moved on
+     *
+     * Updating the plugin did not touch the file: the block was only rewritten
+     * on activation or when the Headers or Firewall tab was saved. So a fix
+     * that lives inside those rules never reached a site that merely updated,
+     * which is exactly what happened with the connect-src of 2.9.6: the browser
+     * kept receiving the old policy, and image uploads kept failing on
+     * WordPress 7.1 until someone pressed Save. This rewrites the block once
+     * per version, and picks up the rules that an activation from WP-CLI had to
+     * leave pending because it could not tell what server it was on.
+     *
+     * Only the content between the plugin markers is rewritten, the same part
+     * any save has always rewritten.
+     *
+     * @since 2.9.9
+     */
+    public function maybe_sync_server_files() {
+        $pending = (bool) get_option( 'vigilante_server_files_pending' );
+
+        if ( ! $pending && VIGILANTE_VERSION === get_option( 'vigilante_server_files_version' ) ) {
+            return;
+        }
+
+        // A failed write is not retried on every request.
+        if ( (int) get_option( 'vigilante_server_files_retry_after' ) > time() ) {
+            return;
+        }
+
+        // In a network the file belongs to every site, and the main site writes it.
+        if ( ! Vigilante_Settings::can_write_shared_files() ) {
+            $this->mark_server_files_synced();
+            return;
+        }
+
+        require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-manager.php';
+        $manager = Vigilante_Htaccess_Manager::get_instance();
+
+        if ( ! $manager->is_apache() ) {
+            // Still on the command line with nothing to learn from: stay pending.
+            if ( $manager->server_is_unknown() ) {
+                return;
+            }
+
+            // Not Apache: there is no block to keep in step.
+            $this->mark_server_files_synced();
+            return;
+        }
+
+        $options  = get_option( Vigilante_Settings::OPTION_NAME, array() );
+        $headers  = isset( $options['security_headers'] ) ? (array) $options['security_headers'] : array();
+        $failed   = false;
+        $rewrote  = false;
+
+        $needs_protection_block = ! empty( $options['modules']['firewall'] )
+            || ! empty( $headers['hide_server_signature'] )
+            || ! empty( $headers['remove_fingerprinting_headers'] );
+
+        if ( $needs_protection_block ) {
+            require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-protection.php';
+            $result = ( new Vigilante_Htaccess_Protection( $this->settings ) )->apply_rules();
+            $failed = $failed || is_wp_error( $result );
+            $rewrote = true;
+        }
+
+        if ( ! empty( $options['modules']['security_headers'] ) ) {
+            require_once VIGILANTE_INCLUDES_DIR . 'class-security-headers.php';
+            $result = ( new Vigilante_Security_Headers( $this->settings ) )->apply_rules();
+            $failed = $failed || is_wp_error( $result );
+            $rewrote = true;
+        }
+
+        if ( $failed ) {
+            update_option( 'vigilante_server_files_retry_after', time() + HOUR_IN_SECONDS );
+
+            // A refusal to write the server rules is exactly the kind of thing
+            // that used to happen in silence, so it is recorded and retried in
+            // an hour instead of being forgotten.
+            if ( $this->activity_log ) {
+                $this->activity_log->log(
+                    'system',
+                    'server_rules_write_failed',
+                    __( 'The .htaccess rules could not be rewritten after the update. Vigilant will try again in an hour; if the file is read only, fix its permissions or save the Firewall or Headers tab once.', 'vigilante' ),
+                    array( 'version' => VIGILANTE_VERSION ),
+                    'warning'
+                );
+            }
+
+            return;
+        }
+
+        $this->mark_server_files_synced();
+
+        if ( $rewrote && $this->activity_log ) {
+            $this->activity_log->log(
+                'system',
+                'server_rules_refreshed',
+                sprintf(
+                    /* translators: %s: plugin version. */
+                    __( 'The .htaccess rules were rewritten to match Vigilant %s.', 'vigilante' ),
+                    VIGILANTE_VERSION
+                ),
+                array( 'version' => VIGILANTE_VERSION ),
+                'info'
+            );
+        }
+    }
+
+    /**
+     * Record that the server layer matches the installed version
+     *
+     * @since 2.9.9
+     */
+    private function mark_server_files_synced() {
+        update_option( 'vigilante_server_files_version', VIGILANTE_VERSION );
+        delete_option( 'vigilante_server_files_pending' );
+        delete_option( 'vigilante_server_files_retry_after' );
     }
 
     /**
@@ -619,6 +741,49 @@ register_deactivation_hook( __FILE__, 'vigilante_deactivate' );
  * Initialize plugin after WordPress loads
  */
 add_action( 'plugins_loaded', 'vigilante_load_plugin' );
+
+/*
+ * The hidden wp-admin is answered as early as the request can be judged with
+ * certainty, before the theme and the other plugins load. The modules are built
+ * on init priority 1, so until 2.9.9 a request that was going to be refused had
+ * already paid for the whole boot.
+ */
+add_action( 'plugins_loaded', 'vigilante_block_hidden_admin_early', 1 );
+
+/**
+ * Cheap gate for the early hidden wp-admin rejection
+ *
+ * Everything that can be decided without loading a single plugin class is
+ * decided here, so the usual request pays nothing more than a couple of
+ * comparisons and one option read that WordPress has already cached.
+ *
+ * @since 2.9.9
+ */
+function vigilante_block_hidden_admin_early() {
+    if ( ! is_admin() ) {
+        return;
+    }
+
+    $method = isset( $_SERVER['REQUEST_METHOD'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) : 'GET';
+
+    // POST is how remote managers authenticate, and the later path lets it through too.
+    if ( 'GET' !== $method ) {
+        return;
+    }
+
+    $options = get_option( 'vigilante_options', array() );
+
+    if ( ! is_array( $options )
+        || empty( $options['modules']['login_security'] )
+        || empty( $options['login_security']['custom_login_url'] ) ) {
+        return;
+    }
+
+    require_once VIGILANTE_INCLUDES_DIR . 'class-ip-utils.php';
+    require_once VIGILANTE_INCLUDES_DIR . 'class-login-security.php';
+
+    Vigilante_Login_Security::maybe_block_hidden_admin_early( $options );
+}
 
 /**
  * Helper function to get plugin instance

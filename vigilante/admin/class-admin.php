@@ -372,6 +372,44 @@ class Vigilante_Admin {
 
             update_option( 'vigilante_db_version', '2.9.8' );
         }
+
+        /*
+         * 2.9.9: drop the settings that no code has read for versions.
+         *
+         * They were carried in the defaults and therefore written into every
+         * saved configuration, they show up in an exported configuration, and
+         * anyone reading them assumes a feature exists behind them. Removing
+         * them from the defaults is not enough: the stored copies survive, so
+         * they are swept here too. Nothing reads them, so nothing changes.
+         */
+        if ( version_compare( $db_version, '2.9.9', '<' ) ) {
+            $raw  = get_option( Vigilante_Settings::OPTION_NAME, array() );
+            $dead = array(
+                'firewall'       => array( 'country_blocking', 'protected_file_extensions' ),
+                'file_integrity' => array( 'suspicious_patterns' ),
+                'backup'         => array( 'auto_backup', 'backup_before_update' ),
+                'advanced'       => array( 'block_author_archives', 'disable_embeds', 'uninstall_cleanup', 'debug_mode' ),
+            );
+
+            $changed = false;
+            foreach ( $dead as $section => $keys ) {
+                if ( ! isset( $raw[ $section ] ) || ! is_array( $raw[ $section ] ) ) {
+                    continue;
+                }
+                foreach ( $keys as $key ) {
+                    if ( array_key_exists( $key, $raw[ $section ] ) ) {
+                        unset( $raw[ $section ][ $key ] );
+                        $changed = true;
+                    }
+                }
+            }
+
+            if ( $changed ) {
+                update_option( Vigilante_Settings::OPTION_NAME, $raw );
+            }
+
+            update_option( 'vigilante_db_version', '2.9.9' );
+        }
     }
 
     /**
@@ -1538,6 +1576,8 @@ class Vigilante_Admin {
                 'dbTablesSelected'             => __( '%1$d tables selected (%2$s)', 'vigilante' ),
                 // Settings search strings
                 'searchNoResults'              => __( 'No matching settings found.', 'vigilante' ),
+                /* translators: %d: number of results that did not fit in the list. */
+                'searchMoreResults'            => __( '%d more results. Refine the search to see them.', 'vigilante' ),
                 'searchInTab'                  => __( 'in', 'vigilante' ),
                 // Modules string
                 /* translators: 1: enabled count, 2: total count */
@@ -1809,7 +1849,7 @@ class Vigilante_Admin {
                 <div class="vigilante-search-wrapper">
                     <div class="vigilante-search-input-wrap">
                         <span class="vigilante-search-icon dashicons dashicons-search" aria-hidden="true"></span>
-                        <input type="search" id="vigilante-settings-search" class="vigilante-settings-search" placeholder="<?php esc_attr_e( 'Search settings…', 'vigilante' ); ?>" autocomplete="off">
+                        <input type="search" id="vigilante-settings-search" class="vigilante-settings-search" aria-label="<?php esc_attr_e( 'Search settings', 'vigilante' ); ?>" placeholder="<?php esc_attr_e( 'Search settings…', 'vigilante' ); ?>" autocomplete="off">
                         <span class="vigilante-search-shortcut" aria-hidden="true">/</span>
                     </div>
                     <div id="vigilante-settings-search-results" class="vigilante-search-results" hidden role="listbox"></div>
@@ -2641,9 +2681,9 @@ class Vigilante_Admin {
                                 </td>
                             </tr>
                             <tr>
-                                <th scope="row"><?php esc_html_e( 'Additional Recipients', 'vigilante' ); ?></th>
+                                <th scope="row"><label for="vigilante-f-email-additional-recipients"><?php esc_html_e( 'Additional Recipients', 'vigilante' ); ?></label></th>
                                 <td>
-                                    <textarea name="email[additional_recipients]" rows="3" class="large-text code" placeholder="maintenance@example.com&#10;security@example.com"><?php echo esc_textarea( $additional ); ?></textarea>
+                                    <textarea id="vigilante-f-email-additional-recipients" name="email[additional_recipients]" rows="3" class="large-text code" placeholder="maintenance@example.com&#10;security@example.com"><?php echo esc_textarea( $additional ); ?></textarea>
                                     <p class="description"><?php esc_html_e( 'One email per line.', 'vigilante' ); ?></p>
                                 </td>
                             </tr>
@@ -2820,7 +2860,7 @@ class Vigilante_Admin {
             <div class="vigilante-tool-card">
                 <h3><?php esc_html_e( 'Import Settings', 'vigilante' ); ?></h3>
                 <p><?php esc_html_e( 'Import settings from a previously exported JSON file.', 'vigilante' ); ?></p>
-                <input type="file" id="vigilante-import-file" accept=".json" style="display: none;">
+                <input type="file" id="vigilante-import-file" aria-label="<?php esc_attr_e( 'Configuration file to import', 'vigilante' ); ?>" accept=".json" style="display: none;">
                 <button type="button" class="button vigilante-import-settings">
                     <?php esc_html_e( 'Import Settings', 'vigilante' ); ?>
                 </button>
@@ -2988,18 +3028,18 @@ class Vigilante_Admin {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Requests per Minute', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-firewall-rate-limiting-requests-per-minute"><?php esc_html_e( 'Requests per Minute', 'vigilante' ); ?></label></th>
                         <td>
-                            <input type="number" name="firewall[rate_limiting][requests_per_minute]" value="<?php echo esc_attr( $options['rate_limiting']['requests_per_minute'] ?? 120 ); ?>" min="10" max="500" class="small-text">
+                            <input id="vigilante-f-firewall-rate-limiting-requests-per-minute" type="number" name="firewall[rate_limiting][requests_per_minute]" value="<?php echo esc_attr( $options['rate_limiting']['requests_per_minute'] ?? 120 ); ?>" min="10" max="500" class="small-text">
                             <p class="description">
                                 <?php esc_html_e( 'Counts only PHP requests to WordPress (pages, admin-ajax, REST, login) from a single IP, not static assets like images, CSS or JS. 120/min suits most sites; sustained traffic above that from one IP is usually a bot. To allow a legitimate service, whitelist its IP instead of raising the limit.', 'vigilante' ); ?>
                             </p>
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Block Duration (seconds)', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-firewall-rate-limiting-block-duration"><?php esc_html_e( 'Block Duration (seconds)', 'vigilante' ); ?></label></th>
                         <td>
-                            <input type="number" name="firewall[rate_limiting][block_duration]" value="<?php echo esc_attr( $options['rate_limiting']['block_duration'] ?? 300 ); ?>" min="60" max="3600" class="small-text">
+                            <input id="vigilante-f-firewall-rate-limiting-block-duration" type="number" name="firewall[rate_limiting][block_duration]" value="<?php echo esc_attr( $options['rate_limiting']['block_duration'] ?? 300 ); ?>" min="60" max="3600" class="small-text">
                         </td>
                     </tr>
                     <tr>
@@ -3024,9 +3064,9 @@ class Vigilante_Admin {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Maximum Block Duration', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-firewall-rate-limiting-max-block-duration"><?php esc_html_e( 'Maximum Block Duration', 'vigilante' ); ?></label></th>
                         <td>
-                            <select name="firewall[rate_limiting][max_block_duration]">
+                            <select id="vigilante-f-firewall-rate-limiting-max-block-duration" name="firewall[rate_limiting][max_block_duration]">
                                 <?php
                                 $max_options = array(
                                     3600   => __( '1 hour', 'vigilante' ),
@@ -3097,10 +3137,10 @@ class Vigilante_Admin {
                 </p>
                 <table class="form-table">
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Visitor IP detection', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-firewall-trusted-proxy-header"><?php esc_html_e( 'Visitor IP detection', 'vigilante' ); ?></label></th>
                         <td>
                             <?php $proxy_header = $options['trusted_proxy_header'] ?? ''; ?>
-                            <select name="firewall[trusted_proxy_header]">
+                            <select id="vigilante-f-firewall-trusted-proxy-header" name="firewall[trusted_proxy_header]">
                                 <option value="" <?php selected( $proxy_header, '' ); ?>><?php esc_html_e( 'Direct connection, only REMOTE_ADDR (recommended)', 'vigilante' ); ?></option>
                                 <option value="cf-connecting-ip" <?php selected( $proxy_header, 'cf-connecting-ip' ); ?>><?php esc_html_e( 'Behind Cloudflare (CF-Connecting-IP)', 'vigilante' ); ?></option>
                                 <option value="x-forwarded-for" <?php selected( $proxy_header, 'x-forwarded-for' ); ?>><?php esc_html_e( 'Behind a reverse proxy or load balancer (X-Forwarded-For)', 'vigilante' ); ?></option>
@@ -3112,11 +3152,11 @@ class Vigilante_Admin {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'IP Whitelist', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-firewall-ip-whitelist"><?php esc_html_e( 'IP Whitelist', 'vigilante' ); ?></label></th>
                         <td>
-                            <textarea name="firewall[ip_whitelist]" rows="4" class="large-text code" placeholder="192.168.1.50&#10;192.168.1.0/24&#10;192.168.1.*"><?php echo esc_textarea( implode( "\n", $options['ip_whitelist'] ?? array() ) ); ?></textarea>
+                            <textarea id="vigilante-f-firewall-ip-whitelist" name="firewall[ip_whitelist]" rows="4" class="large-text code" placeholder="192.168.1.50&#10;192.168.1.0/24&#10;192.168.1.*"><?php echo esc_textarea( implode( "\n", $options['ip_whitelist'] ?? array() ) ); ?></textarea>
                             <p class="description">
-                                <?php esc_html_e( 'One IP per line. These IPs will bypass firewall checks.', 'vigilante' ); ?>
+                                <?php esc_html_e( 'One IP per line. These IPs bypass the firewall checks, and they also reach wp-admin when the login URL is hidden, so remote managers such as MainWP or ManageWP are not turned away with a 404. The hidden login form itself stays hidden for every IP, this one included.', 'vigilante' ); ?>
                                 <br>
                                 <?php
                                 printf(
@@ -3130,9 +3170,9 @@ class Vigilante_Admin {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'IP Blacklist', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-firewall-ip-blacklist"><?php esc_html_e( 'IP Blacklist', 'vigilante' ); ?></label></th>
                         <td>
-                            <textarea name="firewall[ip_blacklist]" rows="4" class="large-text code" placeholder="203.0.113.42&#10;203.0.113.0/24&#10;203.0.113.*"><?php echo esc_textarea( implode( "\n", $options['ip_blacklist'] ?? array() ) ); ?></textarea>
+                            <textarea id="vigilante-f-firewall-ip-blacklist" name="firewall[ip_blacklist]" rows="4" class="large-text code" placeholder="203.0.113.42&#10;203.0.113.0/24&#10;203.0.113.*"><?php echo esc_textarea( implode( "\n", $options['ip_blacklist'] ?? array() ) ); ?></textarea>
                             <p class="description">
                                 <?php esc_html_e( 'One IP per line. These IPs will be blocked immediately.', 'vigilante' ); ?>
                                 <br>
@@ -3153,16 +3193,16 @@ class Vigilante_Admin {
                 <p><?php esc_html_e( 'Partial matching: enter a keyword and any User-Agent containing it will be matched.', 'vigilante' ); ?></p>
                 <table class="form-table">
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'User-Agent Whitelist', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-firewall-ua-whitelist"><?php esc_html_e( 'User-Agent Whitelist', 'vigilante' ); ?></label></th>
                         <td>
-                            <textarea name="firewall[ua_whitelist]" rows="4" class="large-text code"><?php echo esc_textarea( implode( "\n", $options['ua_whitelist'] ?? array() ) ); ?></textarea>
+                            <textarea id="vigilante-f-firewall-ua-whitelist" name="firewall[ua_whitelist]" rows="4" class="large-text code"><?php echo esc_textarea( implode( "\n", $options['ua_whitelist'] ?? array() ) ); ?></textarea>
                             <p class="description"><?php esc_html_e( 'One User-Agent per line. These will bypass all firewall checks. Example: ManageWP, MainWP, UptimeRobot.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'User-Agent Blacklist', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-firewall-ua-blacklist"><?php esc_html_e( 'User-Agent Blacklist', 'vigilante' ); ?></label></th>
                         <td>
-                            <textarea name="firewall[ua_blacklist]" rows="4" class="large-text code"><?php echo esc_textarea( implode( "\n", $options['ua_blacklist'] ?? array() ) ); ?></textarea>
+                            <textarea id="vigilante-f-firewall-ua-blacklist" name="firewall[ua_blacklist]" rows="4" class="large-text code"><?php echo esc_textarea( implode( "\n", $options['ua_blacklist'] ?? array() ) ); ?></textarea>
                             <p class="description"><?php esc_html_e( 'One User-Agent per line. These will be blocked immediately.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
@@ -3292,16 +3332,16 @@ class Vigilante_Admin {
 
                 <table class="form-table">
                     <tr id="field-max-attempts">
-                        <th scope="row"><?php esc_html_e( 'Max Login Attempts', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-login-security-max-attempts"><?php esc_html_e( 'Max Login Attempts', 'vigilante' ); ?></label></th>
                         <td>
-                            <input type="number" name="login_security[max_attempts]" value="<?php echo esc_attr( $options['max_attempts'] ?? 5 ); ?>" min="1" max="20" class="small-text">
+                            <input id="vigilante-f-login-security-max-attempts" type="number" name="login_security[max_attempts]" value="<?php echo esc_attr( $options['max_attempts'] ?? 5 ); ?>" min="1" max="20" class="small-text">
                             <p class="description"><?php esc_html_e( 'Number of failed attempts before lockout.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Lockout Duration', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-login-security-lockout-duration"><?php esc_html_e( 'Lockout Duration', 'vigilante' ); ?></label></th>
                         <td>
-                            <input type="number" name="login_security[lockout_duration]" value="<?php echo esc_attr( ( $options['lockout_duration'] ?? 1800 ) / 60 ); ?>" min="1" max="1440" class="small-text">
+                            <input id="vigilante-f-login-security-lockout-duration" type="number" name="login_security[lockout_duration]" value="<?php echo esc_attr( ( $options['lockout_duration'] ?? 1800 ) / 60 ); ?>" min="1" max="1440" class="small-text">
                             <?php esc_html_e( 'minutes', 'vigilante' ); ?>
                         </td>
                     </tr>
@@ -3351,6 +3391,9 @@ class Vigilante_Admin {
                                 </p>
                                 <p class="description">
                                     <?php esc_html_e( 'Direct access to wp-login.php and wp-admin will return a 404 error for non-logged users.', 'vigilante' ); ?>
+                                </p>
+                                <p class="description">
+                                    <?php esc_html_e( 'An IP in the firewall whitelist is still allowed into wp-admin, so remote managers keep working, but it does not get the login form: the hidden URL is the only way in for everyone.', 'vigilante' ); ?>
                                 </p>
                             </div>
                         </td>
@@ -3720,9 +3763,9 @@ class Vigilante_Admin {
 
                 <!-- TOTP-specific: Grace period -->
                 <tr class="vigilante-2fa-totp-only" <?php echo 'totp' !== $method ? 'style="display:none;"' : ''; ?>>
-                    <th scope="row"><?php esc_html_e( 'Grace period', 'vigilante' ); ?></th>
+                    <th scope="row"><label for="vigilante-f-login-security-two-factor-grace-period-days"><?php esc_html_e( 'Grace period', 'vigilante' ); ?></label></th>
                     <td>
-                        <input type="number" 
+                        <input id="vigilante-f-login-security-two-factor-grace-period-days" type="number" 
                                name="login_security[two_factor][grace_period_days]" 
                                value="<?php echo esc_attr( $grace_days ); ?>" 
                                min="0" max="30" class="small-text">
@@ -3733,9 +3776,9 @@ class Vigilante_Admin {
 
                 <!-- Email-specific: Sender name -->
                 <tr class="vigilante-2fa-email-only" <?php echo 'email' !== $method ? 'style="display:none;"' : ''; ?>>
-                    <th scope="row"><?php esc_html_e( 'Email sender name', 'vigilante' ); ?></th>
+                    <th scope="row"><label for="vigilante-f-login-security-two-factor-email-from-name"><?php esc_html_e( 'Email sender name', 'vigilante' ); ?></label></th>
                     <td>
-                        <input type="text" 
+                        <input id="vigilante-f-login-security-two-factor-email-from-name" type="text" 
                                name="login_security[two_factor][email_from_name]" 
                                value="<?php echo esc_attr( $two_factor['email_from_name'] ?? '' ); ?>" 
                                class="regular-text vigilante-2fa-email-from"
@@ -3823,9 +3866,9 @@ class Vigilante_Admin {
 
                 <table class="form-table">
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'X-Frame-Options', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-security-headers-x-frame-options"><?php esc_html_e( 'X-Frame-Options', 'vigilante' ); ?></label></th>
                         <td>
-                            <select name="security_headers[x_frame_options]">
+                            <select id="vigilante-f-security-headers-x-frame-options" name="security_headers[x_frame_options]">
                                 <option value="" <?php selected( empty( $options['x_frame_options'] ) ); ?>><?php esc_html_e( 'Disabled', 'vigilante' ); ?></option>
                                 <option value="SAMEORIGIN" <?php selected( $options['x_frame_options'] ?? '', 'SAMEORIGIN' ); ?>>SAMEORIGIN</option>
                                 <option value="DENY" <?php selected( $options['x_frame_options'] ?? '', 'DENY' ); ?>>DENY</option>
@@ -3843,9 +3886,9 @@ class Vigilante_Admin {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Referrer-Policy', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-security-headers-referrer-policy"><?php esc_html_e( 'Referrer-Policy', 'vigilante' ); ?></label></th>
                         <td>
-                            <select name="security_headers[referrer_policy]">
+                            <select id="vigilante-f-security-headers-referrer-policy" name="security_headers[referrer_policy]">
                                 <option value="" <?php selected( empty( $options['referrer_policy'] ) ); ?>><?php esc_html_e( 'Disabled', 'vigilante' ); ?></option>
                                 <option value="no-referrer" <?php selected( $options['referrer_policy'] ?? '', 'no-referrer' ); ?>>no-referrer</option>
                                 <option value="strict-origin-when-cross-origin" <?php selected( $options['referrer_policy'] ?? '', 'strict-origin-when-cross-origin' ); ?>>strict-origin-when-cross-origin</option>
@@ -3944,9 +3987,9 @@ class Vigilante_Admin {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Max Age', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-security-headers-hsts-max-age"><?php esc_html_e( 'Max Age', 'vigilante' ); ?></label></th>
                         <td>
-                            <select name="security_headers[hsts][max_age]">
+                            <select id="vigilante-f-security-headers-hsts-max-age" name="security_headers[hsts][max_age]">
                                 <option value="86400" <?php selected( $options['hsts']['max_age'] ?? 31536000, 86400 ); ?>><?php esc_html_e( '1 day (testing)', 'vigilante' ); ?></option>
                                 <option value="2592000" <?php selected( $options['hsts']['max_age'] ?? 31536000, 2592000 ); ?>><?php esc_html_e( '30 days', 'vigilante' ); ?></option>
                                 <option value="31536000" <?php selected( $options['hsts']['max_age'] ?? 31536000, 31536000 ); ?>><?php esc_html_e( '1 year (recommended)', 'vigilante' ); ?></option>
@@ -4026,9 +4069,9 @@ class Vigilante_Admin {
 
                 <table class="form-table">
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Access Mode', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-rest-api-security-mode"><?php esc_html_e( 'Access Mode', 'vigilante' ); ?></label></th>
                         <td>
-                            <select name="rest_api_security[mode]">
+                            <select id="vigilante-f-rest-api-security-mode" name="rest_api_security[mode]">
                                 <option value="open" <?php selected( $options['mode'] ?? 'selective', 'open' ); ?>><?php esc_html_e( 'Open - Allow all requests', 'vigilante' ); ?></option>
                                 <option value="selective" <?php selected( $options['mode'] ?? 'selective', 'selective' ); ?>><?php esc_html_e( 'Selective - Protect sensitive endpoints', 'vigilante' ); ?></option>
                                 <option value="authenticated_only" <?php selected( $options['mode'] ?? 'selective', 'authenticated_only' ); ?>><?php esc_html_e( 'Authenticated - Require login for all', 'vigilante' ); ?></option>
@@ -4130,9 +4173,9 @@ class Vigilante_Admin {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Minimum Password Length', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-user-security-min-password-length"><?php esc_html_e( 'Minimum Password Length', 'vigilante' ); ?></label></th>
                         <td>
-                            <input type="number" name="user_security[min_password_length]" value="<?php echo esc_attr( $options['min_password_length'] ?? 12 ); ?>" min="6" max="32" class="small-text">
+                            <input id="vigilante-f-user-security-min-password-length" type="number" name="user_security[min_password_length]" value="<?php echo esc_attr( $options['min_password_length'] ?? 12 ); ?>" min="6" max="32" class="small-text">
                             <?php esc_html_e( 'characters', 'vigilante' ); ?>
                         </td>
                     </tr>
@@ -4287,9 +4330,9 @@ class Vigilante_Admin {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Auto-reject After', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-user-security-registration-approval-auto-reject-days"><?php esc_html_e( 'Auto-reject After', 'vigilante' ); ?></label></th>
                         <td>
-                            <input type="number" name="user_security[registration_approval][auto_reject_days]" value="<?php echo esc_attr( $registration['auto_reject_days'] ?? 0 ); ?>" min="0" max="365" class="small-text">
+                            <input id="vigilante-f-user-security-registration-approval-auto-reject-days" type="number" name="user_security[registration_approval][auto_reject_days]" value="<?php echo esc_attr( $registration['auto_reject_days'] ?? 0 ); ?>" min="0" max="365" class="small-text">
                             <?php esc_html_e( 'days (0 = never)', 'vigilante' ); ?>
                             <p class="description"><?php esc_html_e( 'Automatically reject pending registrations after this many days.', 'vigilante' ); ?></p>
                         </td>
@@ -4316,16 +4359,16 @@ class Vigilante_Admin {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Maximum Sessions', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-user-security-session-limits-max-sessions"><?php esc_html_e( 'Maximum Sessions', 'vigilante' ); ?></label></th>
                         <td>
-                            <input type="number" name="user_security[session_limits][max_sessions]" value="<?php echo esc_attr( $session_limits['max_sessions'] ?? 3 ); ?>" min="1" max="10" class="small-text">
+                            <input id="vigilante-f-user-security-session-limits-max-sessions" type="number" name="user_security[session_limits][max_sessions]" value="<?php echo esc_attr( $session_limits['max_sessions'] ?? 3 ); ?>" min="1" max="10" class="small-text">
                             <?php esc_html_e( 'sessions per user', 'vigilante' ); ?>
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'When Limit Exceeded', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-user-security-session-limits-behavior"><?php esc_html_e( 'When Limit Exceeded', 'vigilante' ); ?></label></th>
                         <td>
-                            <select name="user_security[session_limits][behavior]">
+                            <select id="vigilante-f-user-security-session-limits-behavior" name="user_security[session_limits][behavior]">
                                 <option value="block_new" <?php selected( ( $session_limits['behavior'] ?? 'close_oldest' ), 'block_new' ); ?>><?php esc_html_e( 'Block new login', 'vigilante' ); ?></option>
                                 <option value="close_oldest" <?php selected( ( $session_limits['behavior'] ?? 'close_oldest' ), 'close_oldest' ); ?>><?php esc_html_e( 'Close oldest session', 'vigilante' ); ?></option>
                             </select>
@@ -4363,25 +4406,25 @@ class Vigilante_Admin {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Expire After', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-user-security-password-expiration-expire-days"><?php esc_html_e( 'Expire After', 'vigilante' ); ?></label></th>
                         <td>
-                            <input type="number" name="user_security[password_expiration][expire_days]" value="<?php echo esc_attr( $password_exp['expire_days'] ?? 90 ); ?>" min="7" max="365" class="small-text">
+                            <input id="vigilante-f-user-security-password-expiration-expire-days" type="number" name="user_security[password_expiration][expire_days]" value="<?php echo esc_attr( $password_exp['expire_days'] ?? 90 ); ?>" min="7" max="365" class="small-text">
                             <?php esc_html_e( 'days', 'vigilante' ); ?>
                             <p class="description"><?php esc_html_e( 'PCI-DSS recommends 90 days.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Warning Period', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-user-security-password-expiration-warning-days"><?php esc_html_e( 'Warning Period', 'vigilante' ); ?></label></th>
                         <td>
-                            <input type="number" name="user_security[password_expiration][warning_days]" value="<?php echo esc_attr( $password_exp['warning_days'] ?? 14 ); ?>" min="1" max="30" class="small-text">
+                            <input id="vigilante-f-user-security-password-expiration-warning-days" type="number" name="user_security[password_expiration][warning_days]" value="<?php echo esc_attr( $password_exp['warning_days'] ?? 14 ); ?>" min="1" max="30" class="small-text">
                             <?php esc_html_e( 'days before expiration', 'vigilante' ); ?>
                             <p class="description"><?php esc_html_e( 'Show warning notice this many days before password expires.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Password History', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-user-security-password-expiration-password-history"><?php esc_html_e( 'Password History', 'vigilante' ); ?></label></th>
                         <td>
-                            <input type="number" name="user_security[password_expiration][password_history]" value="<?php echo esc_attr( $password_exp['password_history'] ?? 3 ); ?>" min="0" max="24" class="small-text">
+                            <input id="vigilante-f-user-security-password-expiration-password-history" type="number" name="user_security[password_expiration][password_history]" value="<?php echo esc_attr( $password_exp['password_history'] ?? 3 ); ?>" min="0" max="24" class="small-text">
                             <?php esc_html_e( 'passwords to remember', 'vigilante' ); ?>
                             <p class="description"><?php esc_html_e( 'Prevent reusing recent passwords. Set to 0 to disable.', 'vigilante' ); ?></p>
                         </td>
@@ -4465,9 +4508,9 @@ class Vigilante_Admin {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Link Expiration', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-user-security-email-verification-token-expiry-hours"><?php esc_html_e( 'Link Expiration', 'vigilante' ); ?></label></th>
                         <td>
-                            <input type="number" name="user_security[email_verification][token_expiry_hours]" value="<?php echo esc_attr( $email_verify['token_expiry_hours'] ?? 24 ); ?>" min="1" max="168" class="small-text">
+                            <input id="vigilante-f-user-security-email-verification-token-expiry-hours" type="number" name="user_security[email_verification][token_expiry_hours]" value="<?php echo esc_attr( $email_verify['token_expiry_hours'] ?? 24 ); ?>" min="1" max="168" class="small-text">
                             <?php esc_html_e( 'hours', 'vigilante' ); ?>
                         </td>
                     </tr>
@@ -4481,9 +4524,9 @@ class Vigilante_Admin {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Auto-delete Unverified', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-user-security-email-verification-auto-delete-days"><?php esc_html_e( 'Auto-delete Unverified', 'vigilante' ); ?></label></th>
                         <td>
-                            <input type="number" name="user_security[email_verification][auto_delete_days]" value="<?php echo esc_attr( $email_verify['auto_delete_days'] ?? 7 ); ?>" min="0" max="365" class="small-text">
+                            <input id="vigilante-f-user-security-email-verification-auto-delete-days" type="number" name="user_security[email_verification][auto_delete_days]" value="<?php echo esc_attr( $email_verify['auto_delete_days'] ?? 7 ); ?>" min="0" max="365" class="small-text">
                             <?php esc_html_e( 'days (0 = never)', 'vigilante' ); ?>
                             <p class="description"><?php esc_html_e( 'Automatically delete users who never verify their email.', 'vigilante' ); ?></p>
                         </td>
@@ -4999,10 +5042,10 @@ class Vigilante_Admin {
 
                 <table class="form-table">
                     <tr id="field-disable-xmlrpc">
-                        <th scope="row"><?php esc_html_e( 'XML-RPC access', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-wp-hardening-xmlrpc-mode"><?php esc_html_e( 'XML-RPC access', 'vigilante' ); ?></label></th>
                         <td>
                             <?php $vig_xmlrpc_mode = Vigilante_Comment_Security::resolve_xmlrpc_mode( $this->settings ); ?>
-                            <select name="wp_hardening[xmlrpc_mode]">
+                            <select id="vigilante-f-wp-hardening-xmlrpc-mode" name="wp_hardening[xmlrpc_mode]">
                                 <option value="none" <?php selected( $vig_xmlrpc_mode, 'none' ); ?>>
                                     <?php esc_html_e( 'Leave XML-RPC enabled', 'vigilante' ); ?>
                                 </option>
@@ -5062,8 +5105,8 @@ class Vigilante_Admin {
                                 <input type="checkbox" name="wp_hardening[close_old_comments]" value="1" <?php checked( ! empty( $options['close_old_comments'] ) ); ?>>
                                 <?php esc_html_e( 'Automatically close comments on old posts after', 'vigilante' ); ?>
                             </label>
-                            <input type="number" name="wp_hardening[close_comments_after_days]" value="<?php echo esc_attr( $options['close_comments_after_days'] ?? 30 ); ?>" min="1" max="365" class="small-text">
-                            <?php esc_html_e( 'days', 'vigilante' ); ?>
+                            <input type="number" id="vigilante-f-wp-hardening-close-comments-after-days" name="wp_hardening[close_comments_after_days]" value="<?php echo esc_attr( $options['close_comments_after_days'] ?? 30 ); ?>" min="1" max="365" class="small-text">
+                            <label for="vigilante-f-wp-hardening-close-comments-after-days"><?php esc_html_e( 'days', 'vigilante' ); ?></label>
                         </td>
                     </tr>
                     <tr>
@@ -5217,11 +5260,11 @@ class Vigilante_Admin {
                     <tr>
                         <th scope="row"><?php esc_html_e( 'Retention', 'vigilante' ); ?></th>
                         <td>
-                            <input type="number" name="activity_log[retention_days]" value="<?php echo esc_attr( $options['retention_days'] ?? 30 ); ?>" min="7" max="365" class="small-text">
-                            <?php esc_html_e( 'days', 'vigilante' ); ?>
+                            <input type="number" id="vigilante-f-activity-log-retention-days" name="activity_log[retention_days]" value="<?php echo esc_attr( $options['retention_days'] ?? 30 ); ?>" min="7" max="365" class="small-text">
+                            <label for="vigilante-f-activity-log-retention-days"><?php esc_html_e( 'days', 'vigilante' ); ?></label>
                             &nbsp;&nbsp;
-                            <input type="number" name="activity_log[max_entries]" value="<?php echo esc_attr( $options['max_entries'] ?? 10000 ); ?>" min="100" max="100000" step="100" class="small-text">
-                            <?php esc_html_e( 'max entries', 'vigilante' ); ?>
+                            <input type="number" id="vigilante-f-activity-log-max-entries" name="activity_log[max_entries]" value="<?php echo esc_attr( $options['max_entries'] ?? 10000 ); ?>" min="100" max="100000" step="100" class="small-text">
+                            <label for="vigilante-f-activity-log-max-entries"><?php esc_html_e( 'max entries', 'vigilante' ); ?></label>
                             <p class="description"><?php esc_html_e( 'Whichever limit is reached first takes effect. Changes apply immediately on save; daily maintenance also enforces these limits automatically.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
@@ -5248,12 +5291,12 @@ class Vigilante_Admin {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Option Tracking', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-activity-log-tracked-options"><?php esc_html_e( 'Option Tracking', 'vigilante' ); ?></label></th>
                         <td>
                             <p class="description" style="margin-top:0;"><?php esc_html_e( 'When "WordPress option changes" is enabled, Vigilant tracks ~30 core WordPress settings (site URL, admin email, registration, active plugins, theme, comments, privacy, etc.). Use the field below to track additional options from other plugins.', 'vigilante' ); ?></p>
                             <br>
                             <label><?php esc_html_e( 'Additional options to track:', 'vigilante' ); ?></label><br>
-                            <textarea name="activity_log[tracked_options]" rows="3" cols="50" class="regular-text code" placeholder="woocommerce_&#10;seopress_&#10;wpforms_"><?php echo esc_textarea( implode( "\n", $options['tracked_options'] ?? array() ) ); ?></textarea>
+                            <textarea id="vigilante-f-activity-log-tracked-options" name="activity_log[tracked_options]" rows="3" cols="50" class="regular-text code" placeholder="woocommerce_&#10;seopress_&#10;wpforms_"><?php echo esc_textarea( implode( "\n", $options['tracked_options'] ?? array() ) ); ?></textarea>
                             <p class="description"><?php esc_html_e( 'One option name per line. Use a trailing underscore to match all options with that prefix (e.g. "woocommerce_" tracks all WooCommerce settings).', 'vigilante' ); ?></p>
                         </td>
                     </tr>
@@ -5262,13 +5305,13 @@ class Vigilante_Admin {
                         <td>
                             <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:16px; max-width:600px;">
                                 <div>
-                                    <label><?php esc_html_e( 'Excluded user IDs:', 'vigilante' ); ?></label><br>
-                                    <textarea name="activity_log[excluded_users]" rows="3" cols="25"><?php echo esc_textarea( implode( "\n", $options['excluded_users'] ?? array() ) ); ?></textarea>
+                                    <label for="vigilante-f-activity-log-excluded-users"><?php esc_html_e( 'Excluded user IDs:', 'vigilante' ); ?></label><br>
+                                    <textarea id="vigilante-f-activity-log-excluded-users" name="activity_log[excluded_users]" rows="3" cols="25"><?php echo esc_textarea( implode( "\n", $options['excluded_users'] ?? array() ) ); ?></textarea>
                                     <p class="description"><?php esc_html_e( 'One user ID per line. Actions by these users will not be logged.', 'vigilante' ); ?></p>
                                 </div>
                                 <div>
-                                    <label><?php esc_html_e( 'Excluded IPs:', 'vigilante' ); ?></label><br>
-                                    <textarea name="activity_log[excluded_ips]" rows="3" cols="25"><?php echo esc_textarea( implode( "\n", $options['excluded_ips'] ?? array() ) ); ?></textarea>
+                                    <label for="vigilante-f-activity-log-excluded-ips"><?php esc_html_e( 'Excluded IPs:', 'vigilante' ); ?></label><br>
+                                    <textarea id="vigilante-f-activity-log-excluded-ips" name="activity_log[excluded_ips]" rows="3" cols="25"><?php echo esc_textarea( implode( "\n", $options['excluded_ips'] ?? array() ) ); ?></textarea>
                                     <p class="description"><?php esc_html_e( 'One IP per line. Requests from these IPs will not be logged.', 'vigilante' ); ?></p>
                                 </div>
                             </div>
@@ -5319,9 +5362,9 @@ class Vigilante_Admin {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Alert on severity', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-audit-alerts-immediate-min-severity"><?php esc_html_e( 'Alert on severity', 'vigilante' ); ?></label></th>
                         <td>
-                            <select name="audit_alerts[immediate][min_severity]">
+                            <select id="vigilante-f-audit-alerts-immediate-min-severity" name="audit_alerts[immediate][min_severity]">
                                 <option value="critical" <?php selected( $alert_severity, 'critical' ); ?>><?php esc_html_e( 'Critical only (recommended)', 'vigilante' ); ?></option>
                                 <option value="warning" <?php selected( $alert_severity, 'warning' ); ?>><?php esc_html_e( 'Warning and Critical', 'vigilante' ); ?></option>
                             </select>
@@ -5339,9 +5382,9 @@ class Vigilante_Admin {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Time window', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-audit-alerts-threshold-window"><?php esc_html_e( 'Time window', 'vigilante' ); ?></label></th>
                         <td>
-                            <select name="audit_alerts[threshold][window]">
+                            <select id="vigilante-f-audit-alerts-threshold-window" name="audit_alerts[threshold][window]">
                                 <option value="30m" <?php selected( $alert_window, '30m' ); ?>><?php esc_html_e( '30 minutes', 'vigilante' ); ?></option>
                                 <option value="1h" <?php selected( $alert_window, '1h' ); ?>><?php esc_html_e( '1 hour', 'vigilante' ); ?></option>
                                 <option value="6h" <?php selected( $alert_window, '6h' ); ?>><?php esc_html_e( '6 hours', 'vigilante' ); ?></option>
@@ -5370,8 +5413,8 @@ class Vigilante_Admin {
                     <tr>
                         <th scope="row"><?php esc_html_e( "Don't repeat alerts", 'vigilante' ); ?></th>
                         <td>
-                            <input type="number" name="audit_alerts[cooldown_minutes]" value="<?php echo esc_attr( isset( $alerts['cooldown_minutes'] ) ? (int) $alerts['cooldown_minutes'] : 60 ); ?>" min="0" max="1440" class="small-text">
-                            <?php esc_html_e( 'minutes', 'vigilante' ); ?>
+                            <input type="number" id="vigilante-f-audit-alerts-cooldown-minutes" name="audit_alerts[cooldown_minutes]" value="<?php echo esc_attr( isset( $alerts['cooldown_minutes'] ) ? (int) $alerts['cooldown_minutes'] : 60 ); ?>" min="0" max="1440" class="small-text">
+                            <label for="vigilante-f-audit-alerts-cooldown-minutes"><?php esc_html_e( 'minutes', 'vigilante' ); ?></label>
                             <p class="description"><?php esc_html_e( 'After an alert, Vigilant waits this long before sending another about the same thing: the same event type for immediate alerts, or the same category for threshold alerts. This prevents a flood during a sustained attack. Applies to both alert types above.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
@@ -5446,8 +5489,8 @@ class Vigilante_Admin {
             ?>
 
             <div class="vigilante-log-filters">
-                <input type="text" id="vigilante-log-search" size="1" placeholder="<?php esc_attr_e( 'Search logs (min. 3 characters)...', 'vigilante' ); ?>" class="vigilante-log-search-input">
-                <select id="vigilante-log-type-filter">
+                <input type="text" id="vigilante-log-search" aria-label="<?php esc_attr_e( 'Search the activity log', 'vigilante' ); ?>" size="1" placeholder="<?php esc_attr_e( 'Search logs (min. 3 characters)...', 'vigilante' ); ?>" class="vigilante-log-search-input">
+                <select id="vigilante-log-type-filter" aria-label="<?php esc_attr_e( 'Filter the log by event type', 'vigilante' ); ?>">
                     <option value=""><?php esc_html_e( 'All Types', 'vigilante' ); ?></option>
                     <option value="login"><?php esc_html_e( 'Login', 'vigilante' ); ?></option>
                     <option value="user"><?php esc_html_e( 'User', 'vigilante' ); ?></option>
@@ -5462,13 +5505,13 @@ class Vigilante_Admin {
                     <option value="security"><?php esc_html_e( 'Security', 'vigilante' ); ?></option>
                     <option value="system"><?php esc_html_e( 'System', 'vigilante' ); ?></option>
                 </select>
-                <select id="vigilante-log-severity-filter">
+                <select id="vigilante-log-severity-filter" aria-label="<?php esc_attr_e( 'Filter the log by severity', 'vigilante' ); ?>">
                     <option value=""><?php esc_html_e( 'All Severities', 'vigilante' ); ?></option>
                     <option value="info"><?php esc_html_e( 'Info', 'vigilante' ); ?></option>
                     <option value="warning"><?php esc_html_e( 'Warning', 'vigilante' ); ?></option>
                     <option value="critical"><?php esc_html_e( 'Critical', 'vigilante' ); ?></option>
                 </select>
-                <select id="vigilante-log-method-filter">
+                <select id="vigilante-log-method-filter" aria-label="<?php esc_attr_e( 'Filter the log by HTTP method', 'vigilante' ); ?>">
                     <option value=""><?php esc_html_e( 'All Methods', 'vigilante' ); ?></option>
                     <option value="GET">GET</option>
                     <option value="POST">POST</option>
@@ -5645,18 +5688,18 @@ class Vigilante_Admin {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Scan Frequency', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-file-integrity-scan-frequency"><?php esc_html_e( 'Scan Frequency', 'vigilante' ); ?></label></th>
                         <td>
-                            <select name="file_integrity[scan_frequency]">
+                            <select id="vigilante-f-file-integrity-scan-frequency" name="file_integrity[scan_frequency]">
                                 <option value="daily" <?php selected( $options['scan_frequency'] ?? 'daily', 'daily' ); ?>><?php esc_html_e( 'Daily', 'vigilante' ); ?></option>
                                 <option value="weekly" <?php selected( $options['scan_frequency'] ?? 'daily', 'weekly' ); ?>><?php esc_html_e( 'Weekly', 'vigilante' ); ?></option>
                             </select>
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Email Notifications', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-file-integrity-notify-level"><?php esc_html_e( 'Email Notifications', 'vigilante' ); ?></label></th>
                         <td>
-                            <select name="file_integrity[notify_level]">
+                            <select id="vigilante-f-file-integrity-notify-level" name="file_integrity[notify_level]">
                                 <option value="all" <?php selected( $notify_level, 'all' ); ?>><?php esc_html_e( 'All issues (modified + suspicious)', 'vigilante' ); ?></option>
                                 <option value="suspicious_only" <?php selected( $notify_level, 'suspicious_only' ); ?>><?php esc_html_e( 'Suspicious files only', 'vigilante' ); ?></option>
                                 <option value="disabled" <?php selected( $notify_level, 'disabled' ); ?>><?php esc_html_e( 'Disabled', 'vigilante' ); ?></option>
@@ -5730,17 +5773,28 @@ class Vigilante_Admin {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Excluded Paths', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-file-integrity-excluded-paths"><?php esc_html_e( 'Excluded Paths', 'vigilante' ); ?></label></th>
                         <td>
-                            <textarea name="file_integrity[excluded_paths]" rows="4" class="large-text code" placeholder="wp-content/cache&#10;wp-content/languages"><?php echo esc_textarea( implode( "\n", $options['excluded_paths'] ?? array() ) ); ?></textarea>
-                            <p class="description"><?php esc_html_e( 'One path per line (relative to WordPress root). Files within these paths will be skipped during scans.', 'vigilante' ); ?></p>
+                            <textarea id="vigilante-f-file-integrity-excluded-paths" name="file_integrity[excluded_paths]" rows="4" class="large-text code" placeholder="wp-content/cache&#10;wp-content/languages"><?php echo esc_textarea( implode( "\n", $options['excluded_paths'] ?? array() ) ); ?></textarea>
+                            <p class="description"><?php esc_html_e( 'One path per line, relative to the WordPress root. A path such as wp-content/cache excludes exactly that folder and everything under it. A name on its own, such as cache, excludes any folder called exactly that, wherever it is.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Excluded Extensions', 'vigilante' ); ?></th>
+                        <th scope="row"><label for="vigilante-f-file-integrity-excluded-extensions"><?php esc_html_e( 'Excluded Extensions', 'vigilante' ); ?></label></th>
                         <td>
-                            <textarea name="file_integrity[excluded_extensions]" rows="3" class="large-text code" placeholder=".log&#10;.po&#10;.mo&#10;.pot"><?php echo esc_textarea( implode( "\n", $options['excluded_extensions'] ?? array() ) ); ?></textarea>
-                            <p class="description"><?php esc_html_e( 'One extension per line (e.g. .log, .po, .mo). Files with these extensions will be skipped. Useful to avoid false positives from translation or log files.', 'vigilante' ); ?></p>
+                            <textarea id="vigilante-f-file-integrity-excluded-extensions" name="file_integrity[excluded_extensions]" rows="3" class="large-text code" placeholder=".log&#10;.po&#10;.mo&#10;.pot"><?php echo esc_textarea( implode( "\n", $options['excluded_extensions'] ?? array() ) ); ?></textarea>
+                            <p class="description">
+                                <?php esc_html_e( 'One extension per line (e.g. .log, .po, .mo). Files with these extensions will be skipped. Useful to avoid false positives from translation or log files.', 'vigilante' ); ?>
+                                <br>
+                                <?php
+                                printf(
+                                    /* translators: 1: opening <code>, 2: closing </code>. Placeholders wrap the scoped-extension example. */
+                                    esc_html__( 'An extension on its own applies to the whole site. To limit it to one folder, write it as %1$swp-content/languages/*.json%2$s, which leaves the same extension watched everywhere else.', 'vigilante' ),
+                                    '<code>',
+                                    '</code>'
+                                ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- HTML tags are hardcoded.
+                                ?>
+                            </p>
                         </td>
                     </tr>
                 </table>
@@ -6354,6 +6408,8 @@ class Vigilante_Admin {
         // Read ONLY saved options from database (not merged with defaults)
         $saved_options = get_option( Vigilante_Settings::OPTION_NAME, array() );
 
+        $rejected_ips = array();
+
         // Handle modules
         if ( 'modules' === $section && isset( $data['modules'] ) ) {
             if ( ! isset( $saved_options['modules'] ) ) {
@@ -6373,7 +6429,14 @@ class Vigilante_Admin {
                 
                 // Process the submitted data
                 $processed = $this->process_section_data( $data[ $section ], $section_defaults, $current_section );
-                
+
+                // The IP boxes are free text and, until 2.9.9, whatever was typed
+                // went straight into the option. An entry the matcher can never
+                // match still sits in a security list looking like protection,
+                // so the ones that cannot match are dropped and reported back
+                // instead of being stored in silence.
+                $rejected_ips = $this->filter_ip_lists( $section, $processed );
+
                 // Save the processed section
                 $saved_options[ $section ] = $processed;
                 
@@ -6435,9 +6498,56 @@ class Vigilante_Admin {
             );
         }
 
+        if ( ! empty( $rejected_ips ) ) {
+            $message .= ' ' . sprintf(
+                /* translators: %s: comma separated list of the entries that were not saved. */
+                _n(
+                    'This entry is not a valid IP, CIDR range or wildcard, so it was not saved: %s',
+                    'These entries are not valid IPs, CIDR ranges or wildcards, so they were not saved: %s',
+                    count( $rejected_ips ),
+                    'vigilante'
+                ),
+                implode( ', ', array_map( 'esc_html', $rejected_ips ) )
+            );
+        }
+
         wp_send_json_success( $message );
     }
-    
+
+    /**
+     * Keep only the IP patterns the matcher can actually match
+     *
+     * @since 2.9.9
+     *
+     * @param string $section   Section being saved.
+     * @param array  $processed Section data, edited in place.
+     * @return array Entries that were dropped, for the message back to the user.
+     */
+    private function filter_ip_lists( $section, &$processed ) {
+        $lists = array(
+            'firewall'       => array( 'ip_whitelist', 'ip_blacklist' ),
+            'login_security' => array( 'ip_whitelist' ),
+        );
+
+        if ( ! isset( $lists[ $section ] ) ) {
+            return array();
+        }
+
+        $rejected = array();
+
+        foreach ( $lists[ $section ] as $key ) {
+            if ( ! isset( $processed[ $key ] ) || ! is_array( $processed[ $key ] ) ) {
+                continue;
+            }
+
+            $split             = Vigilante_IP_Utils::split_list( $processed[ $key ] );
+            $processed[ $key ] = $split['valid'];
+            $rejected          = array_merge( $rejected, $split['rejected'] );
+        }
+
+        return array_values( array_unique( $rejected ) );
+    }
+
     /**
      * Send 2FA enable notifications to users
      *

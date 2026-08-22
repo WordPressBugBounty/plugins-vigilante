@@ -1145,15 +1145,11 @@ class Vigilante_Under_Attack {
             return false;
         }
 
-        $ip = $this->get_visitor_ip();
-
-        foreach ( $whitelist as $whitelisted_ip ) {
-            if ( $ip === trim( $whitelisted_ip ) ) {
-                return true;
-            }
-        }
-
-        return false;
+        // Same matcher as the rest of the plugin. Until 2.9.9 this compared
+        // with a plain === inside a loop, so in Under Attack mode a whitelist
+        // entry written as a CIDR range or a wildcard matched nothing, while
+        // the very same entry worked in the firewall.
+        return Vigilante_IP_Utils::in_list( $this->get_visitor_ip(), $whitelist );
     }
 
     /**

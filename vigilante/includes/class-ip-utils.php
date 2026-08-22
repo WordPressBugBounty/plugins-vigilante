@@ -80,6 +80,170 @@ class Vigilante_IP_Utils {
     }
 
     /**
+     * Whether a string is a pattern this class can actually match.
+     *
+     * The counterpart of matches(): everything this returns true for is
+     * something the matcher understands, and everything else is noise that
+     * would sit in an IP list looking effective while matching nothing. Kept
+     * next to the matcher on purpose, so validation and matching cannot drift
+     * apart again.
+     *
+     * @since 2.9.9
+     *
+     * @param string $pattern Candidate pattern.
+     * @return bool
+     */
+    public static function is_valid_pattern( $pattern ) {
+        $pattern = trim( (string) $pattern );
+
+        if ( '' === $pattern ) {
+            return false;
+        }
+
+        // Exact address, IPv4 or IPv6.
+        if ( filter_var( $pattern, FILTER_VALIDATE_IP ) ) {
+            return true;
+        }
+
+        // CIDR range: same criterion cidr_match() applies, family included.
+        if ( false !== strpos( $pattern, '/' ) ) {
+            $parts = explode( '/', $pattern, 2 );
+            if ( 2 !== count( $parts ) ) {
+                return false;
+            }
+
+            $subnet = trim( $parts[0] );
+            $bits   = trim( $parts[1] );
+
+            if ( '' === $bits || ! ctype_digit( $bits ) ) {
+                return false;
+            }
+
+            if ( ! filter_var( $subnet, FILTER_VALIDATE_IP ) ) {
+                return false;
+            }
+
+            $packed = inet_pton( $subnet );
+            if ( false === $packed ) {
+                return false;
+            }
+
+            return ( (int) $bits <= strlen( $packed ) * 8 );
+        }
+
+        // Wildcard: what is left once the asterisks are gone has to be a
+        // plausible prefix, of one family only.
+        if ( false !== strpos( $pattern, '*' ) ) {
+            return self::is_valid_wildcard( $pattern );
+        }
+
+        return false;
+    }
+
+    /**
+     * Split a list into the patterns that can match and the ones that cannot.
+     *
+     * @since 2.9.9
+     *
+     * @param array|string $list List of patterns, or a newline separated string.
+     * @return array{valid: string[], rejected: string[]}
+     */
+    public static function split_list( $list ) {
+        if ( is_string( $list ) ) {
+            $list = preg_split( '/[\r\n]+/', $list );
+        }
+
+        $valid    = array();
+        $rejected = array();
+
+        foreach ( (array) $list as $entry ) {
+            $entry = trim( (string) $entry );
+
+            if ( '' === $entry ) {
+                continue;
+            }
+
+            if ( self::is_valid_pattern( $entry ) ) {
+                $valid[] = $entry;
+            } else {
+                $rejected[] = $entry;
+            }
+        }
+
+        return array(
+            'valid'    => array_values( array_unique( $valid ) ),
+            'rejected' => array_values( array_unique( $rejected ) ),
+        );
+    }
+
+    /**
+     * Whether a wildcard pattern is plausible for one address family.
+     *
+     * A bare '*' is rejected on purpose: as a whitelist it would let everyone
+     * in and as a blacklist it would lock everyone out, and nobody types that
+     * meaning to.
+     *
+     * @since 2.9.9
+     *
+     * @param string $pattern Wildcard pattern.
+     * @return bool
+     */
+    private static function is_valid_wildcard( $pattern ) {
+        $bare = str_replace( '*', '', $pattern );
+
+        if ( '' === $bare || '.' === $bare || ':' === $bare ) {
+            return false;
+        }
+
+        // IPv6 when there is a colon, IPv4 otherwise. The two never mix.
+        if ( false !== strpos( $pattern, ':' ) ) {
+            if ( ! preg_match( '/^[0-9A-Fa-f:*]+$/', $pattern ) ) {
+                return false;
+            }
+
+            $groups = explode( ':', $pattern );
+            if ( count( $groups ) > 8 ) {
+                return false;
+            }
+
+            foreach ( $groups as $group ) {
+                if ( '' === $group || '*' === $group ) {
+                    continue;
+                }
+                if ( ! preg_match( '/^[0-9A-Fa-f]{1,4}\*?$/', $group ) ) {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        if ( ! preg_match( '/^[0-9.*]+$/', $pattern ) ) {
+            return false;
+        }
+
+        $octets = explode( '.', $pattern );
+        if ( count( $octets ) > 4 ) {
+            return false;
+        }
+
+        foreach ( $octets as $octet ) {
+            if ( '' === $octet || '*' === $octet ) {
+                continue;
+            }
+            // A partial octet such as 2* is a prefix, so it is not range checked.
+            if ( ! preg_match( '/^[0-9]{1,3}\*?$/', $octet ) ) {
+                return false;
+            }
+            if ( '*' !== substr( $octet, -1 ) && (int) $octet > 255 ) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
      * Match an IP against a CIDR range. Works for IPv4 and IPv6.
      *
      * The comparison is done on the packed binary form, so the textual

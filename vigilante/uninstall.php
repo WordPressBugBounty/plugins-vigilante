@@ -30,6 +30,33 @@ if ( ! defined( 'VIGILANTE_BACKUP_DIR' ) ) {
 function vigilante_uninstall() {
     global $wpdb;
 
+    /*
+     * The scheduled events go first. WordPress can spawn wp-cron in the middle
+     * of an uninstall, and that loopback request runs in its own process with
+     * the plugin still on disk: clearing the events before anything else means
+     * it finds nothing to run.
+     */
+    // Clear scheduled hooks
+    $hooks_to_clear = array(
+        'vigilante_daily_maintenance',
+        'vigilante_hourly_check',
+        'vigilante_hourly_checks',
+        'vigilante_file_integrity_scan',
+        'vigilante_cleanup_logs',
+        'vigilante_password_expiry_reminder',
+        'vigilante_analyzer_weekly_scan',
+        'vigilante_under_attack_post_scan',
+        'vigilante_plugin_status_check',
+    );
+
+    foreach ( $hooks_to_clear as $hook ) {
+        wp_clear_scheduled_hook( $hook );
+    }
+
+    // Post-update verification events are scheduled with per-update arguments,
+    // so clear every instance regardless of args.
+    wp_unschedule_hook( 'vigilante_fi_postupdate_verify' );
+
     // Drop custom tables
     $tables = array(
         $wpdb->prefix . 'vigilante_activity_log',
@@ -65,6 +92,10 @@ function vigilante_uninstall() {
         'vigilante_legacy_backups_cleaned',
         'vigilante_css_exclusion_migrated',
         'vigilante_checksum_cache_flushed_290',
+        'vigilante_server_software',
+        'vigilante_server_files_version',
+        'vigilante_server_files_pending',
+        'vigilante_server_files_retry_after',
         // Safety copies taken before writing to the site's configuration files.
         // The wp-config.php one holds the database credentials and the
         // authentication salts, so leaving it behind would keep them readable in
@@ -73,6 +104,7 @@ function vigilante_uninstall() {
         'vigilante_wpconfig_backup',
         'vigilante_plugin_status_state',
         'vigilante_plugin_status_last_check',
+        'vigilante_ignored_closed_plugins',
     );
 
     foreach ( $options_to_delete as $option ) {
@@ -100,8 +132,40 @@ function vigilante_uninstall() {
         vigilante_recursive_rmdir( $backup_dir );
     }
 
-    // Clear scheduled hooks
-    $hooks_to_clear = array(
+
+    // Delete all user meta with vigilante_ prefix
+    // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
+    $wpdb->query(
+        "DELETE FROM {$wpdb->usermeta} WHERE meta_key LIKE 'vigilante\_%'"
+    );
+
+    /*
+     * The plugin is still loaded in the request that runs this file, so
+     * whatever it does later, on shutdown or on a late hook, writes its data
+     * back after the cleanup above has finished. Measured on 22 aug 2026: an
+     * uninstall left 112 rows of plugin status transients and its last check
+     * timestamp behind, all of them written after this file had run. So the
+     * sweep is repeated at the very end of the request.
+     */
+    add_action( 'shutdown', 'vigilante_uninstall_final_sweep', PHP_INT_MAX );
+}
+
+/**
+ * Second pass at the end of the request, for anything written after the first one
+ *
+ * Deliberately not a blunt "vigilante%" wildcard: other plugins live under that
+ * name too, the network sync companion among them, and deleting their options
+ * from here would be a fine way to break somebody else's site.
+ *
+ * @since 2.9.9
+ */
+function vigilante_uninstall_final_sweep() {
+    global $wpdb;
+
+    // The scheduled events go too: they are rescheduled by the plugin that is
+    // still loaded in this request, which is how vigilante_plugin_status_check
+    // survived an uninstall until 2.9.9.
+    $hooks = array(
         'vigilante_daily_maintenance',
         'vigilante_hourly_check',
         'vigilante_hourly_checks',
@@ -110,20 +174,34 @@ function vigilante_uninstall() {
         'vigilante_password_expiry_reminder',
         'vigilante_analyzer_weekly_scan',
         'vigilante_under_attack_post_scan',
+        'vigilante_plugin_status_check',
+        'vigilante_fi_postupdate_verify',
     );
 
-    foreach ( $hooks_to_clear as $hook ) {
-        wp_clear_scheduled_hook( $hook );
+    foreach ( $hooks as $hook ) {
+        wp_unschedule_hook( $hook );
     }
 
-    // Post-update verification events are scheduled with per-update arguments,
-    // so clear every instance regardless of args.
-    wp_unschedule_hook( 'vigilante_fi_postupdate_verify' );
-
-    // Delete all user meta with vigilante_ prefix
     // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
     $wpdb->query(
-        "DELETE FROM {$wpdb->usermeta} WHERE meta_key LIKE 'vigilante\_%'"
+        "DELETE FROM {$wpdb->options}
+        WHERE option_name LIKE '_transient_vigilante\_%'
+        OR option_name LIKE '_transient_timeout_vigilante\_%'
+        OR option_name LIKE 'vigilante_plugin_status\_%'
+        OR option_name LIKE 'vigilante_backup_info\_%'
+        OR option_name IN (
+            'vigilante_options',
+            'vigilante_db_version',
+            'vigilante_ignored_closed_plugins',
+            'vigilante_ignored_files',
+            'vigilante_dismissed_notices',
+            'vigilante_under_attack_mode',
+            'vigilante_active_preset',
+            'vigilante_server_software',
+            'vigilante_server_files_version',
+            'vigilante_server_files_pending',
+            'vigilante_server_files_retry_after'
+        )"
     );
 }
 
