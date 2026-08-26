@@ -1377,6 +1377,37 @@ class Vigilante_Login_Security {
             return;
         }
 
+        /*
+         * Last, and only for a request that was about to be turned away: whether
+         * anybody is actually there.
+         *
+         * A remote manager signs its own call with a token and asks for the
+         * dashboard before holding any cookie; its connector resolves the user
+         * through determine_current_user and only then, on 'init', sets the
+         * cookie and redirects. Turning the request away here, three hooks
+         * earlier, means the connector never reaches the point where it would
+         * have logged itself in, so it reads the 404 as a site that is broken
+         * and retries the whole job. Observed in the wild with
+         * ModularConnector/3.2.1, whose every request landed here.
+         *
+         * Which is also why this went unnoticed for two releases: a connector
+         * that already holds a cookie by the time it asks for the dashboard
+         * leaves at has_session_cookie() above and never reaches this line. How
+         * many connectors work that way is not something to guess at here; what
+         * is certain is that reports only came from sites where one did not.
+         *
+         * The criterion is the one block_wp_admin_access() has always applied,
+         * brought to the door 2.9.9 put in front of it. It costs nothing on the
+         * ordinary request, which left long before reaching this line, and
+         * nothing on the database either: with no cookie to validate, the three
+         * core determine_current_user callbacks all decline without a query. The
+         * rejection below already pays for an INSERT into the activity log, and
+         * resolves this very same user one step later to record who was refused.
+         */
+        if ( get_current_user_id() ) {
+            return;
+        }
+
         self::log_early_hidden_admin_attempt();
 
         status_header( 404 );

@@ -1968,6 +1968,7 @@
                     ip: log.ip_address || '',
                     user_agent: log.user_agent || '',
                     request_method: log.request_method || '',
+                    request_uri: log.request_uri || '',
                     date: log.created_at || '',
                     severity: log.severity || 'info',
                     is_ip_whitelisted: !!log.is_ip_whitelisted,
@@ -2606,6 +2607,9 @@
             html += '<tr><th>' + this.escapeHtml(s.logAction || 'Action') + '</th><td>' + this.escapeHtml(details.action || '-') + '</td></tr>';
             html += '<tr><th>' + this.escapeHtml(s.logSeverity || 'Severity') + '</th><td><span class="vigilante-badge vigilante-badge-' + this.escapeHtml(details.severity || 'info') + '">' + this.escapeHtml(details.severity || 'info') + '</span></td></tr>';
             html += '<tr><th>' + this.escapeHtml(s.logMessage || 'Message') + '</th><td>' + this.escapeHtml(details.message) + '</td></tr>';
+            if (details.request_uri) {
+                html += '<tr><th>' + this.escapeHtml(s.logRequestUri || 'Address') + '</th><td class="vigilante-ua-cell"><code>' + this.escapeHtml(details.request_uri) + '</code></td></tr>';
+            }
             html += '</table>';
             html += '</div>';
 

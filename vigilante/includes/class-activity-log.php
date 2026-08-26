@@ -922,6 +922,40 @@ class Vigilante_Activity_Log {
     }
 
     /**
+     * The address a logged event was recorded for, when the event carries one
+     *
+     * Every blocking module stores the request it turned away under
+     * 'request_uri' in the entry's extra data, but nothing ever showed it. The
+     * address is what tells a firewall hit on a legitimate page apart from a
+     * scanner probe, and a remote manager being refused apart from an intruder,
+     * so an owner looking at a surprising entry had no way to tell which one
+     * they were reading.
+     *
+     * @since 2.10.2
+     *
+     * @param string|array|null $extra_data The entry's extra data, as stored.
+     * @return string The recorded address, or '' when the entry carries none.
+     */
+    public static function extract_request_uri( $extra_data ) {
+        if ( is_string( $extra_data ) ) {
+            $extra_data = json_decode( $extra_data, true );
+        }
+
+        if ( ! is_array( $extra_data ) || ! isset( $extra_data['request_uri'] ) ) {
+            return '';
+        }
+
+        // Nothing writes anything but a string here, but the value comes back
+        // from a longtext column that any past version could have filled, and
+        // casting an array would emit a notice and print the word "Array".
+        if ( ! is_scalar( $extra_data['request_uri'] ) ) {
+            return '';
+        }
+
+        return (string) $extra_data['request_uri'];
+    }
+
+    /**
      * Cleanup old logs based on retention settings (uses fresh options)
      */
     public function cleanup_old_logs() {

@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.10.1
+Stable tag: 2.10.2
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -411,6 +411,10 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 2.10.2 =
+* Improved: the activity log now shows the address of each recorded request. Every blocking module already stored it, and nothing ever displayed it, so an owner reading a surprising entry had no way to tell a firewall hit on a legitimate page from a scanner probe, or a remote manager being refused from an intruder. It appears in the Address row of the entry details, right below the message, on the entries that carry one.
+* Fix: a remote manager reaches the dashboard again when the login URL is hidden. The fast path added in 2.9.9 decided a request was anonymous by looking only for a session cookie, and a connector that signs its own calls with a token holds no cookie yet when it asks for the dashboard: it resolves the user first and sets the cookie a few hooks later. Refused before it got there, it never reached the point where it would have logged itself in, read the 404 as a broken site and retried the whole job, which is why the same plugin update could be recorded three and four times over. Adding the manager addresses to the IP whitelist did not help, because those requests do not arrive from them. A request that is about to be refused is now checked for a user first, the same criterion the rest of the plugin has always applied, so an anonymous visitor still gets the same 404 as before. Whether a site saw this at all came down to its connector: one that already holds a session cookie by the time it asks for the dashboard left this path long before reaching the refusal.
+
 = 2.10.1 =
 * Fix: on a multisite network the .htaccess is refreshed after an update again, and the header settings recovery added in 2.10.0 can finally do its job there. Vigilant was demanding a network administrator capability before rewriting its own block, but that rewrite runs on every request, so on a network it was nearly always a visitor with no capabilities: the job was marked as done without a single line being written. No network had its .htaccess refreshed after any update since 2.9.9, and in 2.10.0 the one-time copy of the file that feeds the recovery was used up without ever being taken, so not even a network administrator visiting afterwards retried. Because nothing had been written, those files still describe the configuration their owner chose, so this release takes that copy after all. Props to calzbert.
 
@@ -425,8 +429,8 @@ For older changelog entries, please check the [changelog.txt](https://plugins.sv
 
 == Upgrade Notice ==
 
-= 2.10.1 =
-Fixes multisite: the htaccess was never refreshed after an update, and the settings recovery added in 2.10.0 could not run there. Networks that already updated are covered, because nothing had been written and their file still holds the real configuration.
+= 2.10.2 =
+Fixes a 404 that kept a remote manager from reaching the dashboard when the login URL is hidden, if its connector signs in with a token rather than a session cookie. Update if you manage the site with one and use a custom login address.
 
 == Support ==
 

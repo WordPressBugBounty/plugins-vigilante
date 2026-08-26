@@ -244,6 +244,7 @@ trait Vigilante_Admin_Ajax {
             $log->is_ip_blacklisted = ( '' !== $ip_val && in_array( $ip_val, $ip_blacklist, true ) );
             $log->is_ua_whitelisted = ( '' !== $ua_val && in_array( $ua_val, $ua_whitelist, true ) );
             $log->is_ua_blacklisted = ( '' !== $ua_val && in_array( $ua_val, $ua_blacklist, true ) );
+            $log->request_uri       = Vigilante_Activity_Log::extract_request_uri( $log->extra_data ?? '' );
         }
 
         wp_send_json_success( array(
