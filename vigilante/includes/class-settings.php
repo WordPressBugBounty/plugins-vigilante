@@ -684,6 +684,26 @@ class Vigilante_Settings {
      *
      * @return bool
      */
+    /**
+     * Whether this site is the one that owns the files a network shares.
+     *
+     * Pure site identity, with no capability in it, and that is the point. A
+     * refresh that Vigilant performs by itself, such as rewriting its own
+     * .htaccess block after an update, decides nothing: the content comes from
+     * this site's own options whoever happens to be visiting. What must not
+     * happen is a *different* site writing the shared file, and that is exactly
+     * what this answers.
+     *
+     * can_write_shared_files() below adds the capability on top, and is the
+     * right question for anything a person initiates from a settings screen.
+     *
+     * @since 2.10.1
+     * @return bool
+     */
+    public static function owns_shared_files() {
+        return ! is_multisite() || is_main_site();
+    }
+
     public static function can_write_shared_files() {
         if ( ! is_multisite() ) {
             return true;

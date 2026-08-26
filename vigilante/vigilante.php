@@ -3,7 +3,7 @@
  * Plugin Name: Vigilant - 100% Free Security Suite: Firewall, 2FA, Login, Headers, Scanner…
  * Plugin URI: https://servicios.ayudawp.com
  * Description: Complete security solution for WordPress. Firewall, 2FA, security headers, login protection, file integrity monitoring, activity logging and more.
- * Version: 2.10.0
+ * Version: 2.10.1
  * Author: Fernando Tellado
  * Author URI: https://ayudawp.com
  * Text Domain: vigilante
@@ -24,7 +24,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Plugin constants
  */
-define( 'VIGILANTE_VERSION', '2.10.0' );
+define( 'VIGILANTE_VERSION', '2.10.1' );
 define( 'VIGILANTE_PLUGIN_FILE', __FILE__ );
 define( 'VIGILANTE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'VIGILANTE_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -453,8 +453,21 @@ final class Vigilante_Main {
             return;
         }
 
-        // In a network the file belongs to every site, and the main site writes it.
-        if ( ! Vigilante_Settings::can_write_shared_files() ) {
+        /*
+         * A subsite has nothing to do here, ever: the file belongs to the main
+         * site. Marking it done keeps every request from re-checking.
+         *
+         * 2.10.0 asked the wrong question at this point and it cost the whole
+         * feature on networks. can_write_shared_files() ends in a capability
+         * check, and this runs on init for every request, so on a network the
+         * branch below was the one nearly every visitor took: it retired the job
+         * without having written a thing. The .htaccess was never refreshed after
+         * an update, and the one-shot snapshot behind it was consumed without
+         * being taken, so not even a network administrator visiting afterwards
+         * retried, because the version had already been marked. Reported by
+         * calzbert, who found it reading the code.
+         */
+        if ( ! Vigilante_Settings::owns_shared_files() ) {
             $this->mark_server_files_synced();
             return;
         }
@@ -498,7 +511,20 @@ final class Vigilante_Main {
          * the block contains, from reading its own improvement as damage and
          * offering to undo it.
          */
-        if ( '' === $wrote_last || version_compare( $wrote_last, '2.10.0', '<' ) ) {
+        /*
+         * 2.10.1 and not 2.10.0, deliberately: it gives the networks a second
+         * chance. On a network 2.10.0 marked this done without writing anything,
+         * so the window closed with the snapshot untaken. But nothing was
+         * written, which means the .htaccess on those sites still describes the
+         * configuration its owner actually chose. Reopening the window one
+         * version wide is what lets them be recovered after all.
+         *
+         * Harmless where it already worked: a site that took a snapshot is
+         * skipped because one exists, and a site that found nothing to take has
+         * had its file rewritten to match its settings, so there is still no
+         * difference to find.
+         */
+        if ( '' === $wrote_last || version_compare( $wrote_last, '2.10.1', '<' ) ) {
             require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-recovery.php';
             Vigilante_Htaccess_Recovery::maybe_capture( $manager->get_content(), $this->settings );
         }
@@ -518,7 +544,7 @@ final class Vigilante_Main {
 
         if ( $needs_protection_block ) {
             require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-protection.php';
-            $result  = ( new Vigilante_Htaccess_Protection( $this->settings ) )->apply_rules();
+            $result  = ( new Vigilante_Htaccess_Protection( $this->settings ) )->apply_rules( true );
             $locked  = $locked || ( is_wp_error( $result ) && 'locked' === $result->get_error_code() );
             $failed  = $failed || ( is_wp_error( $result ) && 'locked' !== $result->get_error_code() );
             $rewrote = true;
@@ -526,7 +552,7 @@ final class Vigilante_Main {
 
         if ( ! $locked && ! empty( $options['modules']['security_headers'] ) ) {
             require_once VIGILANTE_INCLUDES_DIR . 'class-security-headers.php';
-            $result  = ( new Vigilante_Security_Headers( $this->settings ) )->apply_rules();
+            $result  = ( new Vigilante_Security_Headers( $this->settings ) )->apply_rules( true );
             $locked  = $locked || ( is_wp_error( $result ) && 'locked' === $result->get_error_code() );
             $failed  = $failed || ( is_wp_error( $result ) && 'locked' !== $result->get_error_code() );
             $rewrote = true;

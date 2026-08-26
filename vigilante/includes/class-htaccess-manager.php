@@ -103,10 +103,26 @@ class Vigilante_Htaccess_Manager {
      * @param string $position     Where to add: 'top' or 'before_wordpress'.
      * @return bool|WP_Error
      */
-    public function add_block( $marker_start, $marker_end, $rules, $position = 'top' ) {
-        // On a network the root .htaccess is shared by every site, so only the
-        // main site writes it. See Vigilante_Settings::can_write_shared_files().
-        if ( ! Vigilante_Settings::can_write_shared_files() ) {
+    public function add_block( $marker_start, $marker_end, $rules, $position = 'top', $automatic = false ) {
+        /*
+         * On a network the root .htaccess is shared by every site, so only the
+         * main site writes it.
+         *
+         * Which question to ask depends on who is asking. A write a person
+         * started from a settings screen has to clear the capability too, so one
+         * site's administrator cannot overwrite what the network decided. A write
+         * Vigilant performs by itself only has to come from the right site: it
+         * makes no decision, and demanding a capability of it means demanding one
+         * of whichever visitor happened to trigger the request, which nobody has.
+         *
+         * Getting that distinction wrong is what shipped in 2.10.0, and it is why
+         * no network ever had its .htaccess refreshed after an update.
+         */
+        $allowed = $automatic
+            ? Vigilante_Settings::owns_shared_files()
+            : Vigilante_Settings::can_write_shared_files();
+
+        if ( ! $allowed ) {
             return new WP_Error( 'network_not_owner', Vigilante_Settings::get_shared_files_notice() );
         }
 

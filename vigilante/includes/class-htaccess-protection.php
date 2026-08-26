@@ -78,7 +78,12 @@ class Vigilante_Htaccess_Protection {
      *
      * @return bool|WP_Error
      */
-    public function apply_rules() {
+    /**
+     * @param bool $automatic True when Vigilant is refreshing the block by
+     *                        itself rather than because someone pressed Save.
+     *                        See Vigilante_Htaccess_Manager::add_block().
+     */
+    public function apply_rules( $automatic = false ) {
         require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-manager.php';
         
         $manager = Vigilante_Htaccess_Manager::get_instance();
@@ -96,7 +101,7 @@ class Vigilante_Htaccess_Protection {
 
         $rules = $this->generate_rules_content();
 
-        $result = $manager->add_block( self::MARKER_START, self::MARKER_END, $rules, 'before_wordpress' );
+        $result = $manager->add_block( self::MARKER_START, self::MARKER_END, $rules, 'before_wordpress', $automatic );
 
         // Regenerate critical file baseline so the integrity scan does not
         // flag our own modifications as unauthorized changes.

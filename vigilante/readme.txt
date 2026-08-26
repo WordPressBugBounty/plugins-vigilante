@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.10.0
+Stable tag: 2.10.1
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -411,6 +411,9 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 2.10.1 =
+* Fix: on a multisite network the .htaccess is refreshed after an update again, and the header settings recovery added in 2.10.0 can finally do its job there. Vigilant was demanding a network administrator capability before rewriting its own block, but that rewrite runs on every request, so on a network it was nearly always a visitor with no capabilities: the job was marked as done without a single line being written. No network had its .htaccess refreshed after any update since 2.9.9, and in 2.10.0 the one-time copy of the file that feeds the recovery was used up without ever being taken, so not even a network administrator visiting afterwards retried. Because nothing had been written, those files still describe the configuration their owner chose, so this release takes that copy after all. Props to calzbert.
+
 = 2.10.0 =
 * New: the three cross-origin policies (COOP, COEP and CORP) are now settings in the Security Headers tab. Vigilant was already sending them, with no way to see them or change them. Cross-Origin-Opener-Policy is the one that shows: it severs the window.opener link when another site opens yours in a new tab, which is what makes Google Tag Assistant, and other external tools that work the same way, report that they cannot connect. The values sent so far are kept, so nothing changes until you change it, and switching COOP off no longer costs points in Security Check. Reported by calzbert.
 * New: Vigilant offers your previous Security Headers settings back. Where the 2.9.8 migration reset that tab, the copy of the .htaccess taken before the first rewrite still describes what you had actually chosen, so the tab now reads that copy, shows you exactly what would change, and writes it back only if you say so. Only the settings are restored, never the stored file, so nothing your host, your cache plugin or your CDN had added to the .htaccess is touched, and the restore itself can be undone.
@@ -422,8 +425,8 @@ For older changelog entries, please check the [changelog.txt](https://plugins.sv
 
 == Upgrade Notice ==
 
-= 2.10.0 =
-Fixes a migration that reset the Security Headers settings, and offers the previous ones back from the copy Vigilant kept of your htaccess. Also fixes a 500 on the whole site caused by a User-Agent whitelist entry ending in a backslash.
+= 2.10.1 =
+Fixes multisite: the htaccess was never refreshed after an update, and the settings recovery added in 2.10.0 could not run there. Networks that already updated are covered, because nothing had been written and their file still holds the real configuration.
 
 == Support ==
 

@@ -54,7 +54,12 @@ class Vigilante_Security_Headers {
      *
      * @return bool|WP_Error
      */
-    public function apply_rules() {
+    /**
+     * @param bool $automatic True when Vigilant is refreshing the block by
+     *                        itself rather than because someone pressed Save.
+     *                        See Vigilante_Htaccess_Manager::add_block().
+     */
+    public function apply_rules( $automatic = false ) {
         require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-manager.php';
         
         $manager = Vigilante_Htaccess_Manager::get_instance();
@@ -69,7 +74,7 @@ class Vigilante_Security_Headers {
 
         $rules = $this->generate_rules_content();
 
-        $result = $manager->add_block( self::MARKER_START, self::MARKER_END, $rules, 'top' );
+        $result = $manager->add_block( self::MARKER_START, self::MARKER_END, $rules, 'top', $automatic );
 
         if ( true === $result ) {
             /** This action is documented in class-wpconfig-security.php */
