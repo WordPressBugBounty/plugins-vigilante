@@ -3,7 +3,7 @@
  * Plugin Name: Vigilant - 100% Free Security Suite: Firewall, 2FA, Login, Headers, Scanner…
  * Plugin URI: https://servicios.ayudawp.com
  * Description: Complete security solution for WordPress. Firewall, 2FA, security headers, login protection, file integrity monitoring, activity logging and more.
- * Version: 2.9.9
+ * Version: 2.10.0
  * Author: Fernando Tellado
  * Author URI: https://ayudawp.com
  * Text Domain: vigilante
@@ -24,7 +24,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Plugin constants
  */
-define( 'VIGILANTE_VERSION', '2.9.9' );
+define( 'VIGILANTE_VERSION', '2.10.0' );
 define( 'VIGILANTE_PLUGIN_FILE', __FILE__ );
 define( 'VIGILANTE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'VIGILANTE_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -120,6 +120,7 @@ function vigilante_load_plugin() {
     require_once VIGILANTE_INCLUDES_DIR . 'class-firewall.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-security-headers.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-protection.php';
+    require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-recovery.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-wpconfig-security.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-https-enforcer.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-rest-api-security.php';
@@ -143,6 +144,7 @@ function vigilante_load_plugin() {
     // Load admin classes
     if ( is_admin() ) {
         require_once VIGILANTE_ADMIN_DIR . 'class-admin-analyzer-ajax.php';
+        require_once VIGILANTE_ADMIN_DIR . 'class-admin-recovery-ajax.php';
         require_once VIGILANTE_ADMIN_DIR . 'class-admin-audit-alerts-ajax.php';
         require_once VIGILANTE_ADMIN_DIR . 'class-admin.php';
     }
@@ -476,22 +478,62 @@ final class Vigilante_Main {
         $failed   = false;
         $rewrote  = false;
 
+        /*
+         * Last chance to keep what the file still says. The rewrites below are
+         * precisely what overwrites it, and on a site whose header settings the
+         * 2.9.8 migration reset, this file is the only remaining copy of what the
+         * owner had actually chosen. Captured here rather than inside the write
+         * path so it only ever happens on a version change: an ordinary save also
+         * leaves the file describing the previous values for an instant, and
+         * capturing there would spend the single slot on a difference the owner
+         * made deliberately.
+         */
+        $wrote_last = (string) get_option( 'vigilante_server_files_version' );
+
+        /*
+         * And only on the very first sync that arrives from a version older than
+         * this one. That is the whole window: the file still describes what the
+         * owner chose, and the rewrite below is what ends it. Gating on the
+         * version also keeps a future release, one that legitimately changes what
+         * the block contains, from reading its own improvement as damage and
+         * offering to undo it.
+         */
+        if ( '' === $wrote_last || version_compare( $wrote_last, '2.10.0', '<' ) ) {
+            require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-recovery.php';
+            Vigilante_Htaccess_Recovery::maybe_capture( $manager->get_content(), $this->settings );
+        }
+
         $needs_protection_block = ! empty( $options['modules']['firewall'] )
             || ! empty( $headers['hide_server_signature'] )
             || ! empty( $headers['remove_fingerprinting_headers'] );
 
+        /*
+         * A 'locked' result is not a failure: another request is doing this very
+         * work right now. Returning without marking anything leaves the pending
+         * state alone, so whichever request wins finishes the job and this one
+         * stays out of the way. Treating it as a failure would arm the one hour
+         * backoff for something that is already being handled.
+         */
+        $locked = false;
+
         if ( $needs_protection_block ) {
             require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-protection.php';
-            $result = ( new Vigilante_Htaccess_Protection( $this->settings ) )->apply_rules();
-            $failed = $failed || is_wp_error( $result );
+            $result  = ( new Vigilante_Htaccess_Protection( $this->settings ) )->apply_rules();
+            $locked  = $locked || ( is_wp_error( $result ) && 'locked' === $result->get_error_code() );
+            $failed  = $failed || ( is_wp_error( $result ) && 'locked' !== $result->get_error_code() );
             $rewrote = true;
         }
 
-        if ( ! empty( $options['modules']['security_headers'] ) ) {
+        if ( ! $locked && ! empty( $options['modules']['security_headers'] ) ) {
             require_once VIGILANTE_INCLUDES_DIR . 'class-security-headers.php';
-            $result = ( new Vigilante_Security_Headers( $this->settings ) )->apply_rules();
-            $failed = $failed || is_wp_error( $result );
+            $result  = ( new Vigilante_Security_Headers( $this->settings ) )->apply_rules();
+            $locked  = $locked || ( is_wp_error( $result ) && 'locked' === $result->get_error_code() );
+            $failed  = $failed || ( is_wp_error( $result ) && 'locked' !== $result->get_error_code() );
             $rewrote = true;
+        }
+
+        if ( $locked ) {
+            return;
         }
 
         if ( $failed ) {

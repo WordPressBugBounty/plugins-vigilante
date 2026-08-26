@@ -559,10 +559,23 @@ class Vigilante_Htaccess_Protection {
         foreach ( $ua_list as $ua ) {
             $ua = trim( (string) $ua );
 
-            // A double quote would break the directive syntax (500 on the
-            // whole site), and "%" is expanded by mod_rewrite. Skip those
-            // entries; the PHP firewall layer still honours them.
-            if ( '' === $ua || false !== strpos( $ua, '"' ) || false !== strpos( $ua, '%' ) || preg_match( '/[^\x20-\x7e]/', $ua ) ) {
+            /*
+             * A double quote would break the directive syntax (500 on the whole
+             * site), "%" is expanded by mod_rewrite, and a backslash is an
+             * escape character twice over: once for Apache inside a quoted
+             * argument and once for the regex engine. An entry ending in one
+             * escaped the closing quote and answered 500 for every request
+             * (reproduced from the settings screen on 25 aug 2026). None of the
+             * three can be expressed here safely, so the entry is skipped; the
+             * PHP firewall layer still honours it, which is where the matching
+             * actually has to be right.
+             */
+            if ( '' === $ua
+                || false !== strpos( $ua, '"' )
+                || false !== strpos( $ua, '%' )
+                || false !== strpos( $ua, '\\' )
+                || preg_match( '/[^\x20-\x7e]/', $ua )
+            ) {
                 continue;
             }
 

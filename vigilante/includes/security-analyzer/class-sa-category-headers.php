@@ -54,8 +54,8 @@ class Vigilante_SA_Category_Headers {
         $results[] = $this->check_x_content_type( $headers );
         $results[] = $this->check_referrer_policy( $headers );
         $results[] = $this->check_permissions_policy( $headers );
-        $results[] = $this->check_coop( $headers );
-        $results[] = $this->check_corp( $headers );
+        $results[] = $this->check_coop( $headers, $sec_hdrs );
+        $results[] = $this->check_corp( $headers, $sec_hdrs );
         $results[] = $this->check_server_signature( $headers );
 
         // If the probe failed entirely, mark all as SKIP.
@@ -244,7 +244,22 @@ class Vigilante_SA_Category_Headers {
         return Vigilante_SA_Check_Result::fail( $args );
     }
 
-    private function check_coop( $headers ) {
+    /**
+     * Cross-Origin-Opener-Policy.
+     *
+     * Switched off on purpose from the Headers tab is a legitimate configuration,
+     * not a finding: COOP severs the window.opener link when another origin opens
+     * this site, which is exactly what external tools such as Google Tag Assistant
+     * rely on. Those runs report INFO so the check stays visible without dragging
+     * the score down. WARN could not do that job: with a max of 1 it scores
+     * floor( 1 / 2 ) = 0, the very same zero as a FAIL, and the grade scale keeps
+     * "A" for a perfect 100/100.
+     *
+     * @param array $headers  Response headers from the home page probe.
+     * @param array $sec_hdrs The security_headers settings section.
+     * @return Vigilante_SA_Check_Result
+     */
+    private function check_coop( $headers, $sec_hdrs ) {
         $args = array(
             'id'       => 'coop',
             'category' => self::SLUG,
@@ -254,17 +269,34 @@ class Vigilante_SA_Category_Headers {
         );
 
         $header = $this->header_value( $headers, array( 'cross-origin-opener-policy' ) );
-        if ( $header ) {
+
+        if ( $header && 'unsafe-none' !== strtolower( trim( $header ) ) ) {
             /* translators: %s: value of the Cross-Origin-Opener-Policy HTTP header */
             $args['detail'] = sprintf( __( 'COOP: %s', 'vigilante' ), $header );
             return Vigilante_SA_Check_Result::pass( $args );
+        }
+
+        // No header at all, or an explicit unsafe-none. Was that this site's choice?
+        $policies   = ( isset( $sec_hdrs['cross_origin_policies'] ) && is_array( $sec_hdrs['cross_origin_policies'] ) ) ? $sec_hdrs['cross_origin_policies'] : array();
+        $configured = isset( $policies['opener_policy'] ) ? (string) $policies['opener_policy'] : '';
+
+        if ( '' === $configured || 'unsafe-none' === $configured ) {
+            $args['detail'] = __( 'Cross-Origin-Opener-Policy is switched off in Vigilant. Windows opened by other sites keep their link to yours, which is what external tools such as Google Tag Assistant need. Not scored.', 'vigilante' );
+            return Vigilante_SA_Check_Result::info( $args );
         }
 
         $args['detail'] = __( 'Cross-Origin-Opener-Policy is missing. Recommended to isolate the browsing context.', 'vigilante' );
         return Vigilante_SA_Check_Result::fail( $args );
     }
 
-    private function check_corp( $headers ) {
+    /**
+     * Cross-Origin-Resource-Policy. Same reasoning as check_coop() for the INFO state.
+     *
+     * @param array $headers  Response headers from the home page probe.
+     * @param array $sec_hdrs The security_headers settings section.
+     * @return Vigilante_SA_Check_Result
+     */
+    private function check_corp( $headers, $sec_hdrs ) {
         $args = array(
             'id'       => 'corp',
             'category' => self::SLUG,
@@ -278,6 +310,14 @@ class Vigilante_SA_Category_Headers {
             /* translators: %s: value of the Cross-Origin-Resource-Policy HTTP header */
             $args['detail'] = sprintf( __( 'CORP: %s', 'vigilante' ), $header );
             return Vigilante_SA_Check_Result::pass( $args );
+        }
+
+        $policies   = ( isset( $sec_hdrs['cross_origin_policies'] ) && is_array( $sec_hdrs['cross_origin_policies'] ) ) ? $sec_hdrs['cross_origin_policies'] : array();
+        $configured = isset( $policies['resource_policy'] ) ? (string) $policies['resource_policy'] : '';
+
+        if ( '' === $configured ) {
+            $args['detail'] = __( 'Cross-Origin-Resource-Policy is switched off in Vigilant, so other sites may load your images and files as usual. Not scored.', 'vigilante' );
+            return Vigilante_SA_Check_Result::info( $args );
         }
 
         $args['detail'] = __( 'Cross-Origin-Resource-Policy is missing. Cross-origin fetches are unrestricted.', 'vigilante' );

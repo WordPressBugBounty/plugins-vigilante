@@ -307,9 +307,12 @@ class Vigilante_Security_Headers {
     /**
      * Generate rules content (without markers)
      *
+     * Public since 2.10.0: it is also "what this configuration would write right
+     * now", which is what Vigilante_Htaccess_Recovery compares the file against.
+     *
      * @return string
      */
-    private function generate_rules_content() {
+    public function generate_rules_content() {
         $rules = array();
         
         $rules[] = '# Vigilante - Security Headers';
@@ -466,20 +469,35 @@ class Vigilante_Security_Headers {
             }
         }
 
-        // Cross-Origin policies
+        /*
+         * Cross-Origin policies.
+         *
+         * Allow-listed rather than escaped, for the same reason sanitize_header_value()
+         * runs at generation time: these three became editable in 2.10.0 and their value
+         * is written verbatim inside a Header directive. Only the tokens the specs define
+         * are ever emitted, so an unexpected value (a crafted request, an imported
+         * settings file, a direct write to the option) drops the header instead of
+         * reaching the .htaccess.
+         *
+         * COEP deliberately omits unsafe-none: it is the browser default, so emitting it
+         * adds nothing. That was the behaviour before this list existed and it is kept.
+         */
         if ( ! empty( $this->options['cross_origin_policies'] ) ) {
             $policies = $this->options['cross_origin_policies'];
 
-            if ( ! empty( $policies['embedder_policy'] ) && 'unsafe-none' !== $policies['embedder_policy'] ) {
-                $rules[] = '    Header always set Cross-Origin-Embedder-Policy "' . $this->sanitize_header_value( $policies['embedder_policy'] ) . '"';
+            $coep = isset( $policies['embedder_policy'] ) ? (string) $policies['embedder_policy'] : '';
+            if ( in_array( $coep, array( 'require-corp', 'credentialless' ), true ) ) {
+                $rules[] = '    Header always set Cross-Origin-Embedder-Policy "' . $coep . '"';
             }
 
-            if ( ! empty( $policies['opener_policy'] ) ) {
-                $rules[] = '    Header always set Cross-Origin-Opener-Policy "' . $this->sanitize_header_value( $policies['opener_policy'] ) . '"';
+            $coop = isset( $policies['opener_policy'] ) ? (string) $policies['opener_policy'] : '';
+            if ( in_array( $coop, array( 'unsafe-none', 'same-origin-allow-popups', 'same-origin' ), true ) ) {
+                $rules[] = '    Header always set Cross-Origin-Opener-Policy "' . $coop . '"';
             }
 
-            if ( ! empty( $policies['resource_policy'] ) ) {
-                $rules[] = '    Header always set Cross-Origin-Resource-Policy "' . $this->sanitize_header_value( $policies['resource_policy'] ) . '"';
+            $corp = isset( $policies['resource_policy'] ) ? (string) $policies['resource_policy'] : '';
+            if ( in_array( $corp, array( 'same-site', 'same-origin', 'cross-origin' ), true ) ) {
+                $rules[] = '    Header always set Cross-Origin-Resource-Policy "' . $corp . '"';
             }
         }
 
@@ -490,41 +508,6 @@ class Vigilante_Security_Headers {
         $rules[] = '</IfModule>';
 
         return implode( "\n", $rules );
-    }
-
-    /**
-     * Get headers preview
-     *
-     * @return array
-     */
-    public function get_headers_preview() {
-        $headers = array();
-
-        if ( ! empty( $this->options['x_frame_options'] ) ) {
-            $headers['X-Frame-Options'] = $this->options['x_frame_options'];
-        }
-
-        if ( ! empty( $this->options['x_content_type_options'] ) ) {
-            $headers['X-Content-Type-Options'] = 'nosniff';
-        }
-
-        if ( ! empty( $this->options['referrer_policy'] ) ) {
-            $headers['Referrer-Policy'] = $this->options['referrer_policy'];
-        }
-
-        if ( ! empty( $this->options['hsts']['enabled'] ) ) {
-            $hsts = $this->options['hsts'];
-            $value = 'max-age=' . absint( $hsts['max_age'] );
-            if ( ! empty( $hsts['include_subdomains'] ) ) {
-                $value .= '; includeSubDomains';
-            }
-            if ( ! empty( $hsts['preload'] ) ) {
-                $value .= '; preload';
-            }
-            $headers['Strict-Transport-Security'] = $value;
-        }
-
-        return $headers;
     }
 
     /**

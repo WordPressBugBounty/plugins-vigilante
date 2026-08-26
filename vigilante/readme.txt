@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.9.9
+Stable tag: 2.10.0
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -411,34 +411,19 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
-= 2.9.9 =
-* Improved: an extension exclusion in File Integrity can be scoped to a folder, written as wp-content/languages/*.json, instead of switching a file type off everywhere.
-* Improved: a vigilante_is_apache filter, for sites deployed entirely from the command line.
-* Improved: the .htaccess rules are rewritten after the plugin updates. They were only written on activation or when the Headers or Firewall tab was saved, so a fix living inside those rules never reached a site that merely updated, as happened with the connect-src of 2.9.6 and image uploads on WordPress 7.1. If the file cannot be written it is left alone, the activity log says so, and it is retried in an hour.
-* Improved: a request to the hidden wp-admin from someone who is not logged in is turned away before the theme and the other plugins load, instead of paying for the whole boot to be refused at the end. Only a GET with no session cookie takes the short path, so logins that arrive by token, JWT or single sign on are untouched.
-* Improved: the settings search sorts by relevance before cutting the list, and says how many results did not fit.
-* Improved: the IP boxes no longer accept entries that can never match. What Vigilant matches is kept, exact addresses, CIDR ranges and wildcards for IPv4 and IPv6, and anything else is named back to you when you save instead of being stored in silence.
-* Improved: every field in the settings screens is tied to its label, so a screen reader announces what is being edited and clicking the label focuses the field.
-* Improved: the Security Check tells you when the Content-Security-Policy reaching the browser comes from a Vigilant block in a directory above the site, which is what a WordPress in a subfolder can be receiving without its own screen knowing.
-* Fix: disabling XML-RPC completely no longer breaks xmlrpc.php with a PHP fatal error. It named a class that does not exist, so the endpoint answered 500 with an empty body and wrote a fatal to the log on every hit. It is now answered with a plain 403. Reported by freelancesgroup.
-* Fix: adding an IP to the firewall whitelist no longer exposes the login form when the login URL is hidden, nor hands the secret address over in a redirect. The exemption stays where it was meant to be, wp-admin, so remote managers keep working. Reported by pepelopex.
-* Fix: in Under Attack mode the IP whitelist matches ranges and wildcards, as it does everywhere else.
-* Fix: the firewall no longer blocks a request because it carries a link back to the site itself, which was answering login links, checkout returns and payment callbacks with a 403 for visitors who are not logged in. It also reads the parameters WordPress has already decoded, so an encoded payload no longer slips past.
-* Fix: the firewall was inspecting a mangled copy of the request, so an attack sent url encoded went through untouched: a script tag, a javascript: protocol, a php:// wrapper or a GLOBALS[ manipulation were all answered with a 200 when written url encoded. It now reads the request as it arrived and its decoded form.
-* Fix: a parameter whose name starts with on no longer triggers the event handler rule. Requests such as ?only=1, ?once=abc, ?online=1 or ?onboarding=true were answered with a 403 on every site with the firewall on, and only visitors saw it.
-* Fix: activating the plugin with WP-CLI writes the server rules. There is no request to detect Apache from on the command line, so every .htaccess write was refused without a word and the site was left with no server layer while the switches showed as on.
-* Fix: File Integrity no longer reports translation files as modified when the only thing that changed is the manifest that WordPress.org rebuilds with every language pack.
-* Fix: the File Integrity exclusions no longer cover more than they say. Excluding cache also stopped watching a plugin folder called mycache. A path now excludes that path and what is under it, and a bare name excludes any folder called exactly that.
-* Fix: uninstalling the plugin no longer leaves anything behind. The plugin is still loaded in the request that deletes it, so what it wrote after the cleanup had run stayed in the database: plugin status transients, its rescheduled daily check, and the list of plugins you had told it to ignore, which was never on the cleanup list. The cleanup now runs a second pass at the end of that request.
-* Fix: the number of configuration backups kept is read from the setting again.
-* Fix: around three hundred lines of code that no longer ran are gone, along with eleven settings that nothing read, which are also cleared from configurations already saved.
+= 2.10.0 =
+* New: the three cross-origin policies (COOP, COEP and CORP) are now settings in the Security Headers tab. Vigilant was already sending them, with no way to see them or change them. Cross-Origin-Opener-Policy is the one that shows: it severs the window.opener link when another site opens yours in a new tab, which is what makes Google Tag Assistant, and other external tools that work the same way, report that they cannot connect. The values sent so far are kept, so nothing changes until you change it, and switching COOP off no longer costs points in Security Check. Reported by calzbert.
+* New: Vigilant offers your previous Security Headers settings back. Where the 2.9.8 migration reset that tab, the copy of the .htaccess taken before the first rewrite still describes what you had actually chosen, so the tab now reads that copy, shows you exactly what would change, and writes it back only if you say so. Only the settings are restored, never the stored file, so nothing your host, your cache plugin or your CDN had added to the .htaccess is touched, and the restore itself can be undone.
+* Improved: the .htaccess is now verified after being written, not merely written. If what lands on disk does not read back as valid, or is missing the block just added, the previous content is put back rather than leaving the site with a file the server cannot use. The last five versions of the file are kept as well, and only one process may write it at a time.
+* Fix: a User-Agent whitelist entry ending in a backslash no longer takes the whole site down. The block was being inserted through a function that reads backslashes and $1 as syntax, so it ate the escaping that had just been applied: the entry reached the file with its backslash escaping the closing quote of the directive, and Apache answered 500 to every visitor. Entries carrying a backslash are now skipped, the block is inserted verbatim, and a file with unbalanced quotes or an unclosed container is refused before it can be written.
+* Fix: updating from 2.9.7 or earlier no longer wipes the Security Headers settings. The 2.9.8 migration replaced that whole section instead of merging into it, so HSTS, the Content Security Policy, the cross-origin policies, the HTTPS switches and Server Identity all went back to factory values while the .htaccess kept serving the old ones, leaving the screen and the server saying different things. Reported by calzbert.
 
 For older changelog entries, please check the [changelog.txt](https://plugins.svn.wordpress.org/vigilante/trunk/changelog.txt) file
 
 == Upgrade Notice ==
 
-= 2.9.9 =
-Fixes a PHP fatal when XML-RPC is disabled completely: the endpoint answered 500 and logged a fatal on every hit. Also fixes a firewall false positive blocking legitimate links, an IP whitelist that exposed the hidden login, and htaccess rules not refreshed after an update.
+= 2.10.0 =
+Fixes a migration that reset the Security Headers settings, and offers the previous ones back from the copy Vigilant kept of your htaccess. Also fixes a 500 on the whole site caused by a User-Agent whitelist entry ending in a backslash.
 
 == Support ==
 

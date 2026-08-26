@@ -28,6 +28,7 @@ class Vigilante_Admin {
     use Vigilante_Admin_Ajax;
     use Vigilante_Admin_Analyzer_Ajax;
     use Vigilante_Admin_Audit_Alerts_Ajax;
+    use Vigilante_Admin_Recovery_Ajax;
 
     /**
      * Settings instance
@@ -182,6 +183,11 @@ class Vigilante_Admin {
         add_action( 'wp_ajax_vigilante_analyzer_history', array( $this, 'ajax_analyzer_history' ) );
         add_action( 'wp_ajax_vigilante_analyzer_dismiss_notice', array( $this, 'ajax_analyzer_dismiss_notice' ) );
         add_action( 'wp_ajax_vigilante_analyzer_save_settings', array( $this, 'ajax_analyzer_save_settings' ) );
+
+        // Security Headers settings recovery (2.10.0)
+        add_action( 'wp_ajax_vigilante_headers_recovery_restore', array( $this, 'ajax_headers_recovery_restore' ) );
+        add_action( 'wp_ajax_vigilante_headers_recovery_undo', array( $this, 'ajax_headers_recovery_undo' ) );
+        add_action( 'wp_ajax_vigilante_headers_recovery_dismiss', array( $this, 'ajax_headers_recovery_dismiss' ) );
 
         // Shared "Send test email" handler — Notification settings, File Integrity, Audit Alerts (v2.8.0)
         add_action( 'wp_ajax_vigilante_send_test_email', array( $this, 'ajax_send_test_email' ) );
@@ -362,11 +368,21 @@ class Vigilante_Admin {
             $stored  = ( is_array( $raw ) && isset( $raw['security_headers'] ) && is_array( $raw['security_headers'] ) ) ? $raw['security_headers'] : array();
             $had_fix = array_key_exists( 'fix_mixed_content', $stored ) ? ! empty( $stored['fix_mixed_content'] ) : true;
 
+            /*
+             * Merge, never replace. update_section() overwrites the whole
+             * section, so passing just these two keys wiped every other header
+             * setting the site had stored (HSTS, CSP, cross-origin policies,
+             * the HTTPS switches, Server Identity) and left the screen showing
+             * factory defaults while the .htaccess kept serving the old values.
+             */
             $this->settings->update_section(
                 'security_headers',
-                array(
-                    'fix_mixed_content'         => $had_fix,
-                    'upgrade_insecure_requests' => $had_fix,
+                array_merge(
+                    $stored,
+                    array(
+                        'fix_mixed_content'         => $had_fix,
+                        'upgrade_insecure_requests' => $had_fix,
+                    )
                 )
             );
 
@@ -1216,6 +1232,10 @@ class Vigilante_Admin {
             array( 'tab' => 'headers', 'tab_label' => __( 'Security Headers', 'vigilante' ), 'section' => __( 'Content Security Policy', 'vigilante' ), 'anchor' => 'vigilante-section-headers-main', 'label' => __( 'Content Security Policy', 'vigilante' ), 'label_en' => 'Content Security Policy', 'keywords' => _x( 'content security policy csp xss headers', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'headers', 'tab_label' => __( 'Security Headers', 'vigilante' ), 'section' => __( 'Server Identity', 'vigilante' ), 'anchor' => 'vigilante-section-headers-main', 'label' => __( 'Server Signature', 'vigilante' ), 'label_en' => 'Server Signature', 'keywords' => _x( 'server signature fingerprint banner', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'headers', 'tab_label' => __( 'Security Headers', 'vigilante' ), 'section' => __( 'Server Identity', 'vigilante' ), 'anchor' => 'vigilante-section-headers-main', 'label' => __( 'Remove Fingerprinting Headers', 'vigilante' ), 'label_en' => 'Remove Fingerprinting Headers', 'keywords' => _x( 'remove fingerprinting headers fingerprint banner header http', 'settings search keywords', 'vigilante' ) ),
+            // Security Headers - Cross-Origin Policies
+            array( 'tab' => 'headers', 'tab_label' => __( 'Security Headers', 'vigilante' ), 'section' => __( 'Cross-Origin Policies', 'vigilante' ), 'anchor' => 'vigilante-section-headers-cross-origin', 'label' => __( 'Cross-Origin-Opener-Policy (COOP)', 'vigilante' ), 'label_en' => 'Cross-Origin-Opener-Policy (COOP)', 'keywords' => _x( 'coop cross-origin opener policy popup popups window opener tag assistant google isolation browsing context headers', 'settings search keywords', 'vigilante' ) ),
+            array( 'tab' => 'headers', 'tab_label' => __( 'Security Headers', 'vigilante' ), 'section' => __( 'Cross-Origin Policies', 'vigilante' ), 'anchor' => 'vigilante-section-headers-cross-origin', 'label' => __( 'Cross-Origin-Embedder-Policy (COEP)', 'vigilante' ), 'label_en' => 'Cross-Origin-Embedder-Policy (COEP)', 'keywords' => _x( 'coep cross-origin embedder policy require-corp credentialless embed embeds iframe fonts headers', 'settings search keywords', 'vigilante' ) ),
+            array( 'tab' => 'headers', 'tab_label' => __( 'Security Headers', 'vigilante' ), 'section' => __( 'Cross-Origin Policies', 'vigilante' ), 'anchor' => 'vigilante-section-headers-cross-origin', 'label' => __( 'Cross-Origin-Resource-Policy (CORP)', 'vigilante' ), 'label_en' => 'Cross-Origin-Resource-Policy (CORP)', 'keywords' => _x( 'corp cross-origin resource policy hotlink hotlinking cdn images assets headers', 'settings search keywords', 'vigilante' ) ),
             // Login Security
             array( 'tab' => 'login', 'tab_label' => __( 'Login Security', 'vigilante' ), 'section' => __( 'Login Protection', 'vigilante' ), 'anchor' => 'vigilante-section-login-main', 'label' => __( 'Custom login URL', 'vigilante' ), 'label_en' => 'Custom login URL', 'keywords' => _x( 'custom login url signin log-in access slug', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'login', 'tab_label' => __( 'Login Security', 'vigilante' ), 'section' => __( 'Login Protection', 'vigilante' ), 'anchor' => 'vigilante-section-login-main', 'label' => __( 'Two-Factor Authentication', 'vigilante' ), 'label_en' => 'Two-Factor Authentication', 'keywords' => _x( 'two-factor authentication 2fa mfa otp totp authenticator', 'settings search keywords', 'vigilante' ) ),
@@ -3848,6 +3868,126 @@ class Vigilante_Admin {
     /**
      * Render security headers tab
      */
+    /**
+     * Offer back the header settings the 2.9.8 migration wiped.
+     *
+     * Rendered outside the settings form on purpose, so its buttons can never
+     * submit it, and only when there is something to actually change. Shows the
+     * difference before anything is written: nothing is applied that the owner
+     * has not seen first.
+     *
+     * @since 2.10.0
+     */
+    private function render_headers_recovery_offer() {
+        /*
+         * On a network the .htaccess belongs to every site and only the main one
+         * writes it, so this is not a decision a subsite gets to make. Its own
+         * security_headers options are inert anyway: what the network serves
+         * comes from the file the main site owns. Without this gate a subsite
+         * administrator was shown a Restore button that could only ever answer
+         * with a permission error, which is worse than showing nothing.
+         */
+        if ( ! Vigilante_Settings::can_write_shared_files() ) {
+            return;
+        }
+
+        if ( ! Vigilante_Htaccess_Recovery::is_available() ) {
+            /*
+             * Already restored. Offer to take it back for as long as the previous
+             * section is still stored: a restore that cannot be undone is a second
+             * irreversible change on top of the one being repaired.
+             */
+            if ( Vigilante_Htaccess_Recovery::has_undo() ) {
+                ?>
+                <div class="notice notice-info inline" id="vigilante-headers-recovery-undo">
+                    <p>
+                        <?php esc_html_e( 'The Security Headers settings were restored from the copy Vigilant had kept of your .htaccess.', 'vigilante' ); ?>
+                        <button type="button" class="button button-small" id="vigilante-recovery-undo">
+                            <?php esc_html_e( 'Undo the restore', 'vigilante' ); ?>
+                        </button>
+                    </p>
+                </div>
+                <?php
+            }
+
+            return;
+        }
+
+        $rows = Vigilante_Htaccess_Recovery::get_diff( $this->settings );
+
+        if ( empty( $rows ) ) {
+            return;
+        }
+
+        $snapshot = Vigilante_Htaccess_Recovery::get_snapshot();
+        $taken    = isset( $snapshot['time'] ) ? (int) $snapshot['time'] : 0;
+        $block    = Vigilante_Htaccess_Recovery::get_raw_block();
+        ?>
+        <div class="vigilante-settings-section" id="vigilante-headers-recovery">
+            <h2><?php esc_html_e( 'Recover your previous header settings', 'vigilante' ); ?></h2>
+            <p>
+                <?php esc_html_e( 'Updating to 2.9.8 reset this tab to factory values: the migration replaced the whole section instead of merging into it. Your server kept sending the right headers, because the .htaccess had not been rewritten yet, so Vigilant saved a copy of that file before touching it. These are the settings it found in that copy.', 'vigilante' ); ?>
+            </p>
+            <?php if ( $taken ) : ?>
+                <p class="description">
+                    <?php
+                    printf(
+                        /* translators: %s: date and time the .htaccess copy was taken. */
+                        esc_html__( 'Copy taken on %s.', 'vigilante' ),
+                        esc_html( wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $taken ) )
+                    );
+                    ?>
+                </p>
+            <?php endif; ?>
+
+            <table class="widefat striped">
+                <thead>
+                    <tr>
+                        <th scope="col"><?php esc_html_e( 'Setting', 'vigilante' ); ?></th>
+                        <th scope="col"><?php esc_html_e( 'Now', 'vigilante' ); ?></th>
+                        <th scope="col"><?php esc_html_e( 'Would be restored to', 'vigilante' ); ?></th>
+                    </tr>
+                </thead>
+                <tbody>
+                <?php foreach ( $rows as $row ) : ?>
+                    <tr>
+                        <th scope="row"><?php echo esc_html( $row['label'] ); ?></th>
+                        <td><?php echo esc_html( $row['current'] ); ?></td>
+                        <td>
+                            <?php echo esc_html( $row['recovered'] ); ?>
+                            <?php if ( ! empty( $row['detail'] ) ) : ?>
+                                <br><span class="description"><?php echo esc_html( $row['detail'] ); ?></span>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+
+            <p class="description">
+                <?php esc_html_e( 'Only these settings are written. The .htaccess is then rebuilt from them, the same way saving this tab rebuilds it. The stored copy of the file is never written back, so nothing your host, your cache plugin or your CDN added to it is touched.', 'vigilante' ); ?>
+            </p>
+
+            <?php if ( '' !== $block ) : ?>
+                <details>
+                    <summary><?php esc_html_e( 'Show the saved .htaccess block', 'vigilante' ); ?></summary>
+                    <textarea readonly rows="12" class="large-text code" onclick="this.select();"><?php echo esc_textarea( $block ); ?></textarea>
+                </details>
+            <?php endif; ?>
+
+            <p class="submit vigilante-submit-buttons">
+                <button type="button" class="button button-primary" id="vigilante-recovery-restore">
+                    <?php esc_html_e( 'Restore these settings', 'vigilante' ); ?>
+                </button>
+                <button type="button" class="button" id="vigilante-recovery-dismiss">
+                    <?php esc_html_e( 'No thanks, keep what I have', 'vigilante' ); ?>
+                </button>
+            </p>
+            <div id="vigilante-recovery-result"></div>
+        </div>
+        <?php
+    }
+
     private function render_tab_headers() {
         $is_disabled = $this->render_module_disabled_notice( 'security_headers' );
         // Every setting on this tab ends up in .htaccess, so on a subsite the
@@ -3855,6 +3995,8 @@ class Vigilante_Admin {
         $vg_shared_locked = $this->shared_files_locked();
         $options = $this->get_section_for_display( 'security_headers' );
         ?>
+        <?php $this->render_headers_recovery_offer(); ?>
+
         <form class="vigilante-settings-form <?php echo $is_disabled ? 'vigilante-form-disabled' : ''; ?>" data-section="security_headers" <?php echo $is_disabled ? 'inert' : ''; ?>>
             <?php $this->render_shared_files_notice(); ?>
             <div id="vigilante-section-headers-main" class="vigilante-settings-section <?php echo $vg_shared_locked ? 'vigilante-form-disabled' : ''; ?>" <?php echo $vg_shared_locked ? 'inert' : ''; ?>>
@@ -4027,6 +4169,53 @@ class Vigilante_Admin {
                                 <input type="checkbox" name="security_headers[remove_fingerprinting_headers]" value="1" <?php checked( ! empty( $options['remove_fingerprinting_headers'] ) ); ?>>
                                 <?php esc_html_e( 'Remove X-Powered-By and Server headers', 'vigilante' ); ?>
                             </label>
+                        </td>
+                    </tr>
+                </table>
+            </div>
+
+            <?php $vg_cop = ( isset( $options['cross_origin_policies'] ) && is_array( $options['cross_origin_policies'] ) ) ? $options['cross_origin_policies'] : array(); ?>
+            <div id="vigilante-section-headers-cross-origin" class="vigilante-settings-section <?php echo $vg_shared_locked ? 'vigilante-form-disabled' : ''; ?>" <?php echo $vg_shared_locked ? 'inert' : ''; ?>>
+                <h2>
+                    <?php esc_html_e( 'Cross-Origin Policies', 'vigilante' ); ?>
+                    <span class="vigilante-method-badge htaccess"><?php esc_html_e( 'HTACCESS', 'vigilante' ); ?></span>
+                </h2>
+                <p><?php esc_html_e( 'Control how other origins may open, embed or fetch your site. Vigilant already sends these headers with the values below.', 'vigilante' ); ?></p>
+
+                <table class="form-table">
+                    <tr>
+                        <th scope="row"><label for="vigilante-f-security-headers-coop"><?php esc_html_e( 'Cross-Origin-Opener-Policy (COOP)', 'vigilante' ); ?></label></th>
+                        <td>
+                            <select id="vigilante-f-security-headers-coop" name="security_headers[cross_origin_policies][opener_policy]">
+                                <option value="" <?php selected( empty( $vg_cop['opener_policy'] ) ); ?>><?php esc_html_e( 'Disabled (header not sent)', 'vigilante' ); ?></option>
+                                <option value="unsafe-none" <?php selected( $vg_cop['opener_policy'] ?? '', 'unsafe-none' ); ?>>unsafe-none</option>
+                                <option value="same-origin-allow-popups" <?php selected( $vg_cop['opener_policy'] ?? '', 'same-origin-allow-popups' ); ?>><?php esc_html_e( 'same-origin-allow-popups (recommended)', 'vigilante' ); ?></option>
+                                <option value="same-origin" <?php selected( $vg_cop['opener_policy'] ?? '', 'same-origin' ); ?>>same-origin</option>
+                            </select>
+                            <p class="description"><?php esc_html_e( '&#9432; Cuts the link between your site and a window from another origin that opened it. Side effect: external tools that open your site in a new tab and talk to it through window.opener, such as Google Tag Assistant, will report that they cannot connect. Pick unsafe-none or Disabled if you need those tools.', 'vigilante' ); ?></p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="vigilante-f-security-headers-coep"><?php esc_html_e( 'Cross-Origin-Embedder-Policy (COEP)', 'vigilante' ); ?></label></th>
+                        <td>
+                            <select id="vigilante-f-security-headers-coep" name="security_headers[cross_origin_policies][embedder_policy]">
+                                <option value="unsafe-none" <?php selected( ( $vg_cop['embedder_policy'] ?? 'unsafe-none' ), 'unsafe-none' ); ?>><?php esc_html_e( 'unsafe-none (header not sent)', 'vigilante' ); ?></option>
+                                <option value="credentialless" <?php selected( $vg_cop['embedder_policy'] ?? '', 'credentialless' ); ?>>credentialless</option>
+                                <option value="require-corp" <?php selected( $vg_cop['embedder_policy'] ?? '', 'require-corp' ); ?>>require-corp</option>
+                            </select>
+                            <p class="description"><?php esc_html_e( '&#9432; Requires every cross-origin resource to opt in. require-corp can block third-party images, fonts, videos and embeds that do not send their own CORP or CORS headers.', 'vigilante' ); ?></p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="vigilante-f-security-headers-corp"><?php esc_html_e( 'Cross-Origin-Resource-Policy (CORP)', 'vigilante' ); ?></label></th>
+                        <td>
+                            <select id="vigilante-f-security-headers-corp" name="security_headers[cross_origin_policies][resource_policy]">
+                                <option value="" <?php selected( empty( $vg_cop['resource_policy'] ) ); ?>><?php esc_html_e( 'Disabled (header not sent)', 'vigilante' ); ?></option>
+                                <option value="same-site" <?php selected( $vg_cop['resource_policy'] ?? '', 'same-site' ); ?>>same-site</option>
+                                <option value="same-origin" <?php selected( $vg_cop['resource_policy'] ?? '', 'same-origin' ); ?>>same-origin</option>
+                                <option value="cross-origin" <?php selected( $vg_cop['resource_policy'] ?? '', 'cross-origin' ); ?>><?php esc_html_e( 'cross-origin (recommended)', 'vigilante' ); ?></option>
+                            </select>
+                            <p class="description"><?php esc_html_e( '&#9432; Declares who may load resources from this site. same-origin stops hotlinking, but it also breaks CDNs, feed readers and any external service that fetches your images or files.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
                 </table>

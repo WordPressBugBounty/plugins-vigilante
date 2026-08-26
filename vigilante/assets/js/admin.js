@@ -4257,4 +4257,60 @@
         });
     });
 
+    /**
+     * Security Headers settings recovery (2.10.0).
+     *
+     * Both buttons are disabled together while the request is in flight, so a
+     * second click cannot fire a second restore. The page reloads afterwards
+     * because the whole tab is rendered from the settings that just changed.
+     */
+    $(function() {
+        var SELECTOR = '#vigilante-recovery-restore, #vigilante-recovery-dismiss';
+
+        function recoveryRun(action) {
+            $(SELECTOR).prop('disabled', true);
+
+            $.ajax({
+                url: vigilanteAdmin.ajaxUrl,
+                type: 'POST',
+                data: {
+                    action: action,
+                    nonce: vigilanteAdmin.nonce
+                },
+                success: function(response) {
+                    if (response.success) {
+                        Vigilante_Admin.showNotice('success', response.data);
+                        setTimeout(function() {
+                            location.reload();
+                        }, 1200);
+                        return;
+                    }
+
+                    Vigilante_Admin.showNotice('error', response.data);
+                    $(SELECTOR).prop('disabled', false);
+                },
+                error: function() {
+                    Vigilante_Admin.showNotice('error', vigilanteAdmin.strings.error);
+                    $(SELECTOR).prop('disabled', false);
+                }
+            });
+        }
+
+        $(document).on('click', '#vigilante-recovery-restore', function(e) {
+            e.preventDefault();
+            recoveryRun('vigilante_headers_recovery_restore');
+        });
+
+        $(document).on('click', '#vigilante-recovery-dismiss', function(e) {
+            e.preventDefault();
+            recoveryRun('vigilante_headers_recovery_dismiss');
+        });
+
+        $(document).on('click', '#vigilante-recovery-undo', function(e) {
+            e.preventDefault();
+            $(this).prop('disabled', true);
+            recoveryRun('vigilante_headers_recovery_undo');
+        });
+    });
+
 })(jQuery);
