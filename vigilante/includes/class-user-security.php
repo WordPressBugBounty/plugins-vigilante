@@ -1428,6 +1428,12 @@ class Vigilante_User_Security {
      * @return bool
      */
     public function approve_user( $user_id, $approved_by = 0 ) {
+        // Same reasoning as reject_user(): approving an account that never asked
+        // for approval is a no-op that reports success and writes misleading meta.
+        if ( ! get_user_meta( $user_id, 'vigilante_pending_approval', true ) ) {
+            return false;
+        }
+
         $user = get_userdata( $user_id );
         if ( ! $user ) {
             return false;
@@ -1472,6 +1478,14 @@ class Vigilante_User_Security {
     public function reject_user( $user_id, $rejected_by = 0, $reason = '' ) {
         $user = get_userdata( $user_id );
         if ( ! $user ) {
+            return false;
+        }
+
+        // Only an account actually waiting for approval may be rejected. Without
+        // this the handler deletes any user id it is given, and wp_delete_user()
+        // with no reassignment takes their posts with them, skipping the dialog
+        // core always shows. Deleting a member is the Users screen's job.
+        if ( ! get_user_meta( $user_id, 'vigilante_pending_approval', true ) ) {
             return false;
         }
 

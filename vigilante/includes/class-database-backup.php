@@ -12,8 +12,6 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-// phpcs:disable WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
-
 /**
  * Class Vigilante_Database_Backup
  *
@@ -74,6 +72,7 @@ class Vigilante_Database_Backup {
         );
 
         // Get all tables that match the current prefix
+        // phpcs:disable WordPress.DB.PreparedSQL.NotPrepared -- %i placeholder requires WP 6.2+, and the sniff reports inside the multiline prepare().
         // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
         $all_tables = $this->wpdb->get_results(
             $this->wpdb->prepare(
@@ -81,6 +80,7 @@ class Vigilante_Database_Backup {
                 $this->wpdb->esc_like( $prefix ) . '%'
             )
         );
+        // phpcs:enable WordPress.DB.PreparedSQL.NotPrepared
 
         if ( ! $all_tables ) {
             return $tables;
@@ -291,6 +291,7 @@ class Vigilante_Database_Backup {
      * @return string|WP_Error SQL for the table.
      */
     private function dump_table( $table_name ) {
+        // phpcs:disable WordPress.DB.PreparedSQL.NotPrepared -- %i placeholder requires WP 6.2+, and the sniff reports inside the multiline prepare().
         $sql = '';
         $sql .= "-- ----------------------------------------------------------\n";
         $sql .= '-- Table: ' . $table_name . "\n";
@@ -375,6 +376,7 @@ class Vigilante_Database_Backup {
 
             $sql .= "UNLOCK TABLES;\n";
         }
+        // phpcs:enable WordPress.DB.PreparedSQL.NotPrepared
 
         $sql .= "\n";
 
@@ -389,6 +391,7 @@ class Vigilante_Database_Backup {
     private function get_valid_table_names() {
         $prefix = $this->wpdb->prefix;
 
+        // phpcs:disable WordPress.DB.PreparedSQL.NotPrepared -- %i placeholder requires WP 6.2+, and the sniff reports inside the multiline prepare().
         // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
         $results = $this->wpdb->get_col(
             $this->wpdb->prepare(
@@ -396,6 +399,7 @@ class Vigilante_Database_Backup {
                 $this->wpdb->esc_like( $prefix ) . '%'
             )
         );
+        // phpcs:enable WordPress.DB.PreparedSQL.NotPrepared
 
         return $results ? $results : array();
     }

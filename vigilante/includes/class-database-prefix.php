@@ -12,8 +12,6 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-// phpcs:disable WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.DirectDatabaseQuery.SchemaChange, PluginCheck.Security.DirectDB.UnescapedDBParameter
-
 /**
  * Class Vigilante_Database_Prefix
  *
@@ -275,6 +273,7 @@ class Vigilante_Database_Prefix {
      * @return array|WP_Error
      */
     private function get_site_prefix_map() {
+        // phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- table name comes from the validated prefix map and all values use placeholders.
         if ( ! is_multisite() ) {
             return array(
                 array(
@@ -314,6 +313,7 @@ class Vigilante_Database_Prefix {
         }
 
         return $map;
+        // phpcs:enable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter
     }
 
     /**
@@ -322,12 +322,14 @@ class Vigilante_Database_Prefix {
      * @return array Table names.
      */
     private function get_prefixed_tables() {
+        // phpcs:disable WordPress.DB.PreparedSQL.NotPrepared -- %i placeholder requires WP 6.2+, and the sniff reports inside the multiline prepare().
         return $this->wpdb->get_col(
             $this->wpdb->prepare(
                 'SHOW TABLES LIKE %s',
                 $this->wpdb->esc_like( $this->old_prefix ) . '%'
             )
         );
+        // phpcs:enable WordPress.DB.PreparedSQL.NotPrepared
     }
 
     /**
@@ -337,6 +339,7 @@ class Vigilante_Database_Prefix {
      * @return bool
      */
     private function prefix_tables_exist( $prefix ) {
+        // phpcs:disable WordPress.DB.PreparedSQL.NotPrepared -- %i placeholder requires WP 6.2+, and the sniff reports inside the multiline prepare().
         $result = $this->wpdb->get_var(
             $this->wpdb->prepare(
                 'SHOW TABLES LIKE %s',
@@ -345,6 +348,7 @@ class Vigilante_Database_Prefix {
         );
 
         return ! empty( $result );
+        // phpcs:enable WordPress.DB.PreparedSQL.NotPrepared
     }
 
     /**
@@ -354,6 +358,7 @@ class Vigilante_Database_Prefix {
      * @return true|WP_Error
      */
     private function rename_tables( $tables ) {
+        // phpcs:disable WordPress.DB.PreparedSQL.NotPrepared -- %i placeholder requires WP 6.2+, and the sniff reports inside the multiline prepare().
         $renamed = array();
 
         foreach ( $tables as $old_name ) {
@@ -394,6 +399,7 @@ class Vigilante_Database_Prefix {
         }
 
         return true;
+        // phpcs:enable WordPress.DB.PreparedSQL.NotPrepared
     }
 
     /**
@@ -402,6 +408,7 @@ class Vigilante_Database_Prefix {
      * @param array $original_tables Original table names.
      */
     private function rollback_tables( $original_tables ) {
+        // phpcs:disable WordPress.DB.PreparedSQL.NotPrepared -- %i placeholder requires WP 6.2+, and the sniff reports inside the multiline prepare().
         foreach ( $original_tables as $old_name ) {
             $new_name = $this->new_prefix . substr( $old_name, strlen( $this->old_prefix ) );
 
@@ -418,6 +425,7 @@ class Vigilante_Database_Prefix {
                 );
             }
         }
+        // phpcs:enable WordPress.DB.PreparedSQL.NotPrepared
     }
 
     /**
@@ -675,6 +683,7 @@ class Vigilante_Database_Prefix {
      * @param string $new_prefix Prefix to write.
      */
     private function bulk_rename_options( $table, $old_prefix, $new_prefix ) {
+        // phpcs:disable WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- %i placeholder requires WP 6.2+, and the sniff reports inside the multiline prepare(), and the table name comes from the validated prefix map and all values use placeholders.
         $this->wpdb->query(
             $this->wpdb->prepare(
                 "UPDATE `{$table}` SET option_name = CONCAT( %s, SUBSTRING( option_name, %d ) ) WHERE option_name LIKE %s",
@@ -683,6 +692,7 @@ class Vigilante_Database_Prefix {
                 $this->wpdb->esc_like( $old_prefix ) . '%'
             )
         );
+        // phpcs:enable WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter
     }
 
     /**
@@ -696,6 +706,7 @@ class Vigilante_Database_Prefix {
      * @param string $new_prefix Prefix to write.
      */
     private function bulk_rename_usermeta( $table, $old_prefix, $new_prefix ) {
+        // phpcs:disable WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- %i placeholder requires WP 6.2+, and the sniff reports inside the multiline prepare(), and the table name comes from the validated prefix map and all values use placeholders.
         // Prefix migration has to rewrite meta_key values by definition, so the
         // slow-query rule does not apply here.
         // phpcs:disable WordPress.DB.SlowDBQuery.slow_db_query_meta_key
@@ -708,6 +719,7 @@ class Vigilante_Database_Prefix {
             )
         );
         // phpcs:enable WordPress.DB.SlowDBQuery.slow_db_query_meta_key
+        // phpcs:enable WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter
     }
 
     /**
@@ -719,6 +731,7 @@ class Vigilante_Database_Prefix {
      * @return bool Whether the option was renamed.
      */
     private function rename_option( $table, $old_name, $new_name ) {
+        // phpcs:disable WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- %i placeholder requires WP 6.2+, and the sniff reports inside the multiline prepare(), and the table name comes from the validated prefix map and all values use placeholders.
         if ( $old_name === $new_name || $this->option_exists( $table, $new_name ) ) {
             return false;
         }
@@ -738,6 +751,7 @@ class Vigilante_Database_Prefix {
             array( '%s' ),
             array( '%d' )
         );
+        // phpcs:enable WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter
     }
 
     /**
@@ -748,6 +762,7 @@ class Vigilante_Database_Prefix {
      * @param string $new_key  Wanted meta key.
      */
     private function rename_usermeta( $table, $old_key, $new_key ) {
+        // phpcs:disable WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- %i placeholder requires WP 6.2+, and the sniff reports inside the multiline prepare(), and the table name comes from the validated prefix map and all values use placeholders.
         if ( $old_key === $new_key ) {
             return;
         }
@@ -763,6 +778,7 @@ class Vigilante_Database_Prefix {
             )
         );
         // phpcs:enable WordPress.DB.SlowDBQuery.slow_db_query_meta_key
+        // phpcs:enable WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter
     }
 
     /**
@@ -773,11 +789,13 @@ class Vigilante_Database_Prefix {
      * @return bool
      */
     private function option_exists( $table, $option_name ) {
+        // phpcs:disable WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- %i placeholder requires WP 6.2+, and the sniff reports inside the multiline prepare(), and the table name comes from the validated prefix map and all values use placeholders.
         $found = $this->wpdb->get_var(
             $this->wpdb->prepare( "SELECT option_id FROM `{$table}` WHERE option_name = %s LIMIT 1", $option_name )
         );
 
         return ! empty( $found );
+        // phpcs:enable WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter
     }
 
     /**
@@ -787,11 +805,13 @@ class Vigilante_Database_Prefix {
      * @return bool
      */
     private function table_exists( $table ) {
+        // phpcs:disable WordPress.DB.PreparedSQL.NotPrepared -- %i placeholder requires WP 6.2+, and the sniff reports inside the multiline prepare().
         $found = $this->wpdb->get_var(
             $this->wpdb->prepare( 'SHOW TABLES LIKE %s', $this->wpdb->esc_like( $table ) )
         );
 
         return ! empty( $found );
+        // phpcs:enable WordPress.DB.PreparedSQL.NotPrepared
     }
 
     /**

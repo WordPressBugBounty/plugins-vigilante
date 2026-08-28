@@ -12,8 +12,6 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-// phpcs:disable WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, PluginCheck.Security.DirectDB.UnescapedDBParameter -- All queries use $wpdb->prepare() with validated parameters
-
 /**
  * Class Vigilante_Database
  *
@@ -345,11 +343,11 @@ class Vigilante_Database {
         $current_version = get_option( self::DB_VERSION_OPTION, '0' );
 
         // v1.3.0: Add request_method column to activity log
+        // phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- %i placeholder requires WP 6.2+, and the sniff reports inside the multiline prepare().
         if ( version_compare( $current_version, '1.3.0', '<' ) ) {
             $table = $this->get_activity_log_table();
 
             // Check if column already exists
-            // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
             $column_exists = $this->wpdb->get_results(
                 $this->wpdb->prepare(
                     'SHOW COLUMNS FROM %i LIKE %s',
@@ -359,7 +357,6 @@ class Vigilante_Database {
             );
 
             if ( empty( $column_exists ) ) {
-                // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared
                 $this->wpdb->query(
                     $this->wpdb->prepare(
                         'ALTER TABLE %i ADD COLUMN request_method varchar(10) DEFAULT %s AFTER user_agent',
@@ -369,7 +366,6 @@ class Vigilante_Database {
                 );
 
                 // Add index
-                // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared
                 $this->wpdb->query(
                     $this->wpdb->prepare(
                         'ALTER TABLE %i ADD KEY request_method (request_method)',
@@ -378,6 +374,7 @@ class Vigilante_Database {
                 );
             }
         }
+        // phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared
 
         // Update stored version
         update_option( self::DB_VERSION_OPTION, self::DB_VERSION );
@@ -403,11 +400,11 @@ class Vigilante_Database {
         foreach ( $tables as $table ) {
             $this->wpdb->query( $this->wpdb->prepare( 'DROP TABLE IF EXISTS %i', $table ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.DirectDatabaseQuery.SchemaChange, PluginCheck.Security.DirectDB.UnescapedDBParameter
         }
+        // phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.DirectDatabaseQuery.SchemaChange
 
         delete_option( self::DB_VERSION_OPTION );
 
         return true;
-        // phpcs:enable
     }
 
     // =========================================================================

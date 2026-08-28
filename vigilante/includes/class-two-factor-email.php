@@ -818,6 +818,16 @@ class Vigilante_Two_Factor_Email {
             wp_send_json_error( __( 'User not found.', 'vigilante' ) );
         }
 
+        // Same 60 second margin that check_2fa_requirement() already applies. The
+        // hook is wp_ajax_nopriv_, so without this anyone holding a pending token
+        // can make the site send one email per request.
+        $existing = $this->database->get_2fa_code( $user_id );
+
+        if ( $existing && ! empty( $existing['created_at'] )
+            && ( time() - strtotime( $existing['created_at'] ) ) < 60 ) {
+            wp_send_json_error( __( 'A code was just sent. Please wait a minute before asking for another one.', 'vigilante' ) );
+        }
+
         // Delete old code
         $this->database->delete_2fa_code( $user_id );
 

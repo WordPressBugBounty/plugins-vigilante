@@ -1351,7 +1351,11 @@
                 html += '<thead><tr><th>' + strings.file + '</th><th style="width: 200px;">' + (strings.changes || 'Changes') + '</th><th style="width: 220px;">' + (strings.actions || 'Actions') + '</th></tr></thead>';
                 html += '<tbody>';
 
-                var escHtml = function(s) { return $('<span>').text(s).html(); };
+                // Delega en el escapador del objeto, que codifica comillas. La
+                // version anterior era $('<span>').text(s).html(), que no las toca:
+                // aqui solo se usa en posicion de texto, pero es el patron del
+                // CVE-2026-81754 esperando a que alguien lo mueva a un atributo.
+                var escHtml = Vigilante_Admin.escapeHtml;
 
                 criticalModified.forEach(function(file) {
                     var fileId = file.file.replace(/[^a-z0-9]/gi, '-');

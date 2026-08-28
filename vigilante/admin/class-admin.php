@@ -2016,6 +2016,38 @@ class Vigilante_Admin {
     }
 
     /**
+     * Acting on another user's account needs permission over that user
+     *
+     * Since 2.10.3 the handlers behind these tools ask for edit_user over the
+     * target, which is the rule WordPress itself applies. On a network the core
+     * grants edit_user only to network administrators, so for anybody else these
+     * controls do nothing. Better to say so than to paint a button that silently
+     * skips every user.
+     *
+     * @since 2.10.4
+     * @return bool
+     */
+    private function user_actions_locked() {
+        return is_multisite() && ! current_user_can( 'manage_network_users' );
+    }
+
+    /**
+     * Print the notice for user tools that cannot be used from this site
+     *
+     * @since 2.10.4
+     */
+    private function render_user_actions_notice() {
+        if ( ! $this->user_actions_locked() ) {
+            return;
+        }
+        ?>
+        <div class="notice notice-info inline" style="margin:10px 0 16px;padding:8px 12px;">
+            <p style="margin:0;"><?php esc_html_e( 'These tools act on user accounts, which on a network belong to the whole network rather than to one site. WordPress reserves that to network administrators, so they are managed from the network admin.', 'vigilante' ); ?></p>
+        </div>
+        <?php
+    }
+
+    /**
      * Check if module is disabled and render warning
      *
      * @param string $module_key Module key.
@@ -4742,6 +4774,9 @@ class Vigilante_Admin {
                 <?php esc_html_e( 'User security tools', 'vigilante' ); ?>
             </h2>
 
+            <?php $this->render_user_actions_notice(); ?>
+            <?php if ( ! $this->user_actions_locked() ) : ?>
+
             <!-- Force Password Reset -->
             <div class="vigilante-tool-box">
                 <h3><?php esc_html_e( 'Force password reset', 'vigilante' ); ?></h3>
@@ -5055,6 +5090,8 @@ class Vigilante_Admin {
                     </p>
                 </div>
             </div>
+
+            <?php endif; ?>
         </div>
         <?php
     }
