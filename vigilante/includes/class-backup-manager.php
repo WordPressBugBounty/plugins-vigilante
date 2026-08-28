@@ -327,6 +327,12 @@ class Vigilante_Backup_Manager {
      * @return void|WP_Error WP_Error on failure; on success it streams and exits.
      */
     public function stream_files_zip() {
+        // Second line of defence: the archive contains network-shared files, so
+        // no future caller can hand them to a subsite administrator by mistake.
+        if ( ! Vigilante_Settings::can_write_shared_files() ) {
+            return new WP_Error( 'shared_files_denied', Vigilante_Settings::get_shared_files_notice() );
+        }
+
         if ( ! class_exists( 'ZipArchive' ) ) {
             return new WP_Error( 'zip_unavailable', __( 'ZipArchive extension is not available on this server.', 'vigilante' ) );
         }

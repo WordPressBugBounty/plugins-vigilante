@@ -629,19 +629,43 @@ trait Vigilante_Admin_Ajax {
             require_once VIGILANTE_INCLUDES_DIR . 'class-two-factor-totp.php';
         }
 
-        $totp  = new Vigilante_Two_Factor_TOTP( $this->settings, $this->database, $this->activity_log );
-        $count = 0;
+        $totp    = new Vigilante_Two_Factor_TOTP( $this->settings, $this->database, $this->activity_log );
+        $count   = 0;
+        $skipped = 0;
 
         foreach ( $user_ids as $uid ) {
-            if ( $uid > 0 ) {
-                $totp->reset_user_totp( $uid );
-                $count++;
+            if ( $uid < 1 ) {
+                continue;
             }
+
+            // Same gate as the rest of the TOTP handlers: resetting somebody's
+            // second factor is editing their account, so ask for edit_user
+            // rather than for manage_options, which on a network is per site.
+            if ( ! current_user_can( 'edit_user', $uid ) ) {
+                $skipped++;
+                continue;
+            }
+
+            $totp->reset_user_totp( $uid );
+            $count++;
+        }
+
+        $message = sprintf(
+            /* translators: %d: Number of users reset */
+            _n( 'TOTP reset for %d user.', 'TOTP reset for %d users.', $count, 'vigilante' ),
+            $count
+        );
+
+        if ( $skipped > 0 ) {
+            $message .= ' ' . sprintf(
+                /* translators: %d: Number of users skipped because the current user cannot edit them */
+                __( '%d skipped: you cannot edit those users.', 'vigilante' ),
+                $skipped
+            );
         }
 
         wp_send_json_success( array(
-            /* translators: %d: Number of users reset */
-            'message' => sprintf( _n( 'TOTP reset for %d user.', 'TOTP reset for %d users.', $count, 'vigilante' ), $count ),
+            'message' => $message,
             'count'   => $count,
         ) );
     }
@@ -663,8 +687,9 @@ trait Vigilante_Admin_Ajax {
             wp_send_json_error( __( 'Invalid user.', 'vigilante' ) );
         }
 
-        // Permission check: own profile or admin
-        if ( get_current_user_id() !== $user_id && ! current_user_can( 'manage_options' ) ) {
+        // Permission check: own profile, or a user this one may actually edit.
+        // manage_options is held by every subsite administrator on a network.
+        if ( get_current_user_id() !== $user_id && ! current_user_can( 'edit_user', $user_id ) ) {
             wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
         }
 
@@ -881,6 +906,14 @@ trait Vigilante_Admin_Ajax {
             );
         }
 
+        if ( ! empty( $results['skipped'] ) ) {
+            $message .= ' ' . sprintf(
+                /* translators: %d: Number of users skipped because the current user cannot edit them */
+                __( '%d skipped: you cannot edit those users.', 'vigilante' ),
+                $results['skipped']
+            );
+        }
+
         wp_send_json_success( array(
             'message'        => $message,
             'results'        => $results,
@@ -940,6 +973,14 @@ trait Vigilante_Admin_Ajax {
                 /* translators: %d: Number of failures */
                 __( '%d failed.', 'vigilante' ),
                 $results['failed']
+            );
+        }
+
+        if ( ! empty( $results['skipped'] ) ) {
+            $message .= ' ' . sprintf(
+                /* translators: %d: Number of users skipped because the current user cannot edit them */
+                __( '%d skipped: you cannot edit those users.', 'vigilante' ),
+                $results['skipped']
             );
         }
 
@@ -1034,6 +1075,14 @@ trait Vigilante_Admin_Ajax {
                 /* translators: %d: Number of failures */
                 __( '%d failed.', 'vigilante' ),
                 $results['failed']
+            );
+        }
+
+        if ( ! empty( $results['skipped'] ) ) {
+            $message .= ' ' . sprintf(
+                /* translators: %d: Number of users skipped because the current user cannot edit them */
+                __( '%d skipped: you cannot edit those users.', 'vigilante' ),
+                $results['skipped']
             );
         }
 
@@ -1141,6 +1190,12 @@ trait Vigilante_Admin_Ajax {
             wp_send_json_error( __( 'User not found.', 'vigilante' ) );
         }
 
+        // Sessions carry IP, User-Agent and login time. manage_options alone is
+        // not enough on a network, where it is held per subsite.
+        if ( ! current_user_can( 'edit_user', $user_id ) ) {
+            wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
+        }
+
         $user_security = new Vigilante_User_Security( $this->settings, $this->activity_log );
         $sessions = $user_security->get_user_sessions( $user_id );
 
@@ -1171,6 +1226,10 @@ trait Vigilante_Admin_Ajax {
             wp_send_json_error( __( 'Invalid parameters.', 'vigilante' ) );
         }
 
+        if ( ! current_user_can( 'edit_user', $user_id ) ) {
+            wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
+        }
+
         $user_security = new Vigilante_User_Security( $this->settings, $this->activity_log );
         $result = $user_security->revoke_session( $user_id, $token_hash );
 
@@ -1198,6 +1257,10 @@ trait Vigilante_Admin_Ajax {
 
         if ( ! $user_id ) {
             wp_send_json_error( __( 'Invalid user ID.', 'vigilante' ) );
+        }
+
+        if ( ! current_user_can( 'edit_user', $user_id ) ) {
+            wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
         }
 
         $user_security = new Vigilante_User_Security( $this->settings, $this->activity_log );
@@ -1299,6 +1362,14 @@ trait Vigilante_Admin_Ajax {
             wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
         }
 
+        // The dump is taken with $wpdb->prefix, which on the main site of a
+        // network matches every subsite table plus the global user tables, and
+        // the options it carries include the stored copy of wp-config.php. Same
+        // gate the rest of the network-shared operations use.
+        if ( ! Vigilante_Settings::can_write_shared_files() ) {
+            wp_send_json_error( Vigilante_Settings::get_shared_files_notice() );
+        }
+
         $backup = new Vigilante_Database_Backup();
         $tables = $backup->get_tables();
 
@@ -1315,6 +1386,14 @@ trait Vigilante_Admin_Ajax {
 
         if ( ! current_user_can( 'manage_options' ) ) {
             wp_die( esc_html__( 'Permission denied.', 'vigilante' ), 403 );
+        }
+
+        // The dump is taken with $wpdb->prefix, which on the main site of a
+        // network matches every subsite table plus the global user tables, and
+        // the options it carries include the stored copy of wp-config.php. Same
+        // gate the rest of the network-shared operations use.
+        if ( ! Vigilante_Settings::can_write_shared_files() ) {
+            wp_die( esc_html( Vigilante_Settings::get_shared_files_notice() ), 403 );
         }
 
         // phpcs:ignore WordPress.Security.ValidatedSanitizedInput

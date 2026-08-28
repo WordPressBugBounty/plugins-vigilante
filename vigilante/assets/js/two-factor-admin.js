@@ -160,7 +160,7 @@
             var html = '';
             $.each(users, function(i, u) {
                 html += '<div class="search-result-item" data-user-id="' + u.ID + '" data-user-email="' + self.esc(u.user_email) + '" data-user-display="' + self.esc(u.display_name) + '">';
-                html += '<img class="user-avatar" src="' + u.avatar + '" alt="">';
+                html += '<img class="user-avatar" src="' + self.esc(u.avatar) + '" alt="">';
                 html += '<div class="user-info"><div class="user-name">' + self.esc(u.display_name) + '</div>';
                 html += '<div class="user-email">' + self.esc(u.user_email) + '</div></div></div>';
             });

@@ -1095,11 +1095,21 @@ class Vigilante_User_Security {
         $results = array(
             'success'     => 0,
             'failed'      => 0,
+            'skipped'     => 0,
             'emails_sent' => 0,
             'total'       => count( $user_ids ),
         );
 
         foreach ( $user_ids as $user_id ) {
+            // The caller only proved it holds manage_options, which on a network
+            // every subsite administrator has. Resetting somebody else's password
+            // locks them out, so each target is checked one by one. Skipped users
+            // are counted apart from real failures.
+            if ( ! current_user_can( 'edit_user', $user_id ) ) {
+                $results['skipped']++;
+                continue;
+            }
+
             $result = $this->force_password_reset( $user_id, $reset_by_user_id );
             
             if ( $result['success'] ) {

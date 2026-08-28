@@ -6509,6 +6509,13 @@ class Vigilante_Admin {
             wp_die( esc_html__( 'Permission denied.', 'vigilante' ), 403 );
         }
 
+        // The archive carries wp-config.php, which a whole network shares. On a
+        // network manage_options is held by every subsite administrator, so the
+        // same gate the writers use applies here.
+        if ( ! Vigilante_Settings::can_write_shared_files() ) {
+            wp_die( esc_html( Vigilante_Settings::get_shared_files_notice() ), 403 );
+        }
+
         $backup_manager = new Vigilante_Backup_Manager();
         $result         = $backup_manager->stream_files_zip();
 

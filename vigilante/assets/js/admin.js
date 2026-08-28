@@ -1246,6 +1246,7 @@
             results.missing = results.missing || [];
             
             var strings = vigilanteAdmin.strings;
+            var esc = Vigilante_Admin.escapeHtml;
             
             var html = '<h2>' + strings.scanResults + '</h2>';
             html += '<div class="vigilante-scan-summary">';
@@ -1296,11 +1297,11 @@
                 html += '<tbody>';
                 results.suspicious.forEach(function(file) {
                     html += '<tr>';
-                    html += '<th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" value="' + file.file + '"></th>';
-                    html += '<td><code style="color: #d63638;">' + file.file + '</code></td>';
-                    html += '<td>' + (file.reason || strings.unknown) + '</td>';
-                    html += '<td>' + (file.type || strings.unknown) + '</td>';
-                    html += '<td><button type="button" class="button button-small vigilante-ignore-file" data-file="' + file.file + '">' + (strings.ignore || 'Ignore') + '</button></td>';
+                    html += '<th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" value="' + esc(file.file) + '"></th>';
+                    html += '<td><code style="color: #d63638;">' + esc(file.file) + '</code></td>';
+                    html += '<td>' + esc(file.reason || strings.unknown) + '</td>';
+                    html += '<td>' + esc(file.type || strings.unknown) + '</td>';
+                    html += '<td><button type="button" class="button button-small vigilante-ignore-file" data-file="' + esc(file.file) + '">' + (strings.ignore || 'Ignore') + '</button></td>';
                     html += '</tr>';
                 });
                 html += '</tbody></table>';
@@ -1319,11 +1320,11 @@
                 html += '<tbody>';
                 results.extra.forEach(function(file) {
                     html += '<tr>';
-                    html += '<th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" value="' + file.file + '"></th>';
-                    html += '<td><code style="color: #b32d2e;">' + file.file + '</code></td>';
-                    html += '<td>' + (file.reason || strings.unknown) + '</td>';
-                    html += '<td>' + (file.type || strings.unknown) + '</td>';
-                    html += '<td><button type="button" class="button button-small vigilante-ignore-file" data-file="' + file.file + '">' + (strings.ignore || 'Ignore') + '</button></td>';
+                    html += '<th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" value="' + esc(file.file) + '"></th>';
+                    html += '<td><code style="color: #b32d2e;">' + esc(file.file) + '</code></td>';
+                    html += '<td>' + esc(file.reason || strings.unknown) + '</td>';
+                    html += '<td>' + esc(file.type || strings.unknown) + '</td>';
+                    html += '<td><button type="button" class="button button-small vigilante-ignore-file" data-file="' + esc(file.file) + '">' + (strings.ignore || 'Ignore') + '</button></td>';
                     html += '</tr>';
                 });
                 html += '</tbody></table>';
@@ -1363,7 +1364,7 @@
 
                     // Main row
                     html += '<tr>';
-                    html += '<td><code style="color: #e36210;">' + file.file + '</code></td>';
+                    html += '<td><code style="color: #e36210;">' + esc(file.file) + '</code></td>';
                     html += '<td>';
                     if (!diffUnavailable) {
                         html += '<span style="color: #007017;">+' + added.length + '</span> <span style="color: #b32d2e;">-' + removed.length + '</span> ' + (strings.diffLines || 'lines') + '<br>';
@@ -1372,7 +1373,7 @@
                     html += '</td>';
                     html += '<td>';
                     html += '<button type="button" class="button button-small vigilante-toggle-critical-content" data-target="vigilante-critical-content-' + fileId + '" data-label-show="' + (strings.reviewChanges || 'Review changes') + '" data-label-hide="' + (strings.hideChanges || 'Hide changes') + '">' + (strings.reviewChanges || 'Review changes') + '</button> ';
-                    html += '<button type="button" class="button button-small button-primary vigilante-approve-critical-file" data-file="' + file.file + '">' + (strings.approve || 'Approve') + '</button>';
+                    html += '<button type="button" class="button button-small button-primary vigilante-approve-critical-file" data-file="' + esc(file.file) + '">' + (strings.approve || 'Approve') + '</button>';
                     html += '</td>';
                     html += '</tr>';
 
@@ -1413,10 +1414,10 @@
                 html += '<tbody>';
                 regularModified.forEach(function(file) {
                     html += '<tr>';
-                    html += '<th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" value="' + file.file + '"></th>';
-                    html += '<td><code>' + file.file + '</code></td>';
-                    html += '<td>' + (file.type || strings.unknown) + '</td>';
-                    html += '<td><button type="button" class="button button-small vigilante-ignore-file" data-file="' + file.file + '">' + (strings.ignore || 'Ignore') + '</button></td>';
+                    html += '<th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" value="' + esc(file.file) + '"></th>';
+                    html += '<td><code>' + esc(file.file) + '</code></td>';
+                    html += '<td>' + esc(file.type || strings.unknown) + '</td>';
+                    html += '<td><button type="button" class="button button-small vigilante-ignore-file" data-file="' + esc(file.file) + '">' + (strings.ignore || 'Ignore') + '</button></td>';
                     html += '</tr>';
                 });
                 html += '</tbody></table>';
@@ -2685,7 +2686,9 @@
             var $btn = $(e.currentTarget);
             var itemType = $btn.data('item-type');
             var listType = $btn.data('list-type');
-            var value = $btn.data('value');
+            // attr(), not data(): jQuery runs JSON.parse on values that look like
+            // JSON, so a User-Agent such as {"a":1} would arrive as an object.
+            var value = $btn.attr('data-value');
 
             if (!itemType || !listType || !value) {
                 return;
@@ -2780,9 +2783,14 @@
             if (typeof text !== 'string') {
                 text = String(text);
             }
-            var div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
+            // Quotes must be encoded too: this helper is also used in attribute
+            // position, where an unescaped quote closes the attribute early.
+            return text
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
         },
 
         /**
@@ -3329,7 +3337,7 @@
                                 var html = '<ul class="vigilante-user-search-list">';
                                 $.each(response.data, function(i, user) {
                                     html += '<li data-user-id="' + user.ID + '">' +
-                                        '<img src="' + user.avatar + '" class="vigilante-user-avatar" alt="">' +
+                                        '<img src="' + self.escapeHtml(user.avatar) + '" class="vigilante-user-avatar" alt="">' +
                                         '<div class="vigilante-user-info">' +
                                         '<strong>' + self.escapeHtml(user.display_name) + '</strong><br>' +
                                         '<small>' + self.escapeHtml(user.user_email) + '</small>' +

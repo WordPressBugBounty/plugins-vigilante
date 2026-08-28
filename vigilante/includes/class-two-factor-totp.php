@@ -192,8 +192,8 @@ class Vigilante_Two_Factor_TOTP {
             return $user;
         }
 
-        // Skip if this is a 2FA verification request
-        if ( $this->is_2fa_verification_request() ) {
+        // Skip if this is a 2FA verification request for this same user
+        if ( $this->is_2fa_verification_request( $user ) ) {
             return $user;
         }
 
@@ -295,18 +295,44 @@ class Vigilante_Two_Factor_TOTP {
      *
      * @return bool
      */
-    private function is_2fa_verification_request() {
-        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Just checking action, nonce verified in handler
+    private function is_2fa_verification_request( $user = null ) {
+        // The action alone proves nothing: it travels in the request and the
+        // attacker sets it. A genuine verification also carries the form nonce
+        // and a pending token issued to this very user.
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- The nonce is verified right below.
         $action = isset( $_REQUEST['action'] ) ? sanitize_text_field( wp_unslash( $_REQUEST['action'] ) ) : '';
-        return 'vigilante_2fa' === $action;
+
+        if ( 'vigilante_2fa' !== $action ) {
+            return false;
+        }
+
+        if ( ! isset( $_POST['_wpnonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['_wpnonce'] ) ), 'vigilante_2fa_verify' ) ) {
+            return false;
+        }
+
+        $pending_user_id = $this->get_pending_user_id();
+
+        if ( ! $pending_user_id ) {
+            return false;
+        }
+
+        if ( $user instanceof WP_User ) {
+            return $pending_user_id === (int) $user->ID;
+        }
+
+        return true;
     }
 
     /**
      * Handle 2FA verification form submission
      */
     public function handle_2fa_form() {
+        // Verify nonce. A bare return would let wp-login.php fall through to its
+        // default case and call wp_signon(), completing the login without the
+        // second factor, so this path must end the request.
         if ( ! isset( $_POST['_wpnonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['_wpnonce'] ) ), 'vigilante_2fa_verify' ) ) {
-            return;
+            wp_safe_redirect( wp_login_url() );
+            exit;
         }
 
         $user_id = $this->get_pending_user_id();
@@ -1081,7 +1107,10 @@ class Vigilante_Two_Factor_TOTP {
         $reconfig = ! empty( $_POST['reconfigure'] );
 
         // Permission check: user can only set up their own, unless admin
-        if ( get_current_user_id() !== $user_id && ! current_user_can( 'manage_options' ) ) {
+        // edit_user, not manage_options: on a network every subsite administrator
+        // holds manage_options, and map_meta_cap denies edit_user against a user
+        // they do not administer. On a single site an administrator still passes.
+        if ( get_current_user_id() !== $user_id && ! current_user_can( 'edit_user', $user_id ) ) {
             wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
         }
 
@@ -1140,7 +1169,10 @@ class Vigilante_Two_Factor_TOTP {
             $user_id = get_current_user_id();
         }
 
-        if ( get_current_user_id() !== $user_id && ! current_user_can( 'manage_options' ) ) {
+        // edit_user, not manage_options: on a network every subsite administrator
+        // holds manage_options, and map_meta_cap denies edit_user against a user
+        // they do not administer. On a single site an administrator still passes.
+        if ( get_current_user_id() !== $user_id && ! current_user_can( 'edit_user', $user_id ) ) {
             wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
         }
 
@@ -1168,7 +1200,10 @@ class Vigilante_Two_Factor_TOTP {
             $user_id = get_current_user_id();
         }
 
-        if ( get_current_user_id() !== $user_id && ! current_user_can( 'manage_options' ) ) {
+        // edit_user, not manage_options: on a network every subsite administrator
+        // holds manage_options, and map_meta_cap denies edit_user against a user
+        // they do not administer. On a single site an administrator still passes.
+        if ( get_current_user_id() !== $user_id && ! current_user_can( 'edit_user', $user_id ) ) {
             wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
         }
 

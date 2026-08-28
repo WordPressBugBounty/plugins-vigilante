@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.10.2
+Stable tag: 2.10.3
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -411,6 +411,13 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 2.10.3 =
+* Fix: a crafted User-Agent header can no longer run script in the Security Audit screen (CVE-2026-81754). Vigilant records the User-Agent of every failed login attempt, and the audit table redraws itself over AJAX when you refresh it or move between pages. The helper that escaped those values encoded angle brackets but not quotes, so a value carrying one could close the HTML attribute it was being written into and add an attribute of its own, which then ran in the browser of the administrator reading the log. The same gap reached the Whitelist and Blacklist buttons of the entry details, where it did not even need the table to be redrawn. Stored entries are left exactly as they were recorded: nothing is rewritten or stripped in the database, because the User-Agent allow and block lists match against the value as stored and the log is there to be read as evidence. What changed is the escaping at the point of display, which now covers quotes everywhere the admin scripts build an attribute. Reported by Sebastian Albrecht through Wordfence.
+* Fix: the legacy File Integrity renderer escapes its values. The JavaScript that builds the tables of suspicious, extra and modified files interpolated the file path, the reason and the type with no escaping at all, and the reason carries the plugin or theme name read from the header of the offending file, which is chosen by whoever planted it. Nothing calls that renderer today: a scan reloads the page and the tables come from PHP, which already escaped them, so no released version was exposed through this path. It is escaped anyway, so the code cannot come back into use carrying the flaw.
+* Fix: the second factor can no longer be skipped by naming the verification action in the request. Both the email and the authenticator app modules treated a request that said it was a 2FA verification as one already in progress, and that claim travels in the request itself, so anyone holding a valid password could send it and finish the login without a code. A verification is now recognised only when it also carries the form nonce and a pending token issued to that same user, and a submission with an invalid nonce ends the request instead of falling through to the normal login.
+* Fix: on a multisite network, the config backup and the database dump now ask for a network administrator on the main site. Both were gated by the capability to manage a site, which every subsite administrator holds, and both reach beyond the site they are launched from: the archive carries the wp-config.php the whole network shares, and the dump follows the table prefix, which on the main site covers every subsite. Single site installations are unaffected, and this is the same rule the plugin already applied to writing wp-config.php and .htaccess.
+* Fix: acting on somebody else account now requires permission over that user, not just over the site. Regenerating backup codes, reading the authenticator setup, reconfiguring or resetting the second factor, listing or revoking sessions and forcing a password reset all accepted any user id from an administrator of any site, so on a network a subsite administrator could reach a network administrator: read their backup codes, take over their authenticator or lock them out. Each of those now asks for the edit_user capability over the target, which is the rule WordPress itself applies. Nothing changes on a single site, where an administrator may edit everyone. On a network it does change, and by more than the case above: WordPress grants edit_user only to network administrators, so an administrator who is not one loses these actions over every other user, the members of their own site included, and keeps them over their own account. Bulk actions report how many users they skipped for this reason.
+
 = 2.10.2 =
 * Improved: the activity log now shows the address of each recorded request. Every blocking module already stored it, and nothing ever displayed it, so an owner reading a surprising entry had no way to tell a firewall hit on a legitimate page from a scanner probe, or a remote manager being refused from an intruder. It appears in the Address row of the entry details, right below the message, on the entries that carry one.
 * Fix: a remote manager reaches the dashboard again when the login URL is hidden. The fast path added in 2.9.9 decided a request was anonymous by looking only for a session cookie, and a connector that signs its own calls with a token holds no cookie yet when it asks for the dashboard: it resolves the user first and sets the cookie a few hooks later. Refused before it got there, it never reached the point where it would have logged itself in, read the 404 as a broken site and retried the whole job, which is why the same plugin update could be recorded three and four times over. Adding the manager addresses to the IP whitelist did not help, because those requests do not arrive from them. A request that is about to be refused is now checked for a user first, the same criterion the rest of the plugin has always applied, so an anonymous visitor still gets the same 404 as before. Whether a site saw this at all came down to its connector: one that already holds a session cookie by the time it asks for the dashboard left this path long before reaching the refusal.
@@ -429,8 +436,8 @@ For older changelog entries, please check the [changelog.txt](https://plugins.sv
 
 == Upgrade Notice ==
 
-= 2.10.2 =
-Fixes a 404 that kept a remote manager from reaching the dashboard when the login URL is hidden, if its connector signs in with a token rather than a session cookie. Update if you manage the site with one and use a custom login address.
+= 2.10.3 =
+Security release. Fixes a stored XSS in the Security Audit log (CVE-2026-81754), a way to skip the second factor when logging in, and several permission gaps on multisite. On a network, user and backup actions now need a network administrator.
 
 == Support ==
 
