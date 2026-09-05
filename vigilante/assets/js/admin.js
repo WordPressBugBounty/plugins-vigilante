@@ -2061,18 +2061,37 @@
 
         /**
          * Download logs as CSV
+         *
+         * Every cell goes through csvCell(): quotes are doubled in all columns,
+         * not only the message, and a value starting with = + - @ or a control
+         * character gets an apostrophe in front so a spreadsheet shows it
+         * instead of running it as a formula (S12). Action, address and
+         * User-Agent were added for B38: the columns that help diagnose an
+         * entry were exactly the ones the export left out.
          */
         downloadCSV: function(logs) {
-            var csv = 'Date,Type,Method,Severity,Message,User,IP\n';
+            var csvCell = function(value) {
+                var s = (value === null || value === undefined) ? '' : String(value);
+                if (/^[=+\-@\t\r]/.test(s)) {
+                    s = "'" + s;
+                }
+                return '"' + s.replace(/"/g, '""') + '"';
+            };
+            var csv = 'Date,Type,Action,Method,Severity,Message,User,IP,Address,User Agent\n';
             
             logs.forEach(function(log) {
-                csv += '"' + log.created_at + '",';
-                csv += '"' + log.event_type + '",';
-                csv += '"' + (log.request_method || '') + '",';
-                csv += '"' + log.severity + '",';
-                csv += '"' + (log.event_message || '').replace(/"/g, '""') + '",';
-                csv += '"' + (log.user_login || '') + '",';
-                csv += '"' + log.ip_address + '"\n';
+                csv += [
+                    csvCell(log.created_at),
+                    csvCell(log.event_type),
+                    csvCell(log.event_action),
+                    csvCell(log.request_method),
+                    csvCell(log.severity),
+                    csvCell(log.event_message),
+                    csvCell(log.user_login),
+                    csvCell(log.ip_address),
+                    csvCell(log.request_uri),
+                    csvCell(log.user_agent)
+                ].join(',') + '\n';
             });
 
             var blob = new Blob([csv], { type: 'text/csv' });

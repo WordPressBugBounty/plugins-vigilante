@@ -19,6 +19,8 @@ if ( ! defined( 'ABSPATH' ) ) {
  */
 class Vigilante_Two_Factor_Email {
 
+    use Vigilante_Two_Factor_Session;
+
     /**
      * Settings instance
      *
@@ -101,6 +103,8 @@ class Vigilante_Two_Factor_Email {
      * Initialize hooks
      */
     private function init_hooks() {
+        $this->init_session_hooks();
+
         // Intercept successful authentication
         add_filter( 'authenticate', array( $this, 'check_2fa_requirement' ), 100, 3 );
         
@@ -122,34 +126,20 @@ class Vigilante_Two_Factor_Email {
 
     /**
      * Filter login error messages
-     * 
-     * Hide the default "Invalid username or password" when 2FA verification is pending
+     *
+     * Hide the default "Invalid username or password" while a second-factor
+     * verification is pending for the visitor holding the pending token. Until
+     * 2.11.0 this also looked the visitor up by IP address, which behind a proxy
+     * or a CDN made one user's pending state leak into another's screen (S3).
      *
      * @param string $errors Error messages HTML.
      * @return string Filtered error messages
      */
     public function filter_login_errors( $errors ) {
-        // Check if we have a pending 2FA session (try multiple methods)
-        $user_id = $this->get_pending_user_id();
-        
-        if ( $user_id ) {
-            // We're in 2FA mode, hide the default WordPress error
-            // Clean up the trigger transient since cookie is now working
-            $ip = $this->database->get_client_ip();
-            delete_transient( 'vigilante_2fa_triggered_' . md5( $ip ) );
+        if ( $this->get_pending_user_id() ) {
             return '';
         }
-        
-        // Also check if we just triggered 2FA (cookie might not be available yet)
-        $ip = $this->database->get_client_ip();
-        $just_triggered = get_transient( 'vigilante_2fa_triggered_' . md5( $ip ) );
-        
-        if ( $just_triggered ) {
-            // Don't delete yet - might need it for the form display
-            // It will expire in 60 seconds anyway
-            return '';
-        }
-        
+
         return $errors;
     }
 
@@ -167,10 +157,27 @@ class Vigilante_Two_Factor_Email {
             return $user;
         }
 
-        // Check if already verifying 2FA (form submission) for this same user
-        if ( $this->is_2fa_verification_request( $user ) ) {
+        // An application password is a second factor of its own. The core
+        // action that flags it only fires when those were the credentials (S16).
+        if ( $this->authenticated_with_app_password( $user ) ) {
             return $user;
         }
+
+        /*
+         * There is deliberately no "already verifying, let it through" shortcut
+         * here any more. Until 2.11.0 a request carrying action=vigilante_2fa,
+         * the form nonce and a pending token returned $user at this point, and
+         * all three are in the hands of whoever knows the password: the nonce
+         * is printed on the form served to the pending visitor, and the token is
+         * issued to that same visitor. wp-login.php never reached this filter
+         * with that action, because login_form_vigilante_2fa ends the request,
+         * but any other login form that calls wp_signon(), the WooCommerce one
+         * for instance, does reach it and completed the login without a second
+         * factor (S19, found in the 2.11.0 cross review and reproduced). The
+         * verification form authenticates on its own path, handle_2fa_form(),
+         * which never passes through wp_authenticate(): nothing legitimate
+         * needed the shortcut.
+         */
 
         // Check if 2FA is required for this user
         if ( ! $this->user_requires_2fa( $user ) ) {
@@ -182,17 +189,25 @@ class Vigilante_Two_Factor_Email {
             return $user;
         }
 
+        // REST and XML-RPC have no verification form to show. The account still
+        // needs its second factor, so the login is refused, but without creating
+        // a pending session or sending a code: a connector retrying with the
+        // main password used to trigger one email per attempt (S16).
+        if ( $this->is_api_request() ) {
+            return $this->api_requires_2fa_error();
+        }
+
         // Check if there's a very recent code (less than 60 seconds old) to avoid duplicate emails on rapid retries
         $existing_code = $this->database->get_2fa_code( $user->ID );
-        $code_is_recent = $existing_code 
-            && strtotime( $existing_code['expires_at'] ) > time() 
+        $code_is_recent = $existing_code
+            && strtotime( $existing_code['expires_at'] ) > time()
             && empty( $existing_code['used'] )
             && ( time() - strtotime( $existing_code['created_at'] ) ) < 60;
-        
+
         if ( $code_is_recent ) {
             // Code was just sent, don't send another email
             $this->set_pending_verification( $user->ID );
-            
+
             return new WP_Error(
                 'vigilante_2fa_required',
                 __( 'Please enter the verification code sent to your email.', 'vigilante' )
@@ -217,38 +232,6 @@ class Vigilante_Two_Factor_Email {
             'vigilante_2fa_required',
             __( 'Please enter the verification code sent to your email.', 'vigilante' )
         );
-    }
-
-    /**
-     * Check if this is a 2FA verification request
-     *
-     * @return bool
-     */
-    private function is_2fa_verification_request( $user = null ) {
-        // The action alone proves nothing: it travels in the request and the
-        // attacker sets it. A genuine verification also carries the form nonce
-        // and a pending token issued to this very user.
-        $action = isset( $_REQUEST['action'] ) ? sanitize_text_field( wp_unslash( $_REQUEST['action'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
-
-        if ( 'vigilante_2fa' !== $action ) {
-            return false;
-        }
-
-        if ( ! isset( $_POST['_wpnonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['_wpnonce'] ) ), 'vigilante_2fa_verify' ) ) {
-            return false;
-        }
-
-        $pending_user_id = $this->get_pending_user_id();
-
-        if ( ! $pending_user_id ) {
-            return false;
-        }
-
-        if ( $user instanceof WP_User ) {
-            return $pending_user_id === (int) $user->ID;
-        }
-
-        return true;
     }
 
     /**
@@ -290,8 +273,9 @@ class Vigilante_Two_Factor_Email {
         $expiry_minutes = absint( $this->options['code_expiry_minutes'] ?? 10 );
         $expires_at = gmdate( 'Y-m-d H:i:s', time() + ( $expiry_minutes * 60 ) );
 
-        // Store in database
-        $this->database->store_2fa_code( $user_id, $code, $expires_at );
+        // Only the hash is stored. The code itself travels in the email and
+        // nowhere else, and verify_code() compares with hash_equals() (S11).
+        $this->database->store_2fa_code( $user_id, wp_hash( $code ), $expires_at );
 
         return $code;
     }
@@ -338,167 +322,20 @@ class Vigilante_Two_Factor_Email {
     }
 
     /**
-     * Set pending verification state
-     *
-     * @param int $user_id User ID.
-     * @return string Token for the pending session
-     */
-    private function set_pending_verification( $user_id ) {
-        // Check if there's already a valid token for this user
-        $existing_token = $this->get_existing_token_for_user( $user_id );
-        
-        if ( $existing_token ) {
-            $token = $existing_token;
-        } else {
-            $token = wp_generate_password( 32, false );
-        }
-        
-        set_transient( 
-            'vigilante_2fa_pending_' . $token, 
-            array(
-                'user_id'    => $user_id,
-                'created_at' => time(),
-            ),
-            HOUR_IN_SECONDS 
-        );
-
-        // Also store reverse lookup (user_id -> token)
-        set_transient( 
-            'vigilante_2fa_user_token_' . $user_id, 
-            $token,
-            HOUR_IN_SECONDS 
-        );
-        
-        // Set a short-lived transient to indicate 2FA was just triggered
-        // This helps filter_login_errors() detect 2FA mode before cookie is available
-        $ip = $this->database->get_client_ip();
-        set_transient( 'vigilante_2fa_triggered_' . md5( $ip ), $user_id, 60 );
-
-        // Store token in cookie for form submission
-        if ( ! headers_sent() ) {
-            setcookie( 
-                'vigilante_2fa_token', 
-                $token, 
-                array(
-                    'expires'  => time() + HOUR_IN_SECONDS,
-                    'path'     => COOKIEPATH,
-                    'domain'   => COOKIE_DOMAIN,
-                    'secure'   => is_ssl(),
-                    'httponly' => true,
-                    'samesite' => 'Strict',
-                )
-            );
-            // Make token available in current request
-            $_COOKIE['vigilante_2fa_token'] = $token;
-        }
-        
-        return $token;
-    }
-
-    /**
-     * Get existing token for a user if still valid
-     *
-     * @param int $user_id User ID.
-     * @return string|false Token or false if not found
-     */
-    private function get_existing_token_for_user( $user_id ) {
-        $token = get_transient( 'vigilante_2fa_user_token_' . $user_id );
-        
-        if ( ! $token ) {
-            return false;
-        }
-        
-        // Verify the token is still valid
-        $data = get_transient( 'vigilante_2fa_pending_' . $token );
-        
-        if ( ! $data || empty( $data['user_id'] ) || absint( $data['user_id'] ) !== $user_id ) {
-            return false;
-        }
-        
-        return $token;
-    }
-
-    /**
-     * Get pending verification user ID
-     *
-     * @return int|false User ID or false if not pending
-     */
-    private function get_pending_user_id() {
-        // First try cookie
-        $token = isset( $_COOKIE['vigilante_2fa_token'] ) ? sanitize_text_field( wp_unslash( $_COOKIE['vigilante_2fa_token'] ) ) : '';
-        
-        // Also check POST (for when cookie wasn't set in time)
-        if ( empty( $token ) && isset( $_POST['vigilante_2fa_token'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Missing
-            $token = sanitize_text_field( wp_unslash( $_POST['vigilante_2fa_token'] ) ); // phpcs:ignore WordPress.Security.NonceVerification.Missing
-        }
-        
-        if ( empty( $token ) ) {
-            return false;
-        }
-
-        $data = get_transient( 'vigilante_2fa_pending_' . $token );
-        
-        if ( ! $data || empty( $data['user_id'] ) ) {
-            return false;
-        }
-
-        return absint( $data['user_id'] );
-    }
-
-    /**
-     * Clear pending verification
-     */
-    private function clear_pending_verification() {
-        $token = isset( $_COOKIE['vigilante_2fa_token'] ) ? sanitize_text_field( wp_unslash( $_COOKIE['vigilante_2fa_token'] ) ) : '';
-        
-        // Also check POST
-        if ( empty( $token ) && isset( $_POST['vigilante_2fa_token'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Missing
-            $token = sanitize_text_field( wp_unslash( $_POST['vigilante_2fa_token'] ) ); // phpcs:ignore WordPress.Security.NonceVerification.Missing
-        }
-        
-        if ( ! empty( $token ) ) {
-            // Get user ID to clear reverse lookup
-            $data = get_transient( 'vigilante_2fa_pending_' . $token );
-            if ( $data && ! empty( $data['user_id'] ) ) {
-                delete_transient( 'vigilante_2fa_user_token_' . $data['user_id'] );
-            }
-            
-            delete_transient( 'vigilante_2fa_pending_' . $token );
-        }
-
-        // Clear cookie
-        if ( ! headers_sent() ) {
-            setcookie( 
-                'vigilante_2fa_token', 
-                '', 
-                array(
-                    'expires'  => time() - YEAR_IN_SECONDS,
-                    'path'     => COOKIEPATH,
-                    'domain'   => COOKIE_DOMAIN,
-                    'secure'   => is_ssl(),
-                    'httponly' => true,
-                    'samesite' => 'Strict',
-                )
-            );
-        }
-        
-        unset( $_COOKIE['vigilante_2fa_token'] );
-    }
-
-    /**
      * Handle 2FA verification form submission
      */
     public function handle_2fa_form() {
-        // Verify nonce. A bare return would let wp-login.php fall through to its
+        // The pending user is resolved first so that a failed nonce can be
+        // explained on the form and recorded (S15). Both failure paths end the
+        // request: a bare return would let wp-login.php fall through to its
         // default case and call wp_signon(), completing the login without the
-        // second factor, so this path must end the request.
+        // second factor.
+        $user_id = $this->get_pending_user_id();
+
         if ( ! isset( $_POST['_wpnonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['_wpnonce'] ) ), 'vigilante_2fa_verify' ) ) {
-            wp_safe_redirect( wp_login_url() );
-            exit;
+            $this->handle_invalid_nonce( $user_id );
         }
 
-        $user_id = $this->get_pending_user_id();
-        
         if ( ! $user_id ) {
             wp_safe_redirect( wp_login_url() );
             exit;
@@ -513,7 +350,7 @@ class Vigilante_Two_Factor_Email {
         if ( is_wp_error( $result ) ) {
             // Store error for display
             set_transient( 'vigilante_2fa_error_' . $user_id, $result->get_error_message(), 60 );
-            
+
             // Redirect back to login
             wp_safe_redirect( add_query_arg( 'vigilante_2fa', '1', wp_login_url() ) );
             exit;
@@ -523,9 +360,8 @@ class Vigilante_Two_Factor_Email {
         $this->clear_pending_verification();
         $this->database->mark_2fa_code_used( $user_id );
 
-        // Trust device if requested
-        if ( $remember_device ) {
-            $this->trust_device( $user_id );
+        // Trust device if requested (and if the option allows it, see trust_device)
+        if ( $remember_device && $this->trust_device( $user_id ) ) {
             $this->log_event( '2fa_device_trusted', $user_id, __( 'Device saved as trusted', 'vigilante' ) );
         }
 
@@ -539,7 +375,7 @@ class Vigilante_Two_Factor_Email {
         // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- wp_login is a WordPress core hook that must be fired on login.
         do_action( 'wp_login', $user->user_login, $user );
 
-        // Redirect to admin dashboard (always use admin_url to avoid issues with popups, 
+        // Redirect to admin dashboard (always use admin_url to avoid issues with popups,
         // malformed URLs, or query parameters that could cause problems)
         wp_safe_redirect( admin_url() );
         exit;
@@ -586,7 +422,8 @@ class Vigilante_Two_Factor_Email {
         }
 
         // Check code
-        if ( $code !== $stored['code'] ) {
+        // Stored hashed since 2.11.0 (S11); a code that predates the update was purged by the migration.
+        if ( ! hash_equals( (string) $stored['code'], wp_hash( $code ) ) ) {
             // Increment code-specific attempts
             $this->database->increment_2fa_attempts( $user_id );
             
@@ -632,23 +469,16 @@ class Vigilante_Two_Factor_Email {
      * Maybe show 2FA verification form on login page
      */
     public function maybe_show_2fa_form() {
-        $user_id = $this->get_pending_user_id();
-        
-        // If no user_id from cookie/POST, try the trigger transient
-        if ( ! $user_id ) {
-            $ip = $this->database->get_client_ip();
-            $user_id = get_transient( 'vigilante_2fa_triggered_' . md5( $ip ) );
-        }
-        
-        if ( ! $user_id ) {
+        // Only the visitor presenting the pending token gets the form. There is
+        // no fallback by IP address and no lookup of the token by user (S3).
+        $session = $this->get_pending_session();
+
+        if ( ! $session ) {
             return;
         }
 
-        // Get the token for hidden field
-        $token = isset( $_COOKIE['vigilante_2fa_token'] ) ? sanitize_text_field( wp_unslash( $_COOKIE['vigilante_2fa_token'] ) ) : '';
-        if ( empty( $token ) ) {
-            $token = get_transient( 'vigilante_2fa_user_token_' . $user_id );
-        }
+        $user_id = $session['user_id'];
+        $token   = $session['token'];
 
         // Get any error message
         $error = get_transient( 'vigilante_2fa_error_' . $user_id );
@@ -841,46 +671,6 @@ class Vigilante_Two_Factor_Email {
         } else {
             wp_send_json_error( __( 'Failed to send email. Please try again.', 'vigilante' ) );
         }
-    }
-
-    /**
-     * Check if device is trusted
-     *
-     * @param int $user_id User ID.
-     * @return bool
-     */
-    private function is_device_trusted( $user_id ) {
-        $device_hash = $this->generate_device_hash( $user_id );
-        return $this->database->is_device_trusted( $user_id, $device_hash );
-    }
-
-    /**
-     * Trust the current device
-     *
-     * @param int $user_id User ID.
-     */
-    private function trust_device( $user_id ) {
-        $device_hash   = $this->generate_device_hash( $user_id );
-        $user_agent    = isset( $_SERVER['HTTP_USER_AGENT'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) ) : '';
-        $remember_days = absint( $this->options['remember_device_days'] ?? 30 );
-        $expires_at    = gmdate( 'Y-m-d H:i:s', time() + ( $remember_days * DAY_IN_SECONDS ) );
-
-        $this->database->trust_device( $user_id, $device_hash, $user_agent, $expires_at );
-    }
-
-    /**
-     * Generate device hash
-     *
-     * No IP address included for GDPR compliance
-     *
-     * @param int $user_id User ID.
-     * @return string
-     */
-    private function generate_device_hash( $user_id ) {
-        $user_agent = isset( $_SERVER['HTTP_USER_AGENT'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) ) : '';
-        $salt       = defined( 'AUTH_SALT' ) ? AUTH_SALT : 'vigilante_fallback_salt';
-
-        return hash( 'sha256', $user_id . $user_agent . $salt );
     }
 
     /**

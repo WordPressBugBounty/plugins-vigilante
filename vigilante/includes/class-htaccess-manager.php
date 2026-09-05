@@ -237,49 +237,68 @@ class Vigilante_Htaccess_Manager {
     /**
      * Remove a block from .htaccess
      *
+     * Takes the same write lock as add_block(): until 2.11.0 this
+     * read-modify-write ran unlocked, so a removal racing an addition of a
+     * different block could drop the block that had just been written (S5).
+     *
      * @param string $marker_start Start marker.
      * @param string $marker_end   End marker.
+     * @param bool   $automatic    True when Vigilant removes the block by itself
+     *                             (a mode expiring on cron), false when a person
+     *                             asked for it. Same distinction as add_block().
      * @return bool|WP_Error
      */
-    public function remove_block( $marker_start, $marker_end ) {
-        if ( ! Vigilante_Settings::can_write_shared_files() ) {
+    public function remove_block( $marker_start, $marker_end, $automatic = false ) {
+        $allowed = $automatic
+            ? Vigilante_Settings::owns_shared_files()
+            : Vigilante_Settings::can_write_shared_files();
+
+        if ( ! $allowed ) {
             return new WP_Error( 'network_not_owner', Vigilante_Settings::get_shared_files_notice() );
         }
 
-        // Read current content
-        $content = $this->read_file();
-        
-        if ( false === $content || empty( $content ) ) {
-            return true; // Nothing to remove
+        if ( ! $this->acquire_lock() ) {
+            return new WP_Error( 'locked', __( 'Another process is writing .htaccess right now', 'vigilante' ) );
         }
 
-        // Check if block exists
-        if ( strpos( $content, $marker_start ) === false ) {
-            return true; // Block doesn't exist, nothing to do
-        }
+        try {
+            // Read current content
+            $content = $this->read_file();
 
-        // Create backup before modification
-        $this->create_backup( $content );
+            if ( false === $content || empty( $content ) ) {
+                return true; // Nothing to remove
+            }
 
-        // Remove the block
-        $new_content = $this->remove_block_from_content( $content, $marker_start, $marker_end );
+            // Check if block exists
+            if ( strpos( $content, $marker_start ) === false ) {
+                return true; // Block doesn't exist, nothing to do
+            }
 
-        // Validate result - WordPress rules should still be there if they were before
-        if ( strpos( $content, '# BEGIN WordPress' ) !== false && 
-             strpos( $new_content, '# BEGIN WordPress' ) === false ) {
-            // WordPress rules were removed - this is wrong, restore backup
+            // Create backup before modification
+            $this->create_backup( $content );
+
+            // Remove the block
+            $new_content = $this->remove_block_from_content( $content, $marker_start, $marker_end );
+
+            // Validate result - WordPress rules should still be there if they were before
+            if ( strpos( $content, '# BEGIN WordPress' ) !== false &&
+                 strpos( $new_content, '# BEGIN WordPress' ) === false ) {
+                // WordPress rules were removed - this is wrong, restore backup
+                $this->restore_backup();
+                return new WP_Error( 'wordpress_rules_lost', __( 'Operation would remove WordPress rules, aborted', 'vigilante' ) );
+            }
+
+            // Write file
+            if ( $this->write_file( $new_content ) ) {
+                return true;
+            }
+
+            // Write failed, restore backup
             $this->restore_backup();
-            return new WP_Error( 'wordpress_rules_lost', __( 'Operation would remove WordPress rules, aborted', 'vigilante' ) );
+            return new WP_Error( 'write_failed', __( 'Failed to write .htaccess', 'vigilante' ) );
+        } finally {
+            $this->release_lock();
         }
-
-        // Write file
-        if ( $this->write_file( $new_content ) ) {
-            return true;
-        }
-
-        // Write failed, restore backup
-        $this->restore_backup();
-        return new WP_Error( 'write_failed', __( 'Failed to write .htaccess', 'vigilante' ) );
     }
 
     /**

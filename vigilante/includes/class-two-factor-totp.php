@@ -20,6 +20,8 @@ if ( ! defined( 'ABSPATH' ) ) {
  */
 class Vigilante_Two_Factor_TOTP {
 
+    use Vigilante_Two_Factor_Session;
+
     /**
      * Settings instance
      *
@@ -81,9 +83,10 @@ class Vigilante_Two_Factor_TOTP {
     const SECRET_LENGTH = 20;
 
     /**
-     * Time window tolerance (allows +-2 time steps for clock skew)
+     * Time window tolerance: +-1 time step (30 seconds) for clock skew.
+     * Was 2 until 2.11.0, which accepted five codes at any moment (S2).
      */
-    const TIME_WINDOW = 2;
+    const TIME_WINDOW = 1;
 
     /**
      * Constructor
@@ -121,6 +124,8 @@ class Vigilante_Two_Factor_TOTP {
      * Initialize hooks
      */
     private function init_hooks() {
+        $this->init_session_hooks();
+
         // Intercept authentication
         add_filter( 'authenticate', array( $this, 'check_2fa_requirement' ), 100, 3 );
 
@@ -158,12 +163,14 @@ class Vigilante_Two_Factor_TOTP {
     /**
      * Filter login errors to hide default messages during 2FA
      *
+     * Resolved from the pending token only; the lookup by IP address that used
+     * to live here leaked one user's pending state to another behind a proxy (S3).
+     *
      * @param string $errors Login error messages.
      * @return string
      */
     public function filter_login_errors( $errors ) {
-        $ip      = $this->database->get_client_ip();
-        $user_id = get_transient( 'vigilante_2fa_triggered_' . md5( $ip ) );
+        $user_id = $this->get_pending_user_id();
 
         if ( ! $user_id ) {
             return $errors;
@@ -192,10 +199,27 @@ class Vigilante_Two_Factor_TOTP {
             return $user;
         }
 
-        // Skip if this is a 2FA verification request for this same user
-        if ( $this->is_2fa_verification_request( $user ) ) {
+        // An application password is a second factor of its own. The core
+        // action that flags it only fires when those were the credentials (S16).
+        if ( $this->authenticated_with_app_password( $user ) ) {
             return $user;
         }
+
+        /*
+         * There is deliberately no "already verifying, let it through" shortcut
+         * here any more. Until 2.11.0 a request carrying action=vigilante_2fa,
+         * the form nonce and a pending token returned $user at this point, and
+         * all three are in the hands of whoever knows the password: the nonce
+         * is printed on the form served to the pending visitor, and the token is
+         * issued to that same visitor. wp-login.php never reached this filter
+         * with that action, because login_form_vigilante_2fa ends the request,
+         * but any other login form that calls wp_signon(), the WooCommerce one
+         * for instance, does reach it and completed the login without a second
+         * factor (S19, found in the 2.11.0 cross review and reproduced). The
+         * verification form authenticates on its own path, handle_2fa_form(),
+         * which never passes through wp_authenticate(): nothing legitimate
+         * needed the shortcut.
+         */
 
         // Check if user requires 2FA
         if ( ! $this->user_requires_2fa( $user ) ) {
@@ -226,7 +250,12 @@ class Vigilante_Two_Factor_TOTP {
             return $user;
         }
 
-        // TOTP is configured - require verification
+        // TOTP is configured - require verification. REST and XML-RPC have no
+        // form to show, so the login is refused without a pending session (S16).
+        if ( $this->is_api_request() ) {
+            return $this->api_requires_2fa_error();
+        }
+
         $this->set_pending_verification( $user->ID );
 
         $this->log_event( 'totp_verification_requested', $user->ID, __( 'TOTP verification requested at login', 'vigilante' ) );
@@ -291,53 +320,39 @@ class Vigilante_Two_Factor_TOTP {
     }
 
     /**
-     * Check if this is a 2FA verification form submission
-     *
-     * @return bool
-     */
-    private function is_2fa_verification_request( $user = null ) {
-        // The action alone proves nothing: it travels in the request and the
-        // attacker sets it. A genuine verification also carries the form nonce
-        // and a pending token issued to this very user.
-        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- The nonce is verified right below.
-        $action = isset( $_REQUEST['action'] ) ? sanitize_text_field( wp_unslash( $_REQUEST['action'] ) ) : '';
-
-        if ( 'vigilante_2fa' !== $action ) {
-            return false;
-        }
-
-        if ( ! isset( $_POST['_wpnonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['_wpnonce'] ) ), 'vigilante_2fa_verify' ) ) {
-            return false;
-        }
-
-        $pending_user_id = $this->get_pending_user_id();
-
-        if ( ! $pending_user_id ) {
-            return false;
-        }
-
-        if ( $user instanceof WP_User ) {
-            return $pending_user_id === (int) $user->ID;
-        }
-
-        return true;
-    }
-
-    /**
      * Handle 2FA verification form submission
      */
     public function handle_2fa_form() {
-        // Verify nonce. A bare return would let wp-login.php fall through to its
+        // The pending user is resolved first so that a failed nonce can be
+        // explained on the form and recorded (S15). Both failure paths end the
+        // request: a bare return would let wp-login.php fall through to its
         // default case and call wp_signon(), completing the login without the
-        // second factor, so this path must end the request.
+        // second factor.
+        $user_id = $this->get_pending_user_id();
+
         if ( ! isset( $_POST['_wpnonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['_wpnonce'] ) ), 'vigilante_2fa_verify' ) ) {
+            $this->handle_invalid_nonce( $user_id );
+        }
+
+        if ( ! $user_id ) {
             wp_safe_redirect( wp_login_url() );
             exit;
         }
 
-        $user_id = $this->get_pending_user_id();
+        // Attempt limit per pending session (S2). Until 2.11.0 nothing counted
+        // here: the lockout only runs on the authenticate filter, which this
+        // form never passes through. The limit is checked before any code is
+        // verified so that a session past it costs nothing, since a backup
+        // code check alone is up to ten wp_check_password() calls.
+        $max_attempts = absint( $this->options['max_attempts'] ?? 3 );
 
-        if ( ! $user_id ) {
+        if ( $max_attempts < 1 ) {
+            $max_attempts = 3;
+        }
+
+        if ( $this->get_pending_attempts() >= $max_attempts ) {
+            $this->log_event( 'totp_max_attempts_exceeded', $user_id, __( 'Maximum verification attempts exceeded', 'vigilante' ), 'warning' );
+            $this->clear_pending_verification();
             wp_safe_redirect( wp_login_url() );
             exit;
         }
@@ -354,6 +369,7 @@ class Vigilante_Two_Factor_TOTP {
 
             if ( is_wp_error( $backup_result ) ) {
                 // Both failed
+                $this->increment_pending_attempts();
                 set_transient( 'vigilante_2fa_error_' . $user_id, $result->get_error_message(), 60 );
                 wp_safe_redirect( add_query_arg( 'vigilante_2fa', '1', wp_login_url() ) );
                 exit;
@@ -366,8 +382,8 @@ class Vigilante_Two_Factor_TOTP {
         // Verification successful
         $this->clear_pending_verification();
 
-        if ( $remember_device ) {
-            $this->trust_device( $user_id );
+        // Trust device if requested (and if the option allows it, see trust_device)
+        if ( $remember_device && $this->trust_device( $user_id ) ) {
             $this->log_event( 'totp_device_trusted', $user_id, __( 'Device saved as trusted', 'vigilante' ) );
         }
 
@@ -397,26 +413,21 @@ class Vigilante_Two_Factor_TOTP {
             }
         }
 
-        $user_id = $this->get_pending_user_id();
+        // Only the visitor presenting the pending token gets the form. There is
+        // no fallback by IP address and no lookup of the token by user (S3).
+        $session = $this->get_pending_session();
 
-        if ( ! $user_id ) {
-            $ip      = $this->database->get_client_ip();
-            $user_id = get_transient( 'vigilante_2fa_triggered_' . md5( $ip ) );
-        }
-
-        if ( ! $user_id ) {
+        if ( ! $session ) {
             return;
         }
+
+        $user_id = $session['user_id'];
+        $token   = $session['token'];
 
         // Only show if user has TOTP configured
         $totp_data = $this->database->get_totp_data( $user_id );
         if ( ! $totp_data || empty( $totp_data['is_configured'] ) ) {
             return;
-        }
-
-        $token = isset( $_COOKIE['vigilante_2fa_token'] ) ? sanitize_text_field( wp_unslash( $_COOKIE['vigilante_2fa_token'] ) ) : '';
-        if ( empty( $token ) ) {
-            $token = get_transient( 'vigilante_2fa_user_token_' . $user_id );
         }
 
         $error = get_transient( 'vigilante_2fa_error_' . $user_id );
@@ -740,11 +751,16 @@ class Vigilante_Two_Factor_TOTP {
      * Encrypt TOTP secret for database storage
      *
      * @param string $secret Plain Base32 secret.
-     * @return string Encrypted string (base64).
+     * @return string Encrypted string (base64), or empty string without a key.
      */
     public function encrypt_secret( $secret ) {
         $key = $this->get_encryption_key();
-        $iv  = openssl_random_pseudo_bytes( 16 );
+
+        if ( '' === $key ) {
+            return '';
+        }
+
+        $iv = openssl_random_pseudo_bytes( 16 );
 
         $encrypted = openssl_encrypt( $secret, 'aes-256-cbc', $key, OPENSSL_RAW_DATA, $iv );
 
@@ -765,6 +781,10 @@ class Vigilante_Two_Factor_TOTP {
     public function decrypt_secret( $encrypted ) {
         $key = $this->get_encryption_key();
 
+        if ( '' === $key ) {
+            return false;
+        }
+
         // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_decode -- Required for binary data retrieval
         $data = base64_decode( $encrypted, true );
 
@@ -781,18 +801,34 @@ class Vigilante_Two_Factor_TOTP {
     }
 
     /**
-     * Get encryption key derived from WordPress salts
+     * Whether the site defines the key the authenticator secret is encrypted with
      *
-     * @return string 32-byte key.
+     * @return bool
      */
-    private function get_encryption_key() {
-        $salt = defined( 'AUTH_KEY' ) ? AUTH_KEY : 'vigilante_fallback_key';
-        return hash( 'sha256', $salt . 'vigilante_totp', true );
+    public function has_encryption_key() {
+        return defined( 'AUTH_KEY' )
+            && is_string( AUTH_KEY )
+            && '' !== AUTH_KEY
+            && 'put your unique phrase here' !== AUTH_KEY;
     }
 
-    // =========================================================================
-    // Base32 encoding/decoding
-    // =========================================================================
+    /**
+     * Get encryption key derived from WordPress salts
+     *
+     * Until 2.11.0 a site without AUTH_KEY fell back to a literal written in
+     * this file, which gave every such site the same key and made the
+     * encryption cosmetic (S13). Without AUTH_KEY there is no key: setup
+     * refuses and says why, and nothing is encrypted with a known value.
+     *
+     * @return string 32-byte key, or empty string when the site has none.
+     */
+    private function get_encryption_key() {
+        if ( ! $this->has_encryption_key() ) {
+            return '';
+        }
+
+        return hash( 'sha256', AUTH_KEY . 'vigilante_totp', true );
+    }
 
     /**
      * Base32 encode
@@ -1133,6 +1169,10 @@ class Vigilante_Two_Factor_TOTP {
             wp_send_json_error( __( 'Invalid code. Make sure your authenticator app is set up correctly and the time is synchronized.', 'vigilante' ) );
         }
 
+        if ( ! $this->has_encryption_key() ) {
+            wp_send_json_error( __( 'This site does not define the AUTH_KEY security key, so the authenticator secret cannot be stored securely. Add the WordPress security keys to the site configuration and try again.', 'vigilante' ) );
+        }
+
         // Encrypt and store secret
         $encrypted = $this->encrypt_secret( $secret );
 
@@ -1214,153 +1254,6 @@ class Vigilante_Two_Factor_TOTP {
         ) );
     }
 
-    /**
-     * Set pending verification state
-     *
-     * @param int $user_id User ID.
-     * @return string Token.
-     */
-    private function set_pending_verification( $user_id ) {
-        $existing_token = get_transient( 'vigilante_2fa_user_token_' . $user_id );
-
-        $token = $existing_token ? $existing_token : wp_generate_password( 32, false );
-
-        set_transient(
-            'vigilante_2fa_pending_' . $token,
-            array(
-                'user_id'    => $user_id,
-                'created_at' => time(),
-            ),
-            HOUR_IN_SECONDS
-        );
-
-        set_transient( 'vigilante_2fa_user_token_' . $user_id, $token, HOUR_IN_SECONDS );
-
-        $ip = $this->database->get_client_ip();
-        set_transient( 'vigilante_2fa_triggered_' . md5( $ip ), $user_id, 60 );
-
-        if ( ! headers_sent() ) {
-            setcookie(
-                'vigilante_2fa_token',
-                $token,
-                array(
-                    'expires'  => time() + HOUR_IN_SECONDS,
-                    'path'     => COOKIEPATH,
-                    'domain'   => COOKIE_DOMAIN,
-                    'secure'   => is_ssl(),
-                    'httponly' => true,
-                    'samesite' => 'Strict',
-                )
-            );
-            $_COOKIE['vigilante_2fa_token'] = $token;
-        }
-
-        return $token;
-    }
-
-    /**
-     * Get pending user ID from token
-     *
-     * @return int|false User ID or false.
-     */
-    private function get_pending_user_id() {
-        $token = '';
-
-        // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Token is for session identification
-        if ( isset( $_POST['vigilante_2fa_token'] ) ) {
-            $token = sanitize_text_field( wp_unslash( $_POST['vigilante_2fa_token'] ) ); // phpcs:ignore WordPress.Security.NonceVerification.Missing
-        } elseif ( isset( $_COOKIE['vigilante_2fa_token'] ) ) {
-            $token = sanitize_text_field( wp_unslash( $_COOKIE['vigilante_2fa_token'] ) );
-        }
-
-        if ( empty( $token ) ) {
-            return false;
-        }
-
-        $pending = get_transient( 'vigilante_2fa_pending_' . $token );
-
-        if ( ! $pending || ! isset( $pending['user_id'] ) ) {
-            return false;
-        }
-
-        return absint( $pending['user_id'] );
-    }
-
-    /**
-     * Clear pending verification
-     */
-    private function clear_pending_verification() {
-        $token = '';
-
-        // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Token is for session identification
-        if ( isset( $_POST['vigilante_2fa_token'] ) ) {
-            $token = sanitize_text_field( wp_unslash( $_POST['vigilante_2fa_token'] ) ); // phpcs:ignore WordPress.Security.NonceVerification.Missing
-        } elseif ( isset( $_COOKIE['vigilante_2fa_token'] ) ) {
-            $token = sanitize_text_field( wp_unslash( $_COOKIE['vigilante_2fa_token'] ) );
-        }
-
-        if ( ! empty( $token ) ) {
-            delete_transient( 'vigilante_2fa_pending_' . $token );
-        }
-
-        if ( ! headers_sent() ) {
-            setcookie(
-                'vigilante_2fa_token',
-                '',
-                array(
-                    'expires'  => time() - HOUR_IN_SECONDS,
-                    'path'     => COOKIEPATH,
-                    'domain'   => COOKIE_DOMAIN,
-                    'secure'   => is_ssl(),
-                    'httponly' => true,
-                    'samesite' => 'Strict',
-                )
-            );
-        }
-    }
-
-    // =========================================================================
-    // Trusted devices (reuses database methods from email 2FA)
-    // =========================================================================
-
-    /**
-     * Check if current device is trusted
-     *
-     * @param int $user_id User ID.
-     * @return bool
-     */
-    private function is_device_trusted( $user_id ) {
-        $device_hash = $this->generate_device_hash( $user_id );
-        return $this->database->is_device_trusted( $user_id, $device_hash );
-    }
-
-    /**
-     * Trust the current device
-     *
-     * @param int $user_id User ID.
-     */
-    private function trust_device( $user_id ) {
-        $device_hash   = $this->generate_device_hash( $user_id );
-        $user_agent    = isset( $_SERVER['HTTP_USER_AGENT'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) ) : '';
-        $remember_days = absint( $this->options['remember_device_days'] ?? 30 );
-        $expires_at    = gmdate( 'Y-m-d H:i:s', time() + ( $remember_days * DAY_IN_SECONDS ) );
-
-        $this->database->trust_device( $user_id, $device_hash, $user_agent, $expires_at );
-    }
-
-    /**
-     * Generate device hash (no IP for GDPR)
-     *
-     * @param int $user_id User ID.
-     * @return string
-     */
-    private function generate_device_hash( $user_id ) {
-        $user_agent = isset( $_SERVER['HTTP_USER_AGENT'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) ) : '';
-        $salt       = defined( 'AUTH_SALT' ) ? AUTH_SALT : 'vigilante_fallback_salt';
-        return hash( 'sha256', $user_id . $user_agent . $salt );
-    }
-
-    // =========================================================================
     // =========================================================================
     // Grace period admin notice and forced redirect
     // =========================================================================

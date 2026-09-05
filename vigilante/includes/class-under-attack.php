@@ -308,7 +308,7 @@ class Vigilante_Under_Attack {
 
         if ( $result ) {
             // Remove cache bypass rules - best-effort
-            $this->safe_manage_cache( 'deactivate' );
+            $this->safe_manage_cache( 'manual' === $reason ? 'deactivate' : 'deactivate_auto' );
 
             // Refresh the Security Analyzer with a full scan so the dashboard
             // reflects the restored configuration (including the slow HTTP/header
@@ -482,7 +482,9 @@ class Vigilante_Under_Attack {
      * WP_Filesystem credential forms or PHP errors from corrupting
      * AJAX responses.
      *
-     * @param string $action Either 'activate' or 'deactivate'.
+     * @param string $action 'activate', 'deactivate' (a person switched the mode
+     *                       off) or 'deactivate_auto' (the mode expired on its
+     *                       own, from whichever request noticed it).
      */
     private function safe_manage_cache( $action ) {
         ob_start();
@@ -491,10 +493,28 @@ class Vigilante_Under_Attack {
                 $this->add_cache_bypass_rules();
                 $this->purge_page_caches();
             } else {
-                $this->remove_cache_bypass_rules();
+                $this->remove_cache_bypass_rules( 'deactivate_auto' === $action );
             }
-        } catch ( \Throwable $e ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
-            // Cache operations are best-effort, must not break activation/deactivation
+        } catch ( \Throwable $e ) {
+            // Cache operations are best-effort and must not break the
+            // activation AJAX response, but a swallowed exception is not the
+            // same as nothing happening: until 2.11.0 this block hid a missing
+            // class and the cache rules were never written from a request that
+            // had not loaded the .htaccess manager, with no trace anywhere.
+            if ( $this->activity_log ) {
+                $this->activity_log->log(
+                    'security',
+                    'under_attack_cache_error',
+                    sprintf(
+                        /* translators: 1: activate/deactivate, 2: error message */
+                        __( 'Under Attack cache step (%1$s) failed: %2$s', 'vigilante' ),
+                        $action,
+                        $e->getMessage()
+                    ),
+                    array( 'action' => $action ),
+                    'warning'
+                );
+            }
         }
         ob_end_clean();
     }
@@ -502,110 +522,154 @@ class Vigilante_Under_Attack {
     /**
      * Add .htaccess rules to bypass full-page caching during Under Attack mode
      *
-     * Uses direct file I/O instead of WP_Filesystem to avoid the credential
-     * form issue that causes silent failures during AJAX requests.
-     * The .htaccess must be writable by the web server for WordPress rewrite
-     * rules to work, so direct PHP writes are safe here.
+     * Goes through Vigilante_Htaccess_Manager like every other block the
+     * plugin writes: lock, backup, validation, read-back, and on a network the
+     * check that only a network administrator on the main site rewrites the
+     * shared file. Until 2.11.0 this method wrote the file directly, so the
+     * administrator of any subsite rewrote the root .htaccess of the whole
+     * network by switching the mode on (S5 of the 28 Aug 2026 audit). The mode
+     * is switched on by a person from the admin screen, so the write counts
+     * as a decision and asks for the capability.
+     *
+     * A refused write is not a failure of the mode: the challenge, the rate
+     * limit and the REST restriction never touch this file and stay on.
+     * safe_manage_cache() swallows the WP_Error for that reason.
      */
     private function add_cache_bypass_rules() {
-        $htaccess_path = ABSPATH . '.htaccess';
+        // Loaded on demand by every consumer of the manager, and not by the
+        // bootstrap: in an AJAX request where nothing else has needed it, the
+        // class is not there and get_instance() throws.
+        require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-manager.php';
 
-        // Only proceed if .htaccess exists and is writable
-        // Direct I/O used because WP_Filesystem requires credentials form in AJAX context.
-        if ( ! file_exists( $htaccess_path ) || ! is_writable( $htaccess_path ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_is_writable -- WP_Filesystem fails in AJAX context (credential form)
+        $result = Vigilante_Htaccess_Manager::get_instance()->add_block(
+            self::HTACCESS_MARKER_START,
+            self::HTACCESS_MARKER_END,
+            self::get_cache_bypass_rules(),
+            'top',
+            false
+        );
+
+        $this->log_cache_result( 'activate', $result );
+    }
+
+    /**
+     * The cache-bypass rules, without markers
+     *
+     * @since 2.11.0 Public, so the admin can show them when they could not be written.
+     *
+     * @return string
+     */
+    public static function get_cache_bypass_rules() {
+        $rules  = '<IfModule mod_headers.c>' . "\n";
+        $rules .= '    Header set Cache-Control "no-store, no-cache, must-revalidate, max-age=0"' . "\n";
+        $rules .= '    Header set Pragma "no-cache"' . "\n";
+        $rules .= '</IfModule>' . "\n";
+        $rules .= '<IfModule LiteSpeed>' . "\n";
+        $rules .= '    CacheDisable public /' . "\n";
+        $rules .= '</IfModule>';
+
+        return $rules;
+    }
+
+    /**
+     * The full block to paste by hand, markers included
+     *
+     * @since 2.11.0
+     *
+     * @return string
+     */
+    public static function get_cache_bypass_block() {
+        return self::HTACCESS_MARKER_START . "\n" . self::get_cache_bypass_rules() . "\n" . self::HTACCESS_MARKER_END;
+    }
+
+    /**
+     * Whether the mode is active but its cache rules are not in the .htaccess
+     *
+     * True on a site that owns the shared file (single site, or the main site
+     * of a network) and runs Apache or LiteSpeed, when the block is missing:
+     * the write was refused, typically on a host where WordPress cannot write
+     * files by itself. The admin then shows the block to add by hand. On a
+     * subsite the file is deliberately out of reach, so this stays false.
+     *
+     * @since 2.11.0
+     *
+     * @return bool
+     */
+    public function cache_rules_missing() {
+        if ( ! $this->is_active() || ! Vigilante_Settings::owns_shared_files() ) {
+            return false;
+        }
+
+        require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-manager.php';
+
+        if ( ! Vigilante_Htaccess_Manager::get_instance()->is_apache() ) {
+            return false;
+        }
+
+        $path = ABSPATH . '.htaccess';
+
+        if ( ! is_readable( $path ) ) {
+            return true;
+        }
+
+        $content = file_get_contents( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Read-only check of the site's own .htaccess for a marker; WP_Filesystem is not warranted.
+
+        return false === $content || false === strpos( $content, self::HTACCESS_MARKER_START );
+    }
+
+    /**
+     * Record a refused .htaccess write, so a mode active without its cache
+     * rules leaves a trace (a refused network write, a held lock, a failed
+     * read-back). A WP_Error is not an exception and the catch below never
+     * sees it.
+     *
+     * @param string        $action activate or deactivate.
+     * @param bool|WP_Error $result What the manager returned.
+     */
+    private function log_cache_result( $action, $result ) {
+        if ( ! is_wp_error( $result ) || ! $this->activity_log ) {
             return;
         }
 
-        $content = file_get_contents( $htaccess_path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
-
-        if ( false === $content ) {
-            return;
-        }
-
-        // Remove existing block if present (avoid duplicates)
-        $content = $this->remove_htaccess_block( $content );
-
-        // Build the cache bypass block
-        $block  = self::HTACCESS_MARKER_START . "\n";
-        $block .= '<IfModule mod_headers.c>' . "\n";
-        $block .= '    Header set Cache-Control "no-store, no-cache, must-revalidate, max-age=0"' . "\n";
-        $block .= '    Header set Pragma "no-cache"' . "\n";
-        $block .= '</IfModule>' . "\n";
-        $block .= '<IfModule LiteSpeed>' . "\n";
-        $block .= '    CacheDisable public /' . "\n";
-        $block .= '</IfModule>' . "\n";
-        $block .= self::HTACCESS_MARKER_END;
-
-        // Insert at top
-        $new_content = $block . "\n\n" . ltrim( $content );
-
-        file_put_contents( $htaccess_path, $new_content, LOCK_EX ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents, PluginCheck.CodeAnalysis.WriteFile.ABSPATHDetected -- .htaccess must live at the site root for the web server to read it (wp_upload_dir() is not an option); direct I/O because WP_Filesystem fails in the AJAX credential-form context.
+        $this->activity_log->log(
+            'security',
+            'under_attack_cache_skipped',
+            sprintf(
+                /* translators: 1: activate/deactivate, 2: reason */
+                __( 'Under Attack cache rules not written (%1$s): %2$s', 'vigilante' ),
+                $action,
+                $result->get_error_message()
+            ),
+            array(
+                'action' => $action,
+                'code'   => $result->get_error_code(),
+            ),
+            'info'
+        );
     }
 
     /**
      * Remove .htaccess cache bypass rules when mode is deactivated
      *
-     * Uses direct file I/O for the same reasons as add_cache_bypass_rules().
-     */
-    private function remove_cache_bypass_rules() {
-        $htaccess_path = ABSPATH . '.htaccess';
-
-        if ( ! file_exists( $htaccess_path ) || ! is_writable( $htaccess_path ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_is_writable -- WP_Filesystem fails in AJAX context (credential form)
-            return;
-        }
-
-        $content = file_get_contents( $htaccess_path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
-
-        if ( false === $content ) {
-            return;
-        }
-
-        // Only write if block actually exists
-        if ( false === strpos( $content, self::HTACCESS_MARKER_START ) ) {
-            return;
-        }
-
-        $new_content = $this->remove_htaccess_block( $content );
-
-        file_put_contents( $htaccess_path, $new_content, LOCK_EX ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents, PluginCheck.CodeAnalysis.WriteFile.ABSPATHDetected -- .htaccess must live at the site root for the web server to read it (wp_upload_dir() is not an option); direct I/O because WP_Filesystem fails in the AJAX credential-form context.
-    }
-
-    /**
-     * Remove the Under Attack block from .htaccess content string
+     * Same path as add_cache_bypass_rules(). When the mode expires by itself
+     * the removal is Vigilant acting alone, from whichever request noticed the
+     * expiry, so the only requirement is being on the main site: there is no
+     * user to ask a capability of, and asking one of a passing visitor would
+     * leave the block in place until an administrator happened to come by.
      *
-     * @param string $content Current .htaccess content.
-     * @return string Content without the Under Attack block.
+     * @param bool $automatic True when the mode expired, false when a person
+     *                        switched it off.
      */
-    private function remove_htaccess_block( $content ) {
-        if ( false === strpos( $content, self::HTACCESS_MARKER_START ) ) {
-            return $content;
-        }
+    private function remove_cache_bypass_rules( $automatic = false ) {
+        require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-manager.php';
 
-        $lines      = explode( "\n", $content );
-        $new_lines  = array();
-        $inside     = false;
+        $result = Vigilante_Htaccess_Manager::get_instance()->remove_block(
+            self::HTACCESS_MARKER_START,
+            self::HTACCESS_MARKER_END,
+            $automatic
+        );
 
-        foreach ( $lines as $line ) {
-            if ( trim( $line ) === self::HTACCESS_MARKER_START ) {
-                $inside = true;
-                continue;
-            }
-
-            if ( trim( $line ) === self::HTACCESS_MARKER_END ) {
-                $inside = false;
-                continue;
-            }
-
-            if ( ! $inside ) {
-                $new_lines[] = $line;
-            }
-        }
-
-        // Clean up multiple empty lines
-        $result = implode( "\n", $new_lines );
-        $result = preg_replace( '/\n{3,}/', "\n\n", $result );
-
-        return trim( $result ) . "\n";
+        $this->log_cache_result( 'deactivate', $result );
     }
 
     /**

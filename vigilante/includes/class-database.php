@@ -263,7 +263,7 @@ class Vigilante_Database {
         $two_factor_codes_sql = "CREATE TABLE {$this->get_2fa_codes_table()} (
             id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
             user_id bigint(20) unsigned NOT NULL,
-            code varchar(6) NOT NULL,
+            code varchar(64) NOT NULL,
             created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
             expires_at datetime NOT NULL,
             attempts int(11) unsigned DEFAULT 0,
@@ -378,6 +378,35 @@ class Vigilante_Database {
 
         // Update stored version
         update_option( self::DB_VERSION_OPTION, self::DB_VERSION );
+    }
+
+    /**
+     * Schema changes and purges of the 2.11.0 security release
+     *
+     * Called from the 2.11.0 block of Vigilante_Admin::run_migrations(), not
+     * from needs_update(): the vigilante_db_version option is shared with that
+     * chain and on any updated site it already holds a plugin version (2.9.9 or
+     * later), so a bump of DB_VERSION would never fire. create_tables() widens
+     * the code column on its own through dbDelta; this method does what dbDelta
+     * cannot, which is deleting rows.
+     *
+     * - Trusted devices identified a browser by its User-Agent (S1). If the old
+     *   rows survived, the bypass would survive with them.
+     * - Email codes were stored in clear (S11). They are compared against a
+     *   hash from now on, so any pending code would fail; they expire in
+     *   minutes and a new one is a click away.
+     *
+     * @since 2.11.0
+     */
+    public function purge_for_2_11_0() {
+        // phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- %i placeholder requires WP 6.2+, and the sniff reports inside prepare(). Plugin tables, no cache to invalidate.
+        $this->wpdb->query(
+            $this->wpdb->prepare( 'DELETE FROM %i', $this->get_2fa_devices_table() )
+        );
+        $this->wpdb->query(
+            $this->wpdb->prepare( 'DELETE FROM %i', $this->get_2fa_codes_table() )
+        );
+        // phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared
     }
 
     /**
@@ -634,16 +663,33 @@ class Vigilante_Database {
         $username = sanitize_user( $username );
         $status = sanitize_key( $status );
         $user_agent = isset( $_SERVER['HTTP_USER_AGENT'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) ) : '';
-        $now = current_time( 'mysql' );
+
+        /*
+         * UTC, like every other timestamp this table is compared against.
+         * Until 2.11.0 last_attempt was written in the site's local time while
+         * get_failed_attempt_count() compared it against a UTC window and
+         * set_lockout() wrote lockout_until in UTC, so the login lockout only
+         * worked on sites whose timezone is UTC: with a positive offset the
+         * lockout was never seen as active, with a negative one the attempts
+         * were never counted (S18, found on 5 Sep 2026 while testing S8).
+         */
+        $now = current_time( 'mysql', true );
 
         // Check if record exists for this IP + username
         // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
         $existing = $this->wpdb->get_row( $this->wpdb->prepare( 'SELECT * FROM %i WHERE ip_address = %s AND username = %s', $table, $ip_address, $username ), ARRAY_A );
 
         if ( $existing ) {
+            // An active lockout keeps its status: recording a failure on top
+            // of it used to flip the row back to 'failed', so the lockout
+            // vanished from is_locked_out() the moment anyone tried again (S8).
+            $locked = 'lockout' === $existing['status']
+                && ! empty( $existing['lockout_until'] )
+                && $existing['lockout_until'] > $now;
+
             // Update existing record
             $data = array(
-                'status'        => $status,
+                'status'        => $locked ? 'lockout' : $status,
                 'attempt_count' => $existing['attempt_count'] + 1,
                 'last_attempt'  => $now,
                 'user_agent'    => $user_agent,
@@ -740,7 +786,8 @@ class Vigilante_Database {
      */
     public function is_locked_out( $ip_address ) {
         $table = $this->get_login_attempts_table();
-        $now = current_time( 'mysql' );
+        // UTC: lockout_until is written with gmdate(). See record_login_attempt() (S18).
+        $now = current_time( 'mysql', true );
 
         // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
         $lockout = $this->wpdb->get_row( $this->wpdb->prepare( "SELECT * FROM %i WHERE ip_address = %s AND lockout_until > %s AND status = 'lockout' ORDER BY lockout_until DESC LIMIT 1", $table, $ip_address, $now ), ARRAY_A );
@@ -768,7 +815,8 @@ class Vigilante_Database {
      */
     public function get_active_lockouts() {
         $table = $this->get_login_attempts_table();
-        $now = current_time( 'mysql' );
+        // UTC: lockout_until is written with gmdate(). See record_login_attempt() (S18).
+        $now = current_time( 'mysql', true );
 
         // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
         $lockouts = $this->wpdb->get_results( $this->wpdb->prepare( "SELECT ip_address, username, attempt_count as attempts, lockout_until as locked_until, last_attempt FROM %i WHERE lockout_until > %s AND status = 'lockout' ORDER BY lockout_until DESC", $table, $now ) );
@@ -815,8 +863,9 @@ class Vigilante_Database {
         $table = $this->get_login_attempts_table();
         $date = gmdate( 'Y-m-d H:i:s', strtotime( "-{$hours} hours" ) );
 
+        // UTC on both sides, like the rest of this table since 2.11.0 (S18).
         // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-        $deleted = $this->wpdb->query( $this->wpdb->prepare( 'DELETE FROM %i WHERE last_attempt < %s AND (lockout_until IS NULL OR lockout_until < %s)', $table, $date, current_time( 'mysql' ) ) );
+        $deleted = $this->wpdb->query( $this->wpdb->prepare( 'DELETE FROM %i WHERE last_attempt < %s AND (lockout_until IS NULL OR lockout_until < %s)', $table, $date, current_time( 'mysql', true ) ) );
 
         return $deleted ? $deleted : 0;
     }
@@ -828,7 +877,8 @@ class Vigilante_Database {
      */
     public function get_locked_out_ips() {
         $table = $this->get_login_attempts_table();
-        $now = current_time( 'mysql' );
+        // UTC: lockout_until is written with gmdate(). See record_login_attempt() (S18).
+        $now = current_time( 'mysql', true );
 
         // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
         $results = $this->wpdb->get_results( $this->wpdb->prepare( "SELECT DISTINCT ip_address, lockout_until, attempt_count, last_attempt FROM %i WHERE lockout_until > %s AND status = 'lockout' ORDER BY lockout_until DESC", $table, $now ), ARRAY_A );

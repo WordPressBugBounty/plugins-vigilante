@@ -426,6 +426,25 @@ class Vigilante_Admin {
 
             update_option( 'vigilante_db_version', '2.9.9' );
         }
+
+        /*
+         * 2.11.0: security release (audit of 28 Aug 2026). Runs here and not
+         * from Vigilante_Database::needs_update(): this option is shared with
+         * that class, and on any updated site it already holds a plugin version
+         * (2.9.9 or later), so a bump of DB_VERSION would never fire.
+         * create_tables() widens the email code column through dbDelta (varchar
+         * 6 to 64, the code is stored hashed since 2.11.0) and purge_for_2_11_0()
+         * does what dbDelta cannot: it empties the trusted devices, which were
+         * identified by User-Agent until now (S1), and the pending email codes,
+         * stored in clear until now (S11). Every remembered device asks for the
+         * second factor once more after this update, and the changelog says so.
+         */
+        if ( version_compare( $db_version, '2.11.0', '<' ) ) {
+            $this->database->create_tables();
+            $this->database->purge_for_2_11_0();
+
+            update_option( 'vigilante_db_version', '2.11.0' );
+        }
     }
 
     /**
@@ -1767,6 +1786,19 @@ class Vigilante_Admin {
                     <p>
                         <em><?php esc_html_e( 'Vigilant has applied the Maximum preset plus extra hardening on top of your previous configuration. Any changes you make to Vigilant settings while this mode is active will be reverted when it ends.', 'vigilante' ); ?></em>
                     </p>
+                    <?php
+                    // The cache-bypass rules could not be written (a host where
+                    // WordPress cannot write files by itself, a held lock, a
+                    // failed read-back): show them, so they can be added by hand.
+                    $ua_instance = new Vigilante_Under_Attack( $this->settings, $this->activity_log );
+                    if ( $ua_instance->cache_rules_missing() ) :
+                        ?>
+                        <p>
+                            <strong><?php esc_html_e( 'The cache-bypass rules could not be written to your .htaccess.', 'vigilante' ); ?></strong>
+                            <?php esc_html_e( 'Without them a page cache may keep serving stored pages during the attack. Add this block at the top of the .htaccess in your site root (the activity log records why it was not written):', 'vigilante' ); ?>
+                        </p>
+                        <textarea readonly rows="9" class="large-text code" onclick="this.select();"><?php echo esc_textarea( Vigilante_Under_Attack::get_cache_bypass_block() ); ?></textarea>
+                    <?php endif; ?>
                 </div>
                 <?php
             }
@@ -7107,9 +7139,22 @@ class Vigilante_Admin {
         // Sanitize imported data recursively
         $imported = map_deep( $imported, 'sanitize_text_field' );
 
-        // Validate structure
-        $defaults = $this->settings->get_default_options();
-        $merged = array_replace_recursive( $defaults, $imported );
+        // Validate structure: only sections and keys of the schema survive, and
+        // every value takes the type of its default. Until 2.11.0 this was an
+        // array_replace_recursive() of the file over the defaults, so any key in
+        // the file, known or not, landed in vigilante_options (S7). Sections
+        // the file does not carry keep their defaults; a section it does carry
+        // replaces the default one whole, because validate_options() has
+        // already filled in whatever the file left out.
+        $defaults  = $this->settings->get_default_options();
+        $validated = $this->settings->validate_options( $imported );
+        $merged    = $defaults;
+
+        foreach ( $validated as $section => $data ) {
+            if ( is_array( $data ) ) {
+                $merged[ $section ] = $data;
+            }
+        }
 
         // Save
         update_option( Vigilante_Settings::OPTION_NAME, $merged );

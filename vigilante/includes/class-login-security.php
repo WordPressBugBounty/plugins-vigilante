@@ -863,6 +863,13 @@ class Vigilante_Login_Security {
                 );
             }
 
+            // This rejection is ours, not a wrong password. wp_authenticate()
+            // still fires wp_login_failed for it, and until 2.11.0 that counted
+            // the blocked attempt as one more failure, which rewrote the row's
+            // status and produced a fresh lockout, with its critical entry and
+            // its email, on every POST made during the lockout (S8).
+            add_filter( 'vigilante_skip_failed_login_count', '__return_true' );
+
             return new WP_Error(
                 'vigilante_lockout',
                 sprintf(
@@ -934,6 +941,13 @@ class Vigilante_Login_Security {
         $failed_count = $this->database->get_failed_attempt_count( $ip, 60 );
 
         if ( $failed_count >= $max_attempts ) {
+            // Already locked out: every further POST during the lockout used to
+            // write another critical entry and send another email (S8). The
+            // lockout itself is what check_lockout() enforces; nothing to add.
+            if ( $this->database->is_locked_out( $ip ) ) {
+                return;
+            }
+
             // Calculate lockout duration with increment
             if ( ! empty( $this->options['lockout_increment'] ) ) {
                 $previous_lockouts = $this->get_previous_lockout_count( $ip );
@@ -1117,9 +1131,11 @@ class Vigilante_Login_Security {
             'vigilante_lockout',
             // User Security
             'vigilante_force_reset',
-            'pending_approval',
-            'email_not_verified',
-            'session_limit_exceeded',
+            // pending_approval, email_not_verified and session_limit_exceeded
+            // are deliberately NOT here since 2.11.0: they are only raised once
+            // the password is correct, so letting them through told an
+            // unauthenticated visitor which accounts exist (S10). Those users
+            // learn their status from the registration and verification emails.
             // Two-Factor Email
             'no_code',
             'code_expired',
@@ -1179,12 +1195,8 @@ class Vigilante_Login_Security {
         // code-based check above is the locale-safe path.
         $allowed_patterns = array(
             'vigilante_lockout',
-            'Account pending',
-            'pending_approval',
-            'email_not_verified',
-            'verify your email',
-            'session_limit',
-            'too many active',
+            // The pending-approval, unverified-email and session-limit strings
+            // were removed in 2.11.0 for the same reason as their codes above (S10).
             'verification code',
             'authenticator app',
             'two-factor',
@@ -1211,13 +1223,13 @@ class Vigilante_Login_Security {
      */
     public function remove_shake_errors( $codes ) {
         // Keep shake for Vigilante-specific errors that indicate real problems
-        // Do NOT include 2FA codes - the form transition should be smooth
+        // Do NOT include 2FA codes - the form transition should be smooth.
+        // The three account-status codes are not here either since 2.11.0: a
+        // shake that only plays for existing accounts is the same tell as the
+        // message it replaced (S10).
         return array(
             'vigilante_lockout',
             'vigilante_force_reset',
-            'pending_approval',
-            'email_not_verified',
-            'session_limit_exceeded',
         );
     }
 

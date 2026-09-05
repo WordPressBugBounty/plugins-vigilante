@@ -1167,6 +1167,21 @@ class Vigilante_Settings {
             } elseif ( isset( $defaults[ $section ] ) ) {
                 // Validate other sections using generic validator
                 $validated[ $section ] = $this->validate_section( $data, $defaults[ $section ] );
+
+                // The few keys that live outside get_default_options() on
+                // purpose (see apply_install_tweaks()) survive with their own
+                // validation, or an import would silently lose them and the
+                // XML-RPC resolver would fall back to blocking everything.
+                foreach ( self::undeclared_keys( $section ) as $key => $type ) {
+                    if ( ! array_key_exists( $key, $data ) ) {
+                        continue;
+                    }
+                    if ( 'bool' === $type ) {
+                        $validated[ $section ][ $key ] = (bool) $data[ $key ];
+                    } elseif ( is_array( $type ) && in_array( $data[ $key ], $type, true ) ) {
+                        $validated[ $section ][ $key ] = $data[ $key ];
+                    }
+                }
             }
         }
 
@@ -1174,7 +1189,57 @@ class Vigilante_Settings {
     }
 
     /**
+     * Keys deliberately absent from get_default_options(), with how to validate them
+     *
+     * Declaring them as defaults would break the fallback they exist for (see
+     * apply_install_tweaks()), but the validator still has to know them, or a
+     * settings import drops them (found in the 2.11.0 cross review).
+     *
+     * @since 2.11.0
+     *
+     * @param string $section Section name.
+     * @return array key => 'bool' or list of allowed values.
+     */
+    private static function undeclared_keys( $section ) {
+        $keys = array(
+            'wp_hardening'   => array( 'xmlrpc_mode' => array( 'full', 'pingback', 'none' ) ),
+            'login_security' => array(
+                'disable_xmlrpc'          => 'bool',
+                'disable_xmlrpc_pingback' => 'bool',
+            ),
+        );
+
+        return isset( $keys[ $section ] ) ? $keys[ $section ] : array();
+    }
+
+    /**
+     * Whether a default value describes a free list rather than a schema
+     *
+     * An empty array or sequential numeric keys (an IP whitelist, a list of
+     * roles) is a list: every entry the user typed is kept. Anything else is a
+     * schema: only its keys survive validation.
+     *
+     * @since 2.11.0
+     *
+     * @param array $defaults Default value of a setting.
+     * @return bool
+     */
+    private function is_list_default( $defaults ) {
+        if ( array() === $defaults ) {
+            return true;
+        }
+
+        return array_keys( $defaults ) === range( 0, count( $defaults ) - 1 );
+    }
+
+    /**
      * Validate a section based on defaults
+     *
+     * Since 2.11.0 the result only holds keys the defaults know. The loop that
+     * used to reincorporate unknown keys "sanitized" meant a settings import
+     * could merge any key it liked into vigilante_options (S7 of the 28 Aug
+     * 2026 audit). Lists are the exception, handled first: their entries are
+     * data, not keys.
      *
      * @param array $input    Input values.
      * @param array $defaults Default values.
@@ -1182,6 +1247,23 @@ class Vigilante_Settings {
      */
     private function validate_section( $input, $defaults ) {
         $validated = array();
+
+        if ( $this->is_list_default( $defaults ) ) {
+            if ( ! is_array( $input ) ) {
+                return array();
+            }
+
+            $list = array();
+            foreach ( $input as $value ) {
+                if ( is_scalar( $value ) ) {
+                    $list[] = sanitize_text_field( (string) $value );
+                } elseif ( is_array( $value ) ) {
+                    $list[] = map_deep( $value, 'sanitize_text_field' );
+                }
+            }
+
+            return $list;
+        }
 
         foreach ( $defaults as $key => $default_value ) {
             if ( ! isset( $input[ $key ] ) ) {
@@ -1206,16 +1288,7 @@ class Vigilante_Settings {
             }
         }
 
-        // Include any extra keys from input
-        foreach ( $input as $key => $value ) {
-            if ( ! isset( $validated[ $key ] ) ) {
-                if ( is_array( $value ) ) {
-                    $validated[ $key ] = array_map( 'sanitize_text_field', $value );
-                } else {
-                    $validated[ $key ] = sanitize_text_field( $value );
-                }
-            }
-        }
+        // Keys the defaults do not declare are dropped on purpose (S7).
 
         return $validated;
     }

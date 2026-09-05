@@ -823,6 +823,58 @@ class Vigilante_Firewall {
     }
 
     /**
+     * Upper bound of the vigilante_firewall_blocks index
+     *
+     * The index only feeds the admin screen; enforcement reads a transient per
+     * IP. Under a distributed attack the oldest entries are dropped first, so
+     * the option cannot grow without limit (S6).
+     *
+     * @since 2.11.0
+     */
+    const MAX_TRACKED_BLOCKS = 500;
+
+    /**
+     * Add a block to the bounded admin index
+     *
+     * Prunes expired entries on every write, not only when an administrator
+     * opens the Firewall tab, and keeps at most MAX_TRACKED_BLOCKS entries,
+     * dropping the oldest by blocked_at.
+     *
+     * @since 2.11.0
+     *
+     * @param string $ip    Blocked address.
+     * @param array  $block Block data (expires, blocked_at, duration, reason, strikes).
+     */
+    private static function index_block( $ip, $block ) {
+        $blocks = get_option( 'vigilante_firewall_blocks', array() );
+        $now    = time();
+
+        if ( ! is_array( $blocks ) ) {
+            $blocks = array();
+        }
+
+        foreach ( $blocks as $blocked_ip => $data ) {
+            if ( ! is_array( $data ) || ! isset( $data['expires'] ) || $now >= (int) $data['expires'] ) {
+                unset( $blocks[ $blocked_ip ] );
+            }
+        }
+
+        $blocks[ $ip ] = $block;
+
+        if ( count( $blocks ) > self::MAX_TRACKED_BLOCKS ) {
+            uasort(
+                $blocks,
+                static function ( $a, $b ) {
+                    return (int) ( $a['blocked_at'] ?? 0 ) <=> (int) ( $b['blocked_at'] ?? 0 );
+                }
+            );
+            $blocks = array_slice( $blocks, count( $blocks ) - self::MAX_TRACKED_BLOCKS, null, true );
+        }
+
+        update_option( 'vigilante_firewall_blocks', $blocks, false );
+    }
+
+    /**
      * Check rate limiting
      */
     public function check_rate_limit() {
@@ -846,23 +898,24 @@ class Vigilante_Firewall {
         $ip         = $this->get_client_ip();
         $rate_limit = $this->options['rate_limiting'];
 
-        // Check if already blocked via queryable option (fast path)
-        $active_blocks = get_option( 'vigilante_firewall_blocks', array() );
-        if ( isset( $active_blocks[ $ip ] ) ) {
-            if ( time() < $active_blocks[ $ip ]['expires'] ) {
-                if ( ! headers_sent() ) {
-                    status_header( 429 );
-                    nocache_headers();
-                }
-                wp_die(
-                    esc_html__( 'Rate limit exceeded. Please try again later.', 'vigilante' ),
-                    esc_html__( 'Too Many Requests', 'vigilante' ),
-                    array( 'response' => 429 )
-                );
+        // Check if already blocked (fast path). The active block lives in a
+        // transient keyed by IP, so this path, which runs on every
+        // unauthenticated request, reads one row and not the whole index of
+        // blocked addresses. Until 2.11.0 it loaded vigilante_firewall_blocks
+        // entire, an array with no upper bound that a distributed attack grew
+        // by one entry per new address, so the firewall amplified the attack it
+        // was blocking (S6). The transient expires with the block itself.
+        $block = get_transient( 'vigilante_rate_block_' . md5( $ip ) );
+        if ( is_array( $block ) && isset( $block['expires'] ) && time() < (int) $block['expires'] ) {
+            if ( ! headers_sent() ) {
+                status_header( 429 );
+                nocache_headers();
             }
-            // Expired — clean up
-            unset( $active_blocks[ $ip ] );
-            update_option( 'vigilante_firewall_blocks', $active_blocks, false );
+            wp_die(
+                esc_html__( 'Rate limit exceeded. Please try again later.', 'vigilante' ),
+                esc_html__( 'Too Many Requests', 'vigilante' ),
+                array( 'response' => 429 )
+            );
         }
 
         $max_requests = absint( $rate_limit['requests_per_minute'] );
@@ -929,15 +982,19 @@ class Vigilante_Firewall {
                 set_transient( $strikes_key, $strikes, 86400 );
             }
 
-            // Store block in queryable option for admin UI
-            $active_blocks[ $ip ] = array(
+            $block = array(
                 'expires'    => time() + $duration,
                 'blocked_at' => time(),
                 'duration'   => $duration,
                 'reason'     => 'rate_limit',
                 'strikes'    => $strikes,
             );
-            update_option( 'vigilante_firewall_blocks', $active_blocks, false );
+
+            // The block itself, read by the fast path above on every request.
+            set_transient( 'vigilante_rate_block_' . md5( $ip ), $block, $duration );
+
+            // The bounded index the admin screen lists.
+            self::index_block( $ip, $block );
 
             $this->block_request( 'rate_limit', __( 'Rate limit exceeded. Please try again later.', 'vigilante' ), 429 );
         }
