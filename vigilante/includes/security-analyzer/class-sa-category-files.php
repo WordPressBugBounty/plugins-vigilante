@@ -87,7 +87,7 @@ class Vigilante_SA_Category_Files {
             'category' => self::SLUG,
             'max'      => 2,
             'label'    => __( '.env exposure', 'vigilante' ),
-            'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'firewall', 'vigilante-section-firewall-file-protection' ),
+            'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'firewall', 'vigilante-section-firewall-server' ),
         );
 
         if ( Vigilante_SA_Helpers::public_url_returns_ok( '.env' ) ) {
@@ -105,7 +105,7 @@ class Vigilante_SA_Category_Files {
             'category' => self::SLUG,
             'max'      => 1,
             'label'    => __( '.git/config exposure', 'vigilante' ),
-            'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'firewall', 'vigilante-section-firewall-file-protection' ),
+            'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'firewall', 'vigilante-section-firewall-server' ),
         );
 
         if ( Vigilante_SA_Helpers::public_url_returns_ok( '.git/config' ) ) {
@@ -123,7 +123,7 @@ class Vigilante_SA_Category_Files {
             'category' => self::SLUG,
             'max'      => 2,
             'label'    => __( 'wp-config backup files', 'vigilante' ),
-            'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'firewall', 'vigilante-section-firewall-file-protection' ),
+            'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'firewall', 'vigilante-section-firewall-server' ),
         );
 
         $candidates = array(
@@ -205,7 +205,7 @@ class Vigilante_SA_Category_Files {
             'category' => self::SLUG,
             'max'      => 1,
             'label'    => __( 'phpinfo / adminer / installer scripts', 'vigilante' ),
-            'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'firewall', 'vigilante-section-firewall-file-protection' ),
+            'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'firewall', 'vigilante-section-firewall-server' ),
         );
 
         $candidates = array(

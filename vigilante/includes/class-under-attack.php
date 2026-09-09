@@ -1311,7 +1311,7 @@ class Vigilante_Under_Attack {
                 __( 'Duration', 'vigilante' ) => $hours . ' ' . __( 'hours', 'vigilante' ),
             ) );
             $body .= Vigilante_Email_Template::p( __( 'The mode will automatically deactivate when the timer expires. You can manually deactivate it from the Vigilant dashboard.', 'vigilante' ) );
-            $body .= Vigilante_Email_Template::button( admin_url( 'admin.php?page=vigilante' ), __( 'Go to dashboard', 'vigilante' ) );
+            $body .= Vigilante_Email_Template::button( admin_url( 'admin.php?page=vigilante&tab=dashboard#vigilante-section-dashboard-under-attack' ), __( 'Go to dashboard', 'vigilante' ) );
 
             $title = __( 'Under Attack mode activated', 'vigilante' );
             $alert = true;

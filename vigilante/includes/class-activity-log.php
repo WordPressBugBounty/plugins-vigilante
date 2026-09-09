@@ -931,6 +931,12 @@ class Vigilante_Activity_Log {
      * so an owner looking at a surprising entry had no way to tell which one
      * they were reading.
      *
+     * That first sentence was not true of the firewall, which is the module
+     * that logs the most: it stored the address under 'uri', so the column
+     * this method feeds was empty for every one of its blocks, and diagnosing
+     * one meant reading the table by hand. Fixed in the firewall in 2.11.1;
+     * 'uri' is read here as well so the entries already on disk show it too.
+     *
      * @since 2.10.2
      *
      * @param string|array|null $extra_data The entry's extra data, as stored.
@@ -941,18 +947,24 @@ class Vigilante_Activity_Log {
             $extra_data = json_decode( $extra_data, true );
         }
 
-        if ( ! is_array( $extra_data ) || ! isset( $extra_data['request_uri'] ) ) {
+        if ( ! is_array( $extra_data ) ) {
+            return '';
+        }
+
+        $key = isset( $extra_data['request_uri'] ) ? 'request_uri' : 'uri';
+
+        if ( ! isset( $extra_data[ $key ] ) ) {
             return '';
         }
 
         // Nothing writes anything but a string here, but the value comes back
         // from a longtext column that any past version could have filled, and
         // casting an array would emit a notice and print the word "Array".
-        if ( ! is_scalar( $extra_data['request_uri'] ) ) {
+        if ( ! is_scalar( $extra_data[ $key ] ) ) {
             return '';
         }
 
-        return (string) $extra_data['request_uri'];
+        return (string) $extra_data[ $key ];
     }
 
     /**

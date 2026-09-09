@@ -1300,7 +1300,7 @@ class Vigilante_Login_Security {
             __( 'Lockout duration', 'vigilante' ) => ceil( $duration / 60 ) . ' ' . __( 'minutes', 'vigilante' ),
             __( 'Date/Time', 'vigilante' )        => wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ) ),
         ) );
-        $body .= Vigilante_Email_Template::button( admin_url( 'admin.php?page=vigilante&tab=login' ), __( 'View lockouts', 'vigilante' ) );
+        $body .= Vigilante_Email_Template::button( admin_url( 'admin.php?page=vigilante&tab=login#vigilante-section-login-status' ), __( 'View lockouts', 'vigilante' ) );
 
         Vigilante_Email_Template::send( $to, $subject, __( 'Login lockout triggered', 'vigilante' ), $body, true );
     }

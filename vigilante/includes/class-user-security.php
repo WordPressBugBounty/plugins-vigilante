@@ -1394,7 +1394,7 @@ class Vigilante_User_Security {
                         'vigilante'
                     ) ),
                     absint( $count ),
-                    '<a href="' . esc_url( admin_url( 'admin.php?page=vigilante&tab=users' ) ) . '">' . esc_html__( 'Review in Vigilant', 'vigilante' ) . '</a>'
+                    '<a href="' . esc_url( admin_url( 'admin.php?page=vigilante&tab=users#vigilante-section-users-pending' ) ) . '">' . esc_html__( 'Review in Vigilant', 'vigilante' ) . '</a>'
                 );
                 ?>
             </p>
@@ -1534,7 +1534,7 @@ class Vigilante_User_Security {
             $site_name
         );
 
-        $approve_url = admin_url( 'admin.php?page=vigilante&tab=users' );
+        $approve_url = admin_url( 'admin.php?page=vigilante&tab=users#vigilante-section-users-pending' );
 
         $body  = Vigilante_Email_Template::p( __( 'A new user has registered and is awaiting your approval.', 'vigilante' ) );
         $body .= Vigilante_Email_Template::data_table( array(

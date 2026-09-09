@@ -704,7 +704,7 @@ class Vigilante_Plugin_Status {
         $body .= Vigilante_Email_Template::data_table( $rows );
 
         $body .= Vigilante_Email_Template::button(
-            admin_url( 'admin.php?page=vigilante&tab=file-integrity' ),
+            admin_url( 'admin.php?page=vigilante&tab=file-integrity#vigilante-section-fi-closed-plugins' ),
             __( 'Review in Vigilant', 'vigilante' )
         );
 

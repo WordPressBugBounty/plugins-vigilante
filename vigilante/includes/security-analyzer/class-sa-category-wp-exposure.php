@@ -333,7 +333,7 @@ class Vigilante_SA_Category_WP_Exposure {
             'category' => self::SLUG,
             'max'      => 1,
             'label'    => __( 'readme.html presence', 'vigilante' ),
-            'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'tools', 'vigilante-section-tools-cleanup' ),
+            'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'firewall', 'vigilante-section-firewall-server' ),
         );
 
         if ( ! Vigilante_SA_Helpers::abspath_file_exists( 'readme.html' ) ) {
@@ -351,7 +351,7 @@ class Vigilante_SA_Category_WP_Exposure {
             'category' => self::SLUG,
             'max'      => 1,
             'label'    => __( 'license.txt presence', 'vigilante' ),
-            'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'tools', 'vigilante-section-tools-cleanup' ),
+            'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'firewall', 'vigilante-section-firewall-server' ),
         );
 
         if ( ! Vigilante_SA_Helpers::abspath_file_exists( 'license.txt' ) ) {

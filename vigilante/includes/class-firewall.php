@@ -99,13 +99,15 @@ class Vigilante_Firewall {
             return;
         }
 
+        // Gather request data first: a block is logged with the address it
+        // turned away, and until 2.11.1 the blacklist ran before this, so the
+        // entry for a blacklisted IP recorded no address at all.
+        $this->gather_request_data();
+
         // Check if IP is blacklisted
         if ( $this->is_ip_blacklisted() ) {
             $this->block_request( 'ip_blacklisted', __( 'IP address is blacklisted', 'vigilante' ) );
         }
-
-        // Gather request data
-        $this->gather_request_data();
 
         // Check if User-Agent is blacklisted (after gathering request data)
         if ( $this->is_ua_blacklisted() ) {
@@ -432,7 +434,12 @@ class Vigilante_Firewall {
         // back to the site itself, a return_url, a payment gateway callback.
         // What makes it an inclusion attempt is the target being somewhere
         // else, so a URL pointing at this very site is left alone.
-        if ( $this->has_remote_inclusion() ) {
+        //
+        // The core endpoint that resolves an embed takes an external URL as
+        // its whole job, so it is exempted rather than made to look innocent.
+        // Only this check is skipped: the PHP wrappers and the system paths
+        // below still run on that route, for everyone.
+        if ( ! $this->is_core_embed_proxy_request() && $this->has_remote_inclusion() ) {
             return __( 'Remote file inclusion attempt', 'vigilante' );
         }
 
@@ -459,7 +466,63 @@ class Vigilante_Firewall {
     }
 
     /**
-     * Whether the request carries a URL that points outside this site
+     * Parameter names a remote inclusion payload travels in
+     *
+     * An inclusion needs its value to reach an include() or a require(), so it
+     * arrives in the parameter a vulnerable script treats as a path. These are
+     * the names those scripts use, and the ones every RFI scanner probes.
+     *
+     * Deliberately absent: url, redirect, redirect_to, return, return_url,
+     * callback and the rest of the link-carrying names. Carrying a URL is what
+     * those are for. Matching them is what turned WordPress core's own oembed
+     * proxy into a 403 for anyone using the block editor, reported on 9 sep
+     * 2026 and fixed in 2.11.1.
+     *
+     * @since 2.11.1
+     *
+     * @var string[]
+     */
+    private static $inclusion_param_names = array(
+        // The value is read as a file
+        'file', 'files', 'filename', 'file_name', 'filepath', 'file_path',
+        'archivo', 'arquivo', 'fichier', 'datei',
+        // ...or as the place to read it from
+        'path', 'paths', 'dir', 'directory', 'folder', 'root', 'base',
+        'basepath', 'base_path', 'abs_path', 'absolute_path',
+        'mosconfig_absolute_path',
+        // ...or as the page a front controller includes
+        'page', 'pag', 'pagina', 'pageweb', 'pg', 'seite',
+        'include', 'includes', 'inc', 'incl', 'require', 'load', 'loadfile',
+        'open', 'read', 'readfile', 'show', 'display', 'view', 'content',
+        // ...or as a template, which is a file by another name
+        'template', 'templates', 'tpl', 'tmpl', 'theme', 'skin', 'style',
+        'layout', 'doc', 'document', 'module', 'mod', 'plugin', 'controller',
+        'class', 'func', 'function', 'lang', 'language',
+        // ...or as configuration, or straight into a shell
+        'conf', 'config', 'cfg', 'src', 'source', 'download',
+        'cmd', 'exec', 'shell', 'system',
+    );
+
+    /**
+     * Extensions a remote inclusion payload is served with
+     *
+     * The point of the target is that it carries code, or text the vulnerable
+     * script will treat as code. Media extensions are not here on purpose: an
+     * embedded .mp4 or .jpg from a CDN is what the editor sends all day.
+     *
+     * @since 2.11.1
+     *
+     * @var string[]
+     */
+    private static $inclusion_extensions = array(
+        'php', 'php2', 'php3', 'php4', 'php5', 'php6', 'php7', 'php8',
+        'phps', 'phtml', 'pht', 'phar', 'inc', 'txt', 'log', 'ini', 'cfg',
+        'conf', 'asp', 'aspx', 'jsp', 'jspx', 'cgi', 'pl', 'py', 'rb', 'sh',
+        'bash', 'exe', 'dll', 'so', 'bak', 'old', 'env',
+    );
+
+    /**
+     * Whether the request carries a remote file inclusion attempt
      *
      * Works on the parsed parameters rather than on a pattern match over the
      * whole string, for two reasons: a link back to the site itself is not
@@ -467,6 +530,16 @@ class Vigilante_Firewall {
      * The copy of the query string kept for logging goes through
      * sanitize_text_field(), which strips every %XX sequence instead of
      * decoding it, so the encoded form never looked like a URL there.
+     *
+     * Until 2.11.0 an external URL in any parameter was the whole signature,
+     * and that is not what an inclusion looks like, it is what a link looks
+     * like. WordPress core's own /wp-json/oembed/1.0/proxy?url=... is the
+     * clearest case: the block editor asks the site to resolve a YouTube URL,
+     * the rule read it as RFI, and embedding was dead on every site with the
+     * rule on while the classic editor kept working, because it posts the same
+     * URL to admin-ajax instead of putting it in a query string. Since 2.11.1
+     * an external URL is an inclusion attempt when it travels in a parameter
+     * that is read as a path, or when it points at something includable.
      *
      * @since 2.9.9
      *
@@ -484,19 +557,11 @@ class Vigilante_Firewall {
         $params = array();
         parse_str( $query, $params );
 
-        $values = array();
-        array_walk_recursive(
-            $params,
-            function ( $value ) use ( &$values ) {
-                if ( is_scalar( $value ) ) {
-                    $values[] = (string) $value;
-                }
-            }
-        );
-
         $home_host = $this->normalize_host( wp_parse_url( home_url(), PHP_URL_HOST ) );
 
-        foreach ( $values as $value ) {
+        foreach ( $this->flatten_query_params( $params ) as $pair ) {
+            list( $names, $value ) = $pair;
+
             if ( ! preg_match_all( '/(?:https?|ftp):\/\/[^\s\'"<>]+/i', $value, $matches ) ) {
                 continue;
             }
@@ -504,13 +569,156 @@ class Vigilante_Firewall {
             foreach ( $matches[0] as $url ) {
                 $host = $this->normalize_host( wp_parse_url( $url, PHP_URL_HOST ) );
 
-                if ( '' === $host || $host !== $home_host ) {
+                // A URL pointing at this very site is not an inclusion.
+                if ( '' !== $host && $host === $home_host ) {
+                    continue;
+                }
+
+                if ( $this->looks_like_inclusion( $names, $url ) ) {
                     return true;
                 }
             }
         }
 
         return false;
+    }
+
+    /**
+     * Query parameters as (name segments, value) pairs
+     *
+     * Keeps every segment of a nested name, so opts[file]=http://... is seen
+     * as the inclusion parameter it is and not as an anonymous value.
+     *
+     * @since 2.11.1
+     *
+     * @param array    $params   Parsed parameters.
+     * @param string[] $inherited Name segments of the parent levels.
+     * @return array List of array( string[] $names, string $value ).
+     */
+    private function flatten_query_params( $params, $inherited = array() ) {
+        $pairs = array();
+
+        foreach ( $params as $key => $value ) {
+            $names = array_merge( $inherited, array( strtolower( (string) $key ) ) );
+
+            if ( is_array( $value ) ) {
+                $pairs = array_merge( $pairs, $this->flatten_query_params( $value, $names ) );
+                continue;
+            }
+
+            if ( is_scalar( $value ) ) {
+                $pairs[] = array( $names, (string) $value );
+            }
+        }
+
+        return $pairs;
+    }
+
+    /**
+     * Whether an external URL in this parameter is an inclusion attempt
+     *
+     * Two independent signals, either is enough: the parameter is one a
+     * vulnerable script reads as a path, or the target is something that gets
+     * included rather than linked. The trailing '?' and the null byte are the
+     * two ways a payload truncates whatever the script appends to it.
+     *
+     * What this deliberately no longer catches, so nobody reads its silence as
+     * coverage: an external URL with no includable extension travelling in a
+     * parameter whose name is not on the list. That shape is a link, which is
+     * why the site's own search box and every return_url tripped the rule
+     * before. A payload in it still has to reach an include() in some other
+     * plugin's code to do anything, and the wrappers, the system paths and the
+     * traversal rules below are untouched.
+     *
+     * @since 2.11.1
+     *
+     * @param string[] $names Name segments of the parameter.
+     * @param string   $url   The external URL found in its value.
+     * @return bool
+     */
+    private function looks_like_inclusion( $names, $url ) {
+        foreach ( $names as $name ) {
+            if ( in_array( $name, self::$inclusion_param_names, true ) ) {
+                return true;
+            }
+        }
+
+        // ftp:// is never how a page links to something; it is how a payload
+        // is fetched.
+        if ( 0 === stripos( $url, 'ftp://' ) ) {
+            return true;
+        }
+
+        // Truncation of the suffix the vulnerable script appends.
+        if ( '?' === substr( $url, -1 ) || false !== stripos( $url, '%00' ) || false !== strpos( $url, "\0" ) ) {
+            return true;
+        }
+
+        $path = (string) wp_parse_url( $url, PHP_URL_PATH );
+
+        if ( '' === $path ) {
+            return false;
+        }
+
+        $extension = strtolower( pathinfo( $path, PATHINFO_EXTENSION ) );
+
+        return ( '' !== $extension && in_array( $extension, self::$inclusion_extensions, true ) );
+    }
+
+    /**
+     * The REST route of the current request, or '' when it is not a REST call
+     *
+     * Read from the request itself because REST_REQUEST is not defined yet:
+     * the firewall runs on init, and rest_api_loaded() defines it later, on
+     * parse_request. Both shapes are covered, the pretty /wp-json/<route> and
+     * the plain ?rest_route=<route>, and the prefix is asked for rather than
+     * assumed, since rest_url_prefix filters it.
+     *
+     * @since 2.11.1
+     *
+     * @return string Route with a leading slash, or '' when there is none.
+     */
+    private function current_rest_route() {
+        $params = array();
+        parse_str( (string) ( $this->request_data['query_raw'] ?? '' ), $params );
+
+        if ( isset( $params['rest_route'] ) && is_string( $params['rest_route'] ) ) {
+            return '/' . ltrim( $params['rest_route'], '/' );
+        }
+
+        $uri    = (string) ( $this->request_data['uri_raw'] ?? '' );
+        $path   = (string) wp_parse_url( $uri, PHP_URL_PATH );
+        $needle = '/' . trim( rest_get_url_prefix(), '/' ) . '/';
+        $at     = strpos( $path, $needle );
+
+        if ( false === $at ) {
+            return '';
+        }
+
+        return '/' . ltrim( substr( $path, $at + strlen( $needle ) ), '/' );
+    }
+
+    /**
+     * Whether this is a logged-in editor asking core to resolve an embed
+     *
+     * /wp-json/oembed/1.0/proxy is where the block editor sends the URL the
+     * author pasted, so an external URL there is the request, not an attack.
+     * The exemption is not the route on its own: it asks for the capability
+     * that route's own permission_callback asks for, so an anonymous scanner
+     * probing it is still blocked and still logged. The other core embed
+     * route, /oembed/1.0/embed, only ever answers for this site's own URLs,
+     * which the check already leaves alone.
+     *
+     * @since 2.11.1
+     *
+     * @return bool
+     */
+    private function is_core_embed_proxy_request() {
+        if ( 0 !== strpos( $this->current_rest_route(), '/oembed/1.0/proxy' ) ) {
+            return false;
+        }
+
+        return ( is_user_logged_in() && current_user_can( 'edit_posts' ) );
     }
 
     /**
@@ -1019,10 +1227,10 @@ class Vigilante_Firewall {
                 'blocked',
                 $message,
                 array(
-                    'reason'    => $reason,
-                    'uri'       => $this->request_data['uri'] ?? '',
-                    'ip'        => $this->get_client_ip(),
-                    'user_agent'=> $this->request_data['user_agent'] ?? '',
+                    'reason'      => $reason,
+                    'request_uri' => $this->loggable_uri(),
+                    'ip'          => $this->get_client_ip(),
+                    'user_agent'  => $this->request_data['user_agent'] ?? '',
                 ),
                 'warning'
             );
@@ -1032,6 +1240,22 @@ class Vigilante_Firewall {
         if ( ! headers_sent() ) {
             status_header( $status_code );
             nocache_headers();
+        }
+
+        // A REST client gets the refusal in the shape it can read. Until
+        // 2.11.0 every block answered with the HTML "Forbidden" page, so the
+        // block editor could only show its own generic message and the reason
+        // was reachable only by opening the activity log. Same status code,
+        // same message, the envelope core uses for an error.
+        if ( '' !== $this->current_rest_route() ) {
+            wp_send_json(
+                array(
+                    'code'    => 'vigilante_firewall_blocked',
+                    'message' => $message,
+                    'data'    => array( 'status' => $status_code ),
+                ),
+                $status_code
+            );
         }
 
         // Return appropriate response
@@ -1048,6 +1272,44 @@ class Vigilante_Firewall {
             esc_html__( 'Forbidden', 'vigilante' ),
             array( 'response' => 403 )
         );
+    }
+
+    /**
+     * Upper bound of the address stored with a logged block
+     *
+     * @since 2.11.1
+     */
+    const MAX_LOGGED_URI = 512;
+
+    /**
+     * The blocked address, in a form that still says what was blocked
+     *
+     * The copy kept for logging goes through sanitize_text_field(), which
+     * deletes every %XX sequence instead of decoding it. A browser percent
+     * encodes the URL it puts in a parameter, so a blocked embed was recorded
+     * as "/wp-json/oembed/1.0/proxy?url=httpswww.youtube.comwatchv..." and the
+     * owner could not tell what the request had been. Reported on 9 sep 2026.
+     *
+     * Nothing is sanitized away here beyond control characters, and that is
+     * the point. The value is stored, never executed: it is escaped where it
+     * is shown, by escapeHtml() in the log detail and by csvCell() in the
+     * export. Invalid UTF-8 is stripped because wp_json_encode() returns false
+     * on it, which would have thrown away the whole entry's context.
+     *
+     * @since 2.11.1
+     *
+     * @return string
+     */
+    private function loggable_uri() {
+        $uri = (string) ( $this->request_data['uri_raw'] ?? '' );
+        $uri = (string) preg_replace( '/[\x00-\x1F\x7F]/', '', $uri );
+        $uri = wp_check_invalid_utf8( $uri, true );
+
+        if ( strlen( $uri ) > self::MAX_LOGGED_URI ) {
+            $uri = substr( $uri, 0, self::MAX_LOGGED_URI ) . '...';
+        }
+
+        return $uri;
     }
 
     /**

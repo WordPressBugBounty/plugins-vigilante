@@ -2764,7 +2764,7 @@ class Vigilante_File_Integrity {
 
         // CTA button
         $inner .= Vigilante_Email_Template::button(
-            admin_url( 'admin.php?page=vigilante&tab=file-integrity' ),
+            admin_url( 'admin.php?page=vigilante&tab=file-integrity#vigilante-section-fi-last-scan' ),
             __( 'Review in Vigilant', 'vigilante' )
         );
 

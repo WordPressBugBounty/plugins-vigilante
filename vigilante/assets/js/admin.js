@@ -4200,16 +4200,23 @@
         },
 
         /**
-         * When landing on a fix link (#field-* or #vigilante-section-*),
-         * scroll smoothly and flash-highlight the target.
+         * When landing on a fix link (#field-*, #vigilante-section-* or any
+         * other #vigilante-* target), scroll smoothly and flash-highlight it.
+         *
+         * The pattern used to name the two families literally, which left the
+         * one anchor that follows neither out in the cold: the weekly report
+         * email links to #vigilante-analyzer, so that link landed on the
+         * dashboard with no scroll and no flash. Widened in 2.11.1 to the
+         * whole vigilante- prefix, which is still narrow enough that a hash
+         * written by anything else on the page cannot reach the selector.
          */
         hashFocusFlash: function() {
             var hash = window.location.hash;
             if (!hash || hash.length < 2) {
                 return;
             }
-            // Accept both section anchors and field anchors.
-            if (!/^#(?:field-|vigilante-section-)/.test(hash)) {
+            // Accept field anchors and every anchor the plugin owns.
+            if (!/^#(?:field-|vigilante-)/.test(hash)) {
                 return;
             }
 

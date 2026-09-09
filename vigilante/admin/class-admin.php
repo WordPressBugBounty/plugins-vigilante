@@ -2625,7 +2625,7 @@ class Vigilante_Admin {
             <?php $this->render_analyzer_widget( $analyzer_last_scan, $analyzer_history, $analyzer_categories_def, $analyzer_settings ); ?>
 
             <div class="vigilante-modules-grid">
-                <h2><?php esc_html_e( 'Security Modules', 'vigilante' ); ?></h2>
+                <h2 id="vigilante-section-dashboard-modules"><?php esc_html_e( 'Security Modules', 'vigilante' ); ?></h2>
                 <p class="description"><?php esc_html_e( 'Enable or disable security modules. Each module controls a tab with detailed settings.', 'vigilante' ); ?></p>
                 <div class="vigilante-modules-list">
                     <?php foreach ( $options['modules'] as $module => $enabled ) :
@@ -2686,7 +2686,7 @@ class Vigilante_Admin {
                     $ua_remaining_mins   = floor( ( $ua_remaining % 3600 ) / 60 );
                     ?>
                     <div class="vigilante-preset-card vigilante-under-attack-card <?php echo $ua_active ? 'vigilante-under-attack-active' : ''; ?>">
-                        <h3>
+                        <h3 id="vigilante-section-dashboard-under-attack">
                             <span class="dashicons dashicons-shield"></span>
                             <?php esc_html_e( 'Under Attack', 'vigilante' ); ?>
                         </h3>
@@ -3570,7 +3570,7 @@ class Vigilante_Admin {
         $two_factor_enabled = ! empty( $two_factor['enabled'] );
         ?>
         <div class="vigilante-settings-section vigilante-lockout-section">
-            <h2><?php esc_html_e( 'Login Protection Status', 'vigilante' ); ?></h2>
+            <h2 id="vigilante-section-login-status"><?php esc_html_e( 'Login Protection Status', 'vigilante' ); ?></h2>
             
             <table class="form-table">
                 <tr>
@@ -3732,7 +3732,7 @@ class Vigilante_Admin {
         $method     = $two_factor['method'] ?? 'email';
         $grace_days = $two_factor['grace_period_days'] ?? 3;
         ?>
-        <h3>
+        <h3 id="vigilante-section-login-2fa">
             <?php esc_html_e( 'Two-Factor Authentication (2FA)', 'vigilante' ); ?>
             <span class="vigilante-method-badge php"><?php esc_html_e( 'PHP', 'vigilante' ); ?></span>
             <span class="vigilante-method-badge database"><?php esc_html_e( 'Database', 'vigilante' ); ?></span>
@@ -4105,7 +4105,7 @@ class Vigilante_Admin {
                     </tr>
                 </table>
 
-                <h3><?php esc_html_e( 'Content Security Policy', 'vigilante' ); ?></h3>
+                <h3 id="vigilante-section-headers-csp"><?php esc_html_e( 'Content Security Policy', 'vigilante' ); ?></h3>
                 <table class="form-table">
                     <tr>
                         <th scope="row"><?php esc_html_e( 'Enable CSP', 'vigilante' ); ?></th>
@@ -4127,7 +4127,7 @@ class Vigilante_Admin {
                     </tr>
                 </table>
 
-                <h3><?php esc_html_e( 'HTTPS', 'vigilante' ); ?></h3>
+                <h3 id="vigilante-section-headers-force-https"><?php esc_html_e( 'HTTPS', 'vigilante' ); ?></h3>
                 <p class="description"><?php esc_html_e( 'HTTPS is strongly recommended, but Vigilant will not impose it. Enable only what your site already supports.', 'vigilante' ); ?></p>
                 <table class="form-table">
                     <tr>
@@ -4172,7 +4172,7 @@ class Vigilante_Admin {
                     </tr>
                 </table>
 
-                <h3><?php esc_html_e( 'HSTS (HTTP Strict Transport Security)', 'vigilante' ); ?></h3>
+                <h3 id="vigilante-section-headers-hsts"><?php esc_html_e( 'HSTS (HTTP Strict Transport Security)', 'vigilante' ); ?></h3>
                 <?php $vig_home_https = ( 0 === strpos( (string) get_option( 'home' ), 'https://' ) ); ?>
                 <p class="description"><?php esc_html_e( 'Tells browsers to reach this site over HTTPS and never over HTTP, for as long as the max age below.', 'vigilante' ); ?></p>
                 <?php if ( ! $vig_home_https ) : ?>
@@ -4215,7 +4215,7 @@ class Vigilante_Admin {
                     </tr>
                 </table>
 
-                <h3><?php esc_html_e( 'Server Identity', 'vigilante' ); ?></h3>
+                <h3 id="vigilante-section-headers-fingerprint"><?php esc_html_e( 'Server Identity', 'vigilante' ); ?></h3>
                 <p class="description"><?php esc_html_e( 'Hide identifying information that servers expose in responses.', 'vigilante' ); ?></p>
                 <table class="form-table">
                     <tr>
@@ -4946,7 +4946,7 @@ class Vigilante_Admin {
             $user_security = new Vigilante_User_Security( $this->settings, $this->activity_log );
             $pending_users = $user_security->get_pending_users();
             ?>
-            <div class="vigilante-tool-box vigilante-pending-users-section">
+            <div id="vigilante-section-users-pending" class="vigilante-tool-box vigilante-pending-users-section">
                 <h3>
                     <?php esc_html_e( 'Pending registrations', 'vigilante' ); ?>
                     <?php if ( count( $pending_users ) > 0 ) : ?>
@@ -6367,7 +6367,7 @@ class Vigilante_Admin {
 
                     <?php if ( $has_closed ) : ?>
                     <div class="vigilante-file-list vigilante-closed-plugins">
-                        <h3 style="color: #d63638;"><?php esc_html_e( 'Closed + Removed Plugins', 'vigilante' ); ?></h3>
+                        <h3 id="vigilante-section-fi-closed-plugins" style="color: #d63638;"><?php esc_html_e( 'Closed + Removed Plugins', 'vigilante' ); ?></h3>
                         <p class="description" style="color: #d63638;">
                             <?php esc_html_e( '&#9888; Warning: These plugins have been closed in the WordPress.org repository. Closures usually indicate malware, security issues, guideline violations, or supply chain attacks. Uninstall and replace as soon as possible.', 'vigilante' ); ?>
                         </p>

@@ -534,7 +534,7 @@ class Vigilante_SA_Category_Internal {
             'category' => self::SLUG,
             'max'      => 2,
             'label'    => __( 'Administrator named "admin"', 'vigilante' ),
-            'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'users', 'vigilante-section-users-main' ),
+            'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'users', 'vigilante-section-users-password' ),
         );
 
         $user = get_user_by( 'login', 'admin' );
