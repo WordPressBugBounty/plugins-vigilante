@@ -83,6 +83,174 @@ class Vigilante_File_Integrity {
     const BASELINE_OPTION = 'vigilante_critical_files_baseline';
 
     /**
+     * Option that records which version last redacted the stored baseline.
+     *
+     * @since 2.11.2
+     */
+    const BASELINE_REDACTION_OPTION = 'vigilante_baseline_redaction';
+
+    /**
+     * What replaces a secret value kept in the baseline.
+     *
+     * Fixed forever: if this string ever changes, every stored baseline
+     * suddenly differs from the freshly redacted file and every site reports a
+     * change to wp-config.php that never happened.
+     *
+     * @since 2.11.2
+     */
+    const REDACTED_MARKER = '[redacted by Vigilant]';
+
+    /**
+     * Constant names whose value never reaches the database.
+     *
+     * The eight WordPress keys and salts and the database credentials, plus
+     * anything whose name reads like a credential, since a real wp-config.php
+     * collects SMTP passwords, S3 keys and API tokens over the years.
+     *
+     * @since 2.11.2
+     *
+     * @var string[]
+     */
+    private static $secret_constants = array(
+        'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_HOST',
+        'AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'NONCE_KEY',
+        'AUTH_SALT', 'SECURE_AUTH_SALT', 'LOGGED_IN_SALT', 'NONCE_SALT',
+    );
+
+    /**
+     * The baseline copy of a critical file, with no secret in it
+     *
+     * The integrity scan keeps a copy of wp-config.php so it can show which
+     * lines changed. Until 2.11.1 that copy was the file itself minus the
+     * plugin's own blocks, so the options table held the database password and
+     * the eight authentication keys and salts, and anybody who later read the
+     * database or a backup of it got them without ever touching the
+     * filesystem. Reported by the automated security review of wp.org on 9 sep
+     * 2026 and fixed in 2.11.2.
+     *
+     * The hash is still taken over the whole file, so a change to a secret is
+     * still detected; what changes is that the diff cannot show it, which is
+     * the right trade.
+     *
+     * @since 2.11.2
+     *
+     * @param string $filename   Critical file name.
+     * @param string $normalized Normalized content.
+     * @return string Content safe to store, or '' when it cannot be made safe.
+     */
+    private function baseline_content( $filename, $normalized ) {
+        if ( 'wp-config.php' !== $filename ) {
+            return $normalized;
+        }
+
+        $redacted = $this->redact_secrets( $normalized );
+
+        /*
+         * Belt and braces, and this is the part that matters: the regular
+         * expression above is the thing most likely to miss a shape nobody
+         * thought of, and the cost of missing one is a secret in the database.
+         * So the result is checked against the values actually in force, and
+         * if any of them survived, nothing is stored at all. The scan then
+         * reports the change without a line diff, which the interface already
+         * handles, instead of leaking.
+         *
+         * Only values of eight characters or more are checked: DB_NAME is
+         * often something like "local" or "wp", and looking for that inside a
+         * PHP file matches by accident every time.
+         */
+        foreach ( self::$secret_constants as $name ) {
+            if ( ! defined( $name ) ) {
+                continue;
+            }
+
+            $value = (string) constant( $name );
+
+            if ( strlen( $value ) >= 8 && false !== strpos( $redacted, $value ) ) {
+                return '';
+            }
+        }
+
+        return $redacted;
+    }
+
+    /**
+     * Replace the value of every credential-looking define with a marker
+     *
+     * Keeps the line and the constant name, so the diff still shows that a
+     * credential line was touched, and drops only the value.
+     *
+     * @since 2.11.2
+     *
+     * @param string $content Normalized wp-config.php content.
+     * @return string
+     */
+    private function redact_secrets( $content ) {
+        $names = implode( '|', array_map( 'preg_quote', self::$secret_constants ) );
+
+        /*
+         * define( 'NAME', 'value' ), matching the quoted literal itself rather
+         * than reading up to the closing parenthesis.
+         *
+         * The first version of this stopped at the first ';', which looked
+         * reasonable and failed on the very first real file it saw: the salts
+         * WordPress generates are full of punctuation and a ';' inside one cut
+         * the match short, so nothing was redacted. Backreference 3 is the
+         * opening quote and the value runs to its unescaped twin. No /s
+         * modifier on purpose, so a file with an unterminated string breaks
+         * one line instead of swallowing the rest of the file.
+         */
+        $pattern = '/(define\s*\(\s*([\'"])(?:' . $names . '|[A-Z0-9_]*(?:KEY|SALT|SECRET|PASSWORD|PASSWD|TOKEN|API)[A-Z0-9_]*)\2\s*,\s*)([\'"])(?:\\\\.|(?!\3).)*\3/i';
+
+        $redacted = preg_replace( $pattern, '${1}\'' . self::REDACTED_MARKER . '\'', $content );
+
+        // A failed preg_replace returns null, and storing null would wipe the
+        // baseline copy silently. Falling back to the original is not an
+        // option either, so the caller's guard turns this into "no content".
+        return ( null === $redacted ) ? '' : $redacted;
+    }
+
+    /**
+     * Redact the baseline stored by an earlier version, once per version
+     *
+     * The fix above only covers what gets written from now on. Sites updating
+     * from 2.11.1 or earlier already have the secrets sitting in the option,
+     * so they are cleaned on the first admin request after the update. The
+     * hash is left alone: it describes the file, not the copy.
+     *
+     * @since 2.11.2
+     */
+    public function maybe_redact_stored_baseline() {
+        if ( VIGILANTE_VERSION === get_option( self::BASELINE_REDACTION_OPTION ) ) {
+            return;
+        }
+
+        $baseline = get_option( self::BASELINE_OPTION, array() );
+
+        if ( is_array( $baseline ) ) {
+            $changed = false;
+
+            foreach ( $baseline as $filename => $data ) {
+                if ( ! is_array( $data ) || ! isset( $data['content'] ) || ! is_string( $data['content'] ) ) {
+                    continue;
+                }
+
+                $safe = $this->baseline_content( $filename, $data['content'] );
+
+                if ( $safe !== $data['content'] ) {
+                    $baseline[ $filename ]['content'] = $safe;
+                    $changed = true;
+                }
+            }
+
+            if ( $changed ) {
+                update_option( self::BASELINE_OPTION, $baseline, false );
+            }
+        }
+
+        update_option( self::BASELINE_REDACTION_OPTION, VIGILANTE_VERSION, false );
+    }
+
+    /**
      * Critical root files to monitor against a stored baseline.
      * These files have no official WordPress.org checksum because their
      * content is unique per installation.
@@ -225,6 +393,11 @@ class Vigilante_File_Integrity {
         // scheduled scan does not raise false positives while wp.org is still
         // publishing the new version's checksums. Registered regardless of
         // auto_scan because it reacts to update events, not to the schedule.
+        // Clean the secrets an earlier version stored in the baseline. On
+        // admin_init because that is where the baseline is looked at, and it
+        // does one option read per admin request until it has run once.
+        add_action( 'admin_init', array( $this, 'maybe_redact_stored_baseline' ) );
+
         add_action( 'upgrader_process_complete', array( $this, 'on_upgrade_complete' ), 20, 2 );
         add_action( 'vigilante_fi_postupdate_verify', array( $this, 'run_postupdate_verify' ) );
     }
@@ -953,7 +1126,7 @@ class Vigilante_File_Integrity {
                 $baseline[ $filename ] = array(
                     'hash'    => $current_hash,
                     'size'    => strlen( $content ),
-                    'content' => $normalized,
+                    'content' => $this->baseline_content( $filename, $normalized ),
                     'updated' => time(),
                 );
                 $baseline_changed = true;
@@ -962,16 +1135,19 @@ class Vigilante_File_Integrity {
 
             // Upgrade legacy baseline entries that lack content (pre-diff format)
             if ( ! isset( $baseline[ $filename ]['content'] ) && $baseline[ $filename ]['hash'] === $current_hash ) {
-                $baseline[ $filename ]['content'] = $normalized;
+                $baseline[ $filename ]['content'] = $this->baseline_content( $filename, $normalized );
                 $baseline_changed = true;
                 continue;
             }
 
             // Compare against stored baseline
             if ( $baseline[ $filename ]['hash'] !== $current_hash ) {
+                // Both sides go through the same redaction, or every
+                // credential line would read as a change nobody made.
                 $baseline_content = $baseline[ $filename ]['content'] ?? '';
-                $diff = '' !== $baseline_content
-                    ? $this->compute_simple_diff( $baseline_content, $normalized )
+                $current_content  = $this->baseline_content( $filename, $normalized );
+                $diff = ( '' !== $baseline_content && '' !== $current_content )
+                    ? $this->compute_simple_diff( $baseline_content, $current_content )
                     : array( 'added' => array(), 'removed' => array(), 'unavailable' => true );
 
                 $modified[] = array(
@@ -1129,7 +1305,7 @@ class Vigilante_File_Integrity {
         $baseline[ $filename ] = array(
             'hash'    => md5( $normalized ),
             'size'    => strlen( $content ),
-            'content' => $normalized,
+            'content' => $this->baseline_content( $filename, $normalized ),
             'updated' => time(),
         );
 
@@ -1163,7 +1339,7 @@ class Vigilante_File_Integrity {
             $baseline[ $filename ] = array(
                 'hash'    => md5( $normalized ),
                 'size'    => strlen( $content ),
-                'content' => $normalized,
+                'content' => $this->baseline_content( $filename, $normalized ),
                 'updated' => time(),
             );
         }

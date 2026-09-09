@@ -1219,23 +1219,31 @@ class Vigilante_Under_Attack {
     /**
      * Get visitor IP address
      *
+     * Resolved by the same helper the firewall uses, so the whole plugin
+     * applies one proxy policy: the header the administrator marked as
+     * trusted, and REMOTE_ADDR otherwise.
+     *
+     * Until 2.11.1 this method read CF-Connecting-IP, X-Forwarded-For and
+     * X-Real-IP directly, taking whichever came first, without asking whether
+     * the request had actually arrived through a proxy. Any client can send
+     * those headers. Under Attack mode builds four things on this value, the
+     * whitelist decision, the challenge nonce, the signed verification cookie
+     * and the rate limit exemption, so on a site not behind an edge that
+     * rewrites them, one solved challenge could be replayed from anywhere by
+     * repeating the same invented header, and a known whitelisted address
+     * skipped the challenge outright. Reported by the automated security
+     * review of wp.org on 9 sep 2026 and fixed in 2.11.2.
+     *
+     * Behaviour note for sites behind Cloudflare or a reverse proxy: with no
+     * trusted header configured, every visitor now resolves to the proxy
+     * address, which is already how the firewall sees them. Set the trusted
+     * proxy header in the firewall settings to get the real client address in
+     * both places.
+     *
      * @return string
      */
     private function get_visitor_ip() {
-        $ip = '';
-
-        if ( ! empty( $_SERVER['HTTP_CF_CONNECTING_IP'] ) ) {
-            $ip = sanitize_text_field( wp_unslash( $_SERVER['HTTP_CF_CONNECTING_IP'] ) );
-        } elseif ( ! empty( $_SERVER['HTTP_X_FORWARDED_FOR'] ) ) {
-            $ips = explode( ',', sanitize_text_field( wp_unslash( $_SERVER['HTTP_X_FORWARDED_FOR'] ) ) );
-            $ip  = trim( $ips[0] );
-        } elseif ( ! empty( $_SERVER['HTTP_X_REAL_IP'] ) ) {
-            $ip = sanitize_text_field( wp_unslash( $_SERVER['HTTP_X_REAL_IP'] ) );
-        } elseif ( ! empty( $_SERVER['REMOTE_ADDR'] ) ) {
-            $ip = sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) );
-        }
-
-        return filter_var( $ip, FILTER_VALIDATE_IP ) ? $ip : '0.0.0.0';
+        return Vigilante_IP_Utils::get_client_ip();
     }
 
     /**

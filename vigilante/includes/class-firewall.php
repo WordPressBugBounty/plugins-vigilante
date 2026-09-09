@@ -94,10 +94,25 @@ class Vigilante_Firewall {
             return;
         }
 
-        // Skip for whitelisted User-Agents (ManageWP, MainWP, etc.)
-        if ( $this->is_ua_whitelisted() ) {
-            return;
-        }
+        /*
+         * The User-Agent whitelist no longer skips the firewall.
+         *
+         * Until 2.11.1 a matching User-Agent returned here, before the IP
+         * blacklist and every request check, so anyone who guessed a
+         * configured substring ("ManageWP", "MainWP") walked past the SQL
+         * injection, script injection, file inclusion, traversal, bot and
+         * HTTP method rules by setting a header they control. A header a
+         * client chooses cannot stand in for an identity. Reported by the
+         * automated security review of wp.org on 9 sep 2026 and fixed in
+         * 2.11.2.
+         *
+         * What the option is actually for is keeping a remote manager from
+         * being turned away as a bot, so that is all it does now: it exempts
+         * the User-Agent rules, resolved further down, and nothing else. The
+         * list is empty by default, so only sites that had configured one were
+         * ever exposed.
+         */
+        $ua_whitelisted = $this->is_ua_whitelisted();
 
         // Gather request data first: a block is logged with the address it
         // turned away, and until 2.11.1 the blacklist ran before this, so the
@@ -109,8 +124,10 @@ class Vigilante_Firewall {
             $this->block_request( 'ip_blacklisted', __( 'IP address is blacklisted', 'vigilante' ) );
         }
 
-        // Check if User-Agent is blacklisted (after gathering request data)
-        if ( $this->is_ua_blacklisted() ) {
+        // Check if User-Agent is blacklisted (after gathering request data).
+        // An explicitly whitelisted agent still wins over the blacklist, which
+        // is what an administrator who wrote it there expects.
+        if ( ! $ua_whitelisted && $this->is_ua_blacklisted() ) {
             $this->block_request( 'ua_blacklisted', __( 'User-Agent is blacklisted', 'vigilante' ) );
         }
 
@@ -129,7 +146,14 @@ class Vigilante_Firewall {
             'block_empty_user_agent'    => 'check_empty_user_agent',
         );
 
+        // The rules a whitelisted User-Agent is exempt from, and only these.
+        $ua_rules = array( 'block_bad_bots', 'block_empty_user_agent' );
+
         foreach ( $checks as $option => $method ) {
+            if ( $ua_whitelisted && in_array( $option, $ua_rules, true ) ) {
+                continue;
+            }
+
             if ( ! empty( $this->options[ $option ] ) && method_exists( $this, $method ) ) {
                 $result = $this->$method();
                 if ( is_string( $result ) ) {
