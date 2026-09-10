@@ -274,7 +274,27 @@ class Vigilante_Admin {
                 require_once VIGILANTE_INCLUDES_DIR . 'class-file-integrity.php';
             }
             $fi = new Vigilante_File_Integrity( $this->settings, $this->database, $this->activity_log );
-            $fi->regenerate_all_baselines();
+
+            /*
+             * Only when there is nothing on record. This migration exists to
+             * create the baseline that did not exist, never to discard the one
+             * the owner approved: rebuilding it from the files takes whatever
+             * is on disk right now as approved, so a wp-config.php modified and
+             * awaiting review would be blessed in silence.
+             *
+             * And this is not theory. vigilante_db_version is written on two
+             * different scales into the same option: this file counts in plugin
+             * versions (2.11.0) and Vigilante_Database counts in schema
+             * versions, currently 1.4.0 (class-database.php:322 and :380). For
+             * version_compare, 1.4.0 is LOWER than 1.14.0, so any site whose
+             * option was last written by the schema runs this migration again.
+             * Measured on the Multisite install on 10 sep 2026: one of the three
+             * sites was sitting on 1.4.0.
+             */
+            if ( ! $fi->get_critical_files_baseline() ) {
+                $fi->regenerate_all_baselines();
+            }
+
             update_option( 'vigilante_db_version', '1.14.0' );
         }
 

@@ -441,12 +441,22 @@ class Vigilante_Database_Prefix {
             return new WP_Error( 'read_error', __( 'Cannot read wp-config.php.', 'vigilante' ) );
         }
 
-        // Back up the original file
-        $backup_path = $this->wpconfig_path . '.vigilante-backup-' . gmdate( 'YmdHis' );
-        // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
-        if ( ! file_put_contents( $backup_path, $content ) ) {
-            return new WP_Error( 'backup_error', __( 'Cannot create wp-config.php backup.', 'vigilante' ) );
-        }
+        /*
+         * The original file is held in $content, in memory, and that is the
+         * whole backup this needs.
+         *
+         * Until 2.11.3 it also wrote a copy next to wp-config.php, named
+         * wp-config.php.vigilante-backup-<timestamp>. On a standard install
+         * that is the site root, the name is a predictable timestamp and it
+         * carries no .php extension, so a server hands it over as plain text
+         * with the database credentials and the eight salts inside. It was
+         * deleted straight after, but a request that died in between left it
+         * there for good, and that is exactly the moment when the owner is busy
+         * with a site that will not load. Present since 1.2.0.
+         *
+         * Nothing is lost by removing it: that file was never read back. The
+         * restore below, the only path that undoes anything, uses $content.
+         */
 
         // Match the $table_prefix line (handles single and double quotes, with/without spaces)
         $pattern = '/(\$table_prefix\s*=\s*)([\'"]).+?\\2(\s*;)/';
@@ -455,8 +465,6 @@ class Vigilante_Database_Prefix {
         $new_content = preg_replace( $pattern, $replacement, $content, 1, $count );
 
         if ( 0 === $count || null === $new_content ) {
-            // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink
-            unlink( $backup_path );
             return new WP_Error( 'replace_error', __( 'Cannot find $table_prefix in wp-config.php.', 'vigilante' ) );
         }
 
@@ -465,17 +473,11 @@ class Vigilante_Database_Prefix {
         $result = file_put_contents( $this->wpconfig_path, $new_content );
 
         if ( false === $result ) {
-            // Restore backup
+            // Restore from memory, which is where the original has been all along.
             // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
             file_put_contents( $this->wpconfig_path, $content );
-            // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink
-            unlink( $backup_path );
             return new WP_Error( 'write_error', __( 'Cannot write to wp-config.php.', 'vigilante' ) );
         }
-
-        // Clean up backup after successful write
-        // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink
-        unlink( $backup_path );
 
         $this->invalidate_wpconfig_opcode_cache();
 

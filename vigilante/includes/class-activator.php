@@ -376,7 +376,13 @@ class Vigilante_Activator {
         $activity_log = null; // Not needed for baseline generation
 
         $fi = new Vigilante_File_Integrity( $settings, $database, $activity_log );
-        $fi->regenerate_all_baselines();
+
+        // Same care as the migration: reactivating the plugin on a site that
+        // already has an approved baseline must not throw it away and adopt
+        // whatever the files say today.
+        if ( ! $fi->get_critical_files_baseline() ) {
+            $fi->regenerate_all_baselines();
+        }
     }
 
     /**

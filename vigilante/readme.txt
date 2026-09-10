@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.11.2
+Stable tag: 2.11.3
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -411,6 +411,11 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 2.11.3 =
+* Improved: on a network, the baseline of the critical files is one record for the whole network instead of one per site. Both watched files, wp-config.php and the root .htaccess, belong to the installation and not to any single site, so until now every site kept its own copy of the same file: on a network of fifty sites, fifty copies of the same thing. Approving a change to either file now takes a network administrator, because the file and the record of it belong to the network, and manage_options is held by the administrator of every subsite.
+* Fix: on a network, the cleanup that strips credentials from baselines written by earlier versions reaches every site. It ran on admin_init over per-site options, so it cleaned the site whose dashboard someone opened and no other, and the daily scan did not clean them either, because it left untouched any entry whose hash still matched. A subsite nobody visits kept the database password and the eight keys and salts in its options table indefinitely, with 2.11.2 installed and nothing to show for it. The scan now rewrites any stored copy that is not the copy it would store today, so each site cleans itself through wp-cron with front-end traffic alone, and a one-off sweep from the main site clears the rest of the network at once. Reported by Albert.
+* Fix: changing the database table prefix no longer leaves a copy of wp-config.php next to the original. The copy was named after a timestamp and carried no .php extension, so a server would hand it over as plain text with the database credentials and the eight salts inside. It was deleted right afterwards, but a request that died in between left it there for good, which is precisely the moment when the owner is busy with a site that will not load. Nothing is lost by removing it, because that copy was never read back: the only path that undoes the change restores from memory. Present since 1.2.0.
+
 = 2.11.2 =
 * Improved: the User-Agent whitelist no longer skips the whole firewall. It still keeps a remote manager such as ManageWP or MainWP from being turned away by the bot rules, which is what it is for, but a request carrying a whitelisted agent is now checked for SQL injection, script injection, remote file inclusion, traversal and HTTP method like any other. A header the client chooses cannot stand in for an identity: anyone who guessed a configured substring walked past every one of those rules. The list is empty unless you filled it in, so only sites that had configured one were affected.
 * Improved: Under Attack mode resolves the visitor address through the same helper as the firewall, honouring the trusted proxy header you configured instead of believing CF-Connecting-IP or X-Forwarded-For from whoever sends them. Those four things it decides with that address, the whitelist, the challenge nonce, the verification cookie and the rate limit exemption, could be steered by sending an invented header. If your site is behind Cloudflare or a reverse proxy, set the trusted proxy header in the firewall settings so both modules see the real client address.
@@ -446,8 +451,8 @@ For older changelog entries, please check the [changelog.txt](https://plugins.sv
 
 == Upgrade Notice ==
 
-= 2.11.2 =
-Security release. The User-Agent whitelist no longer skips the firewall, Under Attack resolves the visitor address through your trusted proxy setting, and wp-config.php secrets are no longer kept in the database.
+= 2.11.3 =
+Security release for networks. The integrity baseline becomes a single network record, and the cleanup of credentials stored by earlier versions now reaches every site instead of only the one whose dashboard you open.
 
 == Support ==
 

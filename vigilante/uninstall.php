@@ -58,6 +58,18 @@ function vigilante_uninstall() {
         vigilante_uninstall_site();
     }
 
+    /*
+     * Network options. Since 2.11.3 the baseline of the critical files lives in
+     * a single network option, because both files it watches, wp-config.php and
+     * the root .htaccess, belong to the installation and not to any one site.
+     * It is stored redacted, but it is still a copy of the configuration and it
+     * goes when the plugin goes. Once, not per site.
+     */
+    if ( is_multisite() ) {
+        delete_site_option( 'vigilante_critical_files_baseline' );
+        delete_site_option( 'vigilante_baseline_sweep' );
+    }
+
     // Remove backup directory. WP_CONTENT_DIR is shared by the whole network,
     // so this happens once.
     $backup_dir = WP_CONTENT_DIR . '/vigilante-backups/';

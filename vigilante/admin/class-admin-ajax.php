@@ -118,7 +118,21 @@ trait Vigilante_Admin_Ajax {
     public function ajax_approve_critical_file() {
         check_ajax_referer( 'vigilante_admin_nonce', 'nonce' );
 
-        if ( ! current_user_can( 'manage_options' ) ) {
+        // Both approvable files, wp-config.php and the root .htaccess, belong
+        // to the whole network, and since 2.11.3 so does the baseline that
+        // records them. Approving a change to them is a network action, so on
+        // a network it takes a network administrator: manage_options is held
+        // by the administrator of every subsite.
+        // Written with both calls in plain sight, following the recipe in
+        // native-aeo-pack/trunk/includes/class-robots-txt.php:650, so the
+        // surface inventory can read the capability. With the name in a
+        // variable it can only say "check by hand", and an alert that says
+        // that forever is an alert nobody reads.
+        $allowed = is_multisite()
+            ? current_user_can( 'manage_network_options' )
+            : current_user_can( 'manage_options' );
+
+        if ( ! $allowed ) {
             wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
         }
 

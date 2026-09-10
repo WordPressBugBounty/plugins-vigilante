@@ -235,6 +235,9 @@ class Vigilante_Deactivator {
         delete_option( 'vigilante_last_integrity_results' );
         delete_option( 'vigilante_last_integrity_scan' );
         delete_option( 'vigilante_critical_files_baseline' );
+        if ( is_multisite() ) {
+            delete_site_option( 'vigilante_critical_files_baseline' );
+        }
         delete_option( 'vigilante_analyzer_last_scan' );
         delete_option( 'vigilante_analyzer_history' );
         delete_option( 'vigilante_analyzer_fix_log' );
