@@ -229,6 +229,14 @@ class Vigilante_Deactivator {
         // Remove all options
         delete_option( 'vigilante_options' );
         delete_option( 'vigilante_db_version' );
+        delete_option( 'vigilante_purge_2_11_0_done' );
+        delete_option( 'vigilante_baseline_redaction' );
+        if ( is_multisite() ) {
+            // The network one was in uninstall.php and missing here, so after
+            // deleting the data and reactivating, the one-off sweep never ran
+            // again and the per-site copies stayed where they were.
+            delete_site_option( 'vigilante_baseline_sweep' );
+        }
         delete_option( 'vigilante_activated_time' );
         delete_option( 'vigilante_dismissed_notices' );
         delete_option( 'vigilante_backup_timestamp' );

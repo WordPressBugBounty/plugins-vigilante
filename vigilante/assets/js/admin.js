@@ -1377,7 +1377,22 @@
                     html += '</td>';
                     html += '<td>';
                     html += '<button type="button" class="button button-small vigilante-toggle-critical-content" data-target="vigilante-critical-content-' + fileId + '" data-label-show="' + (strings.reviewChanges || 'Review changes') + '" data-label-hide="' + (strings.hideChanges || 'Hide changes') + '">' + (strings.reviewChanges || 'Review changes') + '</button> ';
-                    html += '<button type="button" class="button button-small button-primary vigilante-approve-critical-file" data-file="' + esc(file.file) + '">' + (strings.approve || 'Approve') + '</button>';
+
+                    // Same gate as the AJAX handler behind the button, and as the
+                    // first render in PHP. Since 2.11.3 approving these two files
+                    // takes a network administrator, so painting the button to
+                    // anybody else buys them a Permission denied and no reason why.
+                    //
+                    // Truthy test on purpose: wp_localize_script() casts every
+                    // scalar to a string, so the PHP boolean arrives here as "1"
+                    // or "" and never as true. Measured on the network, admin of
+                    // a subsite against network admin. A === true would gate
+                    // nobody and would look right.
+                    if (vigilanteAdmin.approvalLocked) {
+                        html += '<span class="description" style="display:block;margin-top:4px;">' + escHtml(strings.approvalLockedNotice || '') + '</span>';
+                    } else {
+                        html += '<button type="button" class="button button-small button-primary vigilante-approve-critical-file" data-file="' + esc(file.file) + '">' + (strings.approve || 'Approve') + '</button>';
+                    }
                     html += '</td>';
                     html += '</tr>';
 

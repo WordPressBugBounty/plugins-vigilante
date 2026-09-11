@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.11.3
+Stable tag: 2.11.4
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -341,6 +341,10 @@ Yes. The security audit log can be exported to CSV format for external analysis 
 
 The scanner compares WordPress core files, plugin files, and theme files against official checksums from WordPress.org. Plugins and themes without available checksums are also scanned using strict obfuscation pattern detection. The uploads directory is scanned for PHP files, double extensions, and .htaccess files. Extra PHP files not present in original distributions are detected and, if they contain suspicious code, automatically flagged as suspicious.
 
+= I updated from a version that stored wp-config.php in the database. Is there anything else to do? =
+
+Versions before 2.11.2 kept a copy of wp-config.php in an option so the integrity scan could show which lines had changed, and that copy carried the database password and the eight authentication keys and salts. Updating removes the copy, but no update can undo an exposure that already happened. So if your database, or any backup of it, may have been read by somebody else while that copy was stored, replace the eight keys and salts in your wp-config.php with fresh ones from the WordPress.org secret-key service, and change the database password if your host lets you. Replacing the salts signs everybody out, yourself included, which is the whole point of doing it.
+
 = How often does the file integrity scan run? =
 
 You can configure automatic scans to run daily or weekly. You can also run manual scans at any time. Email notifications support three levels: all issues, suspicious files only, or disabled.
@@ -411,9 +415,18 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 2.11.4 =
+* Fix: the cleanup that removes the credentials stored by versions before 2.11.2 now runs whether the File Integrity module is on or off. Both cleanup paths were registered inside that module, so a site with file monitoring turned off kept the database password and the eight keys and salts in its options table with 2.11.3 installed and nothing to show for it, and a network whose main site had the module off did not register the network sweep either, which was the one path that reached the sites nobody visits. Turning the module off is not a decision to keep those credentials, and for whoever did it the cleanup matters more rather than less. With the module off there is no scan, so on such a site the cleanup arrives on the first admin page load, and on a network the sweep from the main site reaches the sites nobody opens. Reported by @calzbert, who reviewed the 2.11.3 diff and found every fix in this release.
+* Fix: reactivating the plugin no longer replays eleven migrations, one of which empties the trusted devices and the pending second-factor codes. The schema version and the plugin version are written to the same option on two different scales, and the activator wrote the schema one unconditionally, so a site that was completely up to date read as older than almost every migration and ran them all again: every user of that site had to pass the second factor once more, every time somebody toggled the plugin. The schema version no longer walks the stored value backwards, and the migration that deletes rows carries a marker of its own so that no version comparison can replay it. A site that is already sitting on the lower scale, which is also where a subsite created after a network-wide activation starts, may still ask for the second factor once more when it updates.
+* Fix: on a network, updating no longer loses the approved record of wp-config.php. The migration to a single network record kept the per-site copies only while that record did not exist at all, and the record can be born holding just one of the two files: the plugin rewrites the root .htaccess by itself on a normal page load, and doing so creates it. From then on the migration considered its job done, dropped every per-site copy, and the approved record of wp-config.php went with them, so the next scan took whatever was on disk as approved. The two files are now carried over one by one, and a per-site copy is only dropped once the network record has an entry for every file the copy had. An entry the network record already holds is kept as it is, so what this recovers is a file the network record did not have yet, which is the wp-config.php case above. Where the copies disagree the main site wins, then the site being cleaned: the scan runs under wp-cron on any site and in no particular order, and until 2.11.3 approving these files took manage_options, which the administrator of every subsite holds, so an approval made on one site could otherwise retire a warning the main site still had pending review.
+* Fix: the one-off network sweep added in 2.11.3 no longer rearms itself on every release, and an interrupted one is still finished. Its marker recorded the running version, so every future update walked the whole network to find nothing, which is the expensive walk the marker exists to avoid; but that same marker was what got a walk cut short resumed later. There are two marks now, one for started and one for finished, so a walk that did not get through is picked up by the next version and a completed one is never repeated.
+* Fix: the Approve button for wp-config.php and the root .htaccess is no longer shown to people who cannot use it. Since 2.11.3 approving those two files takes a network administrator, but the button was still painted on every site, so the administrator of a subsite saw the warning, pressed Approve and got a permission error with no explanation. A line saying who approves these files takes its place.
+* Fix: the file integrity scan is no longer scheduled on sites where the module is switched off. Any admin screen that used the scanner as a tool re-registered its hooks and booked the recurring event, which then fired with nothing listening. Sites that already have that orphan event keep it until the plugin is deactivated.
+* Fix: uninstalling and the delete-data option now remove the migration markers, including the one earlier versions left behind in the options table and the network one that survived a delete-and-reactivate.
+
 = 2.11.3 =
 * Improved: on a network, the baseline of the critical files is one record for the whole network instead of one per site. Both watched files, wp-config.php and the root .htaccess, belong to the installation and not to any single site, so until now every site kept its own copy of the same file: on a network of fifty sites, fifty copies of the same thing. Approving a change to either file now takes a network administrator, because the file and the record of it belong to the network, and manage_options is held by the administrator of every subsite.
-* Fix: on a network, the cleanup that strips credentials from baselines written by earlier versions reaches every site. It ran on admin_init over per-site options, so it cleaned the site whose dashboard someone opened and no other, and the daily scan did not clean them either, because it left untouched any entry whose hash still matched. A subsite nobody visits kept the database password and the eight keys and salts in its options table indefinitely, with 2.11.2 installed and nothing to show for it. The scan now rewrites any stored copy that is not the copy it would store today, so each site cleans itself through wp-cron with front-end traffic alone, and a one-off sweep from the main site clears the rest of the network at once. Reported by Albert.
+* Fix: on a network, the cleanup that strips credentials from baselines written by earlier versions reaches every site. It ran on admin_init over per-site options, so it cleaned the site whose dashboard someone opened and no other, and the daily scan did not clean them either, because it left untouched any entry whose hash still matched. A subsite nobody visits kept the database password and the eight keys and salts in its options table indefinitely, with 2.11.2 installed and nothing to show for it. The scan now rewrites any stored copy that is not the copy it would store today, so each site cleans itself through wp-cron with front-end traffic alone, and a one-off sweep from the main site clears the rest of the network at once. Reported by @calzbert.
 * Fix: changing the database table prefix no longer leaves a copy of wp-config.php next to the original. The copy was named after a timestamp and carried no .php extension, so a server would hand it over as plain text with the database credentials and the eight salts inside. It was deleted right afterwards, but a request that died in between left it there for good, which is precisely the moment when the owner is busy with a site that will not load. Nothing is lost by removing it, because that copy was never read back: the only path that undoes the change restores from memory. Present since 1.2.0.
 
 = 2.11.2 =
@@ -451,8 +464,8 @@ For older changelog entries, please check the [changelog.txt](https://plugins.sv
 
 == Upgrade Notice ==
 
-= 2.11.3 =
-Security release for networks. The integrity baseline becomes a single network record, and the cleanup of credentials stored by earlier versions now reaches every site instead of only the one whose dashboard you open.
+= 2.11.4 =
+Closes a gap in the credential cleanup: it did not run on sites with File Integrity turned off. Also stops the plugin replaying old migrations when it is reactivated, which was clearing every trusted device.
 
 == Support ==
 

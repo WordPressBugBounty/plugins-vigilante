@@ -97,6 +97,35 @@ class Vigilante_File_Integrity {
     const BASELINE_SWEEP_OPTION = 'vigilante_baseline_sweep';
 
     /**
+     * The migration the sweep marker stands for.
+     *
+     * A literal, not VIGILANTE_VERSION, and the difference is the whole point.
+     * 2.11.3 stored the running version, so every release after it rearmed the
+     * sweep: the first dashboard load on the main site walked the network with
+     * switch_to_blog() to find nothing, because there was nothing left to find,
+     * for ever, at the price of the one walk the marker exists to avoid.
+     *
+     * A plain boolean would fix that too, and would also leave no way to fire a
+     * second network sweep the day another migration needs one. A literal costs
+     * nothing today and keeps that door open. The redaction marker keeps the
+     * running version on purpose: there the point IS to run again when the list
+     * of what has to be redacted grows, and the cost of reopening it is one
+     * option read rather than a walk of the network.
+     *
+     * And it must be a value NO version ever wrote into this option. The first
+     * draft used '2.11.3', which is precisely what 2.11.3 wrote there, as its
+     * own VIGILANTE_VERSION and BEFORE starting the walk: out in the wild that
+     * value means "started, maybe unfinished". Reading it as "finished" left
+     * every network whose 2.11.3 walk was cut short unswept for good, subsites
+     * still holding the database password and the eight keys. Reproduced on the
+     * Multisite install by a third cross review. The price of the new value is
+     * that networks that did finish in 2.11.3 walk once more and find nothing.
+     *
+     * @since 2.11.4
+     */
+    const BASELINE_SWEEP_MIGRATION = 'network-sweep-done';
+
+    /**
      * What replaces a secret value kept in the baseline.
      *
      * Fixed forever: if this string ever changes, every stored baseline
@@ -132,7 +161,7 @@ class Vigilante_File_Integrity {
      * Keeping the baseline in a per-site option meant every site of a network
      * stored its own copy of the same wp-config.php, so a network of fifty
      * sites held fifty copies of the same credentials, and a cleanup that ran
-     * on one site left the other forty nine untouched. Reported by Albert on
+     * on one site left the other forty nine untouched. Reported by @calzbert on
      * 10 sep 2026 and reproduced on the Multisite install. Since 2.11.3 there
      * is one baseline per network.
      *
@@ -260,6 +289,202 @@ class Vigilante_File_Integrity {
     }
 
     /**
+     * Promote a per-site baseline to the network record before dropping it
+     *
+     * Up to 2.11.2 the baseline was a per-site option, so on a network every
+     * site kept its own copy of the same two files. Those copies go, but what a
+     * copy records is which version of the file the owner approved, and that
+     * has to survive: rebuilding the baseline from disk would take whatever is
+     * there right now as approved, so a wp-config.php modified and still
+     * awaiting review would be blessed in silence.
+     *
+     * WHICH copy becomes the network record is not a detail, and 2.11.3 got it
+     * wrong. This runs from the scan, under wp-cron, on whichever site gets
+     * traffic first, and the sweep from the main site can be hours away because
+     * it waits for a network administrator to open a dashboard. So on a network
+     * with traffic spread around, the record of the whole installation was
+     * whatever the first subsite to scan happened to hold.
+     *
+     * That is harmless while every copy agrees, which is the ordinary case. The
+     * reason they can disagree is the very thing 2.11.3 fixed: until then,
+     * approving a change to wp-config.php took manage_options, which on a
+     * network the administrator of every subsite holds. If a change was
+     * approved on some subsite while the main site still had it pending review,
+     * promoting that subsite's copy retires a warning nobody decided to retire.
+     *
+     * Hence the order, file by file: what the network record already holds
+     * wins, then the main site, then the site this runs on. Between the copies,
+     * the main site beats a subsite, which is @calzbert's point, reported after
+     * reading the 2.11.3 diff.
+     *
+     * What this does NOT protect, said plainly because an earlier wording
+     * claimed more: if the network record already holds a file, that entry
+     * wins, even when it was written from disk by the .htaccess writer on
+     * init:20 while a third-party edit was pending review. What survives is a
+     * file the network record does not hold yet, which is the wp-config.php
+     * case that 2.11.3 lost. The .htaccess case is pre-existing and needs the
+     * writers to pass their before-hash, see update_critical_file_baseline().
+     *
+     * @since 2.11.4
+     *
+     * @param array|null $per_site Baseline stored for the site this runs on.
+     * @return bool True when the network record covers everything the per-site
+     *              copy had, which is the only case where dropping it is safe.
+     */
+    private function promote_per_site_baseline( $per_site ) {
+        $network = get_site_option( self::BASELINE_OPTION, array() );
+
+        if ( ! is_array( $network ) ) {
+            $network = array();
+        }
+
+        /*
+         * Three sources, filled in one from another, file by file. It used to
+         * be all or nothing: if the network record existed at all, this
+         * returned at once and the caller dropped the per-site copy anyway.
+         *
+         * That looked safe and was not, because the network record can be born
+         * holding ONE of the two files. maybe_sync_server_files() runs on init
+         * and rewrites the root .htaccess by itself, and the writer calls
+         * update_critical_file_baseline( '.htaccess' ), which creates the
+         * network option with that single entry. init runs before admin_init,
+         * so on a network on Apache this is the ordinary order of an update,
+         * not a race: the cleanup then found the option "already there", kept
+         * nothing, and deleted the per-site copies that held the approved
+         * record of wp-config.php. The next scan met a file it had never seen
+         * and stored whatever was on disk as approved, which is the silent
+         * blessing this whole function exists to prevent. Reproduced on the
+         * Multisite install on 10 sep 2026, found by a cross review.
+         *
+         * Order of authority: what the network already says wins, then the main
+         * site, then the site this runs on. Nothing is ever overwritten and
+         * nothing is dropped for being late.
+         */
+        $sources = array( $network );
+
+        if ( ! is_main_site() ) {
+            $from_main = get_blog_option( get_main_site_id(), self::BASELINE_OPTION, null );
+
+            if ( is_array( $from_main ) ) {
+                $sources[] = $from_main;
+            }
+        }
+
+        if ( is_array( $per_site ) ) {
+            $sources[] = $per_site;
+        }
+
+        $merged = array();
+
+        foreach ( $sources as $source ) {
+            foreach ( $source as $filename => $data ) {
+                if ( isset( $merged[ $filename ] ) || ! is_array( $data ) || ! isset( $data['hash'] ) ) {
+                    continue;
+                }
+
+                // Only the content carries secrets; the hash and the size,
+                // which are what say "this is the version that was approved",
+                // go over untouched.
+                if ( isset( $data['content'] ) && is_string( $data['content'] ) ) {
+                    $data['content'] = $this->baseline_content( $filename, $data['content'] );
+                }
+
+                $merged[ $filename ] = $data;
+            }
+        }
+
+        if ( array_diff_key( $merged, $network ) ) {
+            $this->write_baseline( $merged );
+        }
+
+        if ( ! is_array( $per_site ) ) {
+            return true;
+        }
+
+        /*
+         * Is every file this copy had a record of now on the network record?
+         * Only then may the caller drop it. And the question is asked of what
+         * is STORED, not of $merged, which is only what this request MEANT to
+         * store. Asking $merged makes the answer true by construction, because
+         * the copy is one of the sources above, so the guard could never fire
+         * and redact_in_place() in the caller was unreachable code.
+         *
+         * The write does not always land, and the case that matters is not a
+         * broken database, it is the same race as the bug this function fixes.
+         * On a network updating from 2.11.2 the network option does not exist
+         * yet, so update_network_option() takes the $old_value === false branch
+         * and delegates to add_network_option() (wp-includes/option.php:2434).
+         * If another request created the option in between, that call either
+         * returns false without writing (option.php:2201) or, when this process
+         * still holds "does not exist" in its own notoptions cache, skips the
+         * check and INSERTs a second row: wp_sitemeta has no unique index on
+         * meta_key, so the record ends up duplicated and get_network_option()
+         * hands back whichever row comes first. Reproduced on the Multisite
+         * install on 10 sep 2026, with the .htaccess writer of init:20 racing a
+         * promotion: two rows, the approved hash of wp-config.php out of reach,
+         * and the per-site copy deleted all the same. Found by a cross review.
+         *
+         * Both cache keys go before rereading, and that is not belt and braces.
+         * add_network_option() caches the value it believes it wrote
+         * (option.php:2221), so a plain read hands back the very array that did
+         * not survive; and a stale notoptions would answer "no such option"
+         * without touching the database, which reads as "nothing is covered".
+         * Measured: without dropping the cache this guard still returns true.
+         */
+        $network_id = get_current_network_id();
+        wp_cache_delete( $network_id . ':' . self::BASELINE_OPTION, 'site-options' );
+        wp_cache_delete( $network_id . ':notoptions', 'site-options' );
+
+        $stored = get_site_option( self::BASELINE_OPTION, array() );
+
+        if ( ! is_array( $stored ) ) {
+            return false;
+        }
+
+        foreach ( $per_site as $filename => $data ) {
+            if ( is_array( $data ) && isset( $data['hash'] ) && ! isset( $stored[ $filename ] ) ) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Strip the secrets from a per-site copy that cannot be dropped yet
+     *
+     * The copy stays because it holds the only record of an approved file, but
+     * what it must not keep for one more minute is the database password and
+     * the eight keys and salts. The two things are separable and this is where
+     * they get separated.
+     *
+     * @since 2.11.4
+     *
+     * @param array $per_site Baseline stored for the current site.
+     * @return void
+     */
+    private function redact_in_place( $per_site ) {
+        $changed = false;
+
+        foreach ( $per_site as $filename => $data ) {
+            if ( ! is_array( $data ) || ! isset( $data['content'] ) || ! is_string( $data['content'] ) ) {
+                continue;
+            }
+
+            $safe = $this->baseline_content( $filename, $data['content'] );
+
+            if ( $safe !== $data['content'] ) {
+                $per_site[ $filename ]['content'] = $safe;
+                $changed = true;
+            }
+        }
+
+        if ( $changed ) {
+            update_option( self::BASELINE_OPTION, $per_site );
+        }
+    }
+
+    /**
      * Clean up what earlier versions stored, wherever they stored it
      *
      * Two jobs, and the second one only exists on a network.
@@ -288,47 +513,30 @@ class Vigilante_File_Integrity {
 
         /*
          * The per-site copy left behind by 2.11.2 and earlier. On a network it
-         * holds the database password and the eight keys and salts, so it goes.
-         *
-         * But it does not just go: what it records is which version of the file
-         * the owner approved, and that has to survive. Dropping it and letting
-         * the scan build a fresh baseline from the file would take whatever is
-         * on disk right now as approved, so a wp-config.php modified and still
-         * awaiting review would be silently blessed and the warning would
-         * disappear on update. Measured on the Multisite install while writing
-         * this: the first scan after the migration reported zero modified files
-         * where it had to report one.
-         *
-         * So the hash and the size are promoted to the network baseline, which
-         * is what says "this is the version that was approved", and only the
-         * content is redacted on the way, which is the part that carries the
-         * secrets.
+         * holds the database password and the eight keys and salts, so it goes,
+         * but never before what it records has been carried over:
+         * promote_per_site_baseline() explains why the record has to outlive
+         * the copy, and which copy wins when they disagree. Measured on the
+         * Multisite install while writing 2.11.3: without that, the first scan
+         * after the migration reported zero modified files where it had to
+         * report one.
          */
+        $pending = false;
+
         if ( is_multisite() ) {
             $per_site = get_option( self::BASELINE_OPTION, null );
 
             if ( null !== $per_site ) {
-                if ( is_array( $per_site ) && ! get_site_option( self::BASELINE_OPTION, false ) ) {
-                    $promoted = array();
-
-                    foreach ( $per_site as $filename => $data ) {
-                        if ( ! is_array( $data ) || ! isset( $data['hash'] ) ) {
-                            continue;
-                        }
-
-                        if ( isset( $data['content'] ) && is_string( $data['content'] ) ) {
-                            $data['content'] = $this->baseline_content( $filename, $data['content'] );
-                        }
-
-                        $promoted[ $filename ] = $data;
-                    }
-
-                    if ( $promoted ) {
-                        $this->write_baseline( $promoted );
-                    }
+                if ( $this->promote_per_site_baseline( $per_site ) ) {
+                    delete_option( self::BASELINE_OPTION );
+                } elseif ( is_array( $per_site ) ) {
+                    // Something this copy recorded is not on the network record
+                    // yet, so it does not go: it is the only evidence of what
+                    // was approved. The secrets do go, right now, because that
+                    // part cannot wait for the next pass.
+                    $this->redact_in_place( $per_site );
+                    $pending = true;
                 }
-
-                delete_option( self::BASELINE_OPTION );
             }
         }
 
@@ -355,7 +563,22 @@ class Vigilante_File_Integrity {
             }
         }
 
-        update_option( self::BASELINE_REDACTION_OPTION, VIGILANTE_VERSION, false );
+        /*
+         * The gate does not close while a per-site copy is still waiting to be
+         * promoted. Closing it would end the retries for a whole version: the
+         * copy would sit there unread, the file it records would be missing
+         * from the network record, and the next scan would take whatever is on
+         * disk as approved. Not closing it is not free, though, and the first
+         * wording here said "one option read": measured cold on the Multisite
+         * install, it is 6 SQL queries per admin request against 0 with the gate
+         * closed, admin-ajax.php and the heartbeat included, two of them from the
+         * cache invalidation in promote_per_site_baseline(). Acceptable only
+         * because it converges: the stuck case this guards against resolves on
+         * the next pass that gets its write through.
+         */
+        if ( ! $pending ) {
+            update_option( self::BASELINE_REDACTION_OPTION, VIGILANTE_VERSION, false );
+        }
     }
 
     /**
@@ -395,23 +618,53 @@ class Vigilante_File_Integrity {
             return;
         }
 
-        if ( VIGILANTE_VERSION === get_site_option( self::BASELINE_SWEEP_OPTION ) ) {
+        $marker = get_site_option( self::BASELINE_SWEEP_OPTION );
+
+        /*
+         * Two markers, because there are two different things to remember and
+         * 2.11.3 only remembered one of them.
+         *
+         * The walk is marked BEFORE it starts, on purpose: on a very large
+         * network it may not finish inside one request, and repeating it on
+         * every admin page load would be worse than leaving the rest to each
+         * site's own scan. But 2.11.3 wrote VIGILANTE_VERSION there, so an
+         * interrupted walk was retried by the next release, which was the only
+         * thing that ever finished it. Writing a fixed literal instead, as the
+         * first draft of 2.11.4 did, stopped the pointless rearming and took
+         * that retry away with it: a walk cut short would never be resumed by
+         * any version. And "each site's own scan cleans the rest" only holds
+         * where the module is on; with it off, the cleanup is registered under
+         * is_admin() alone, so a subsite nobody opens is exactly what the sweep
+         * exists for. Found by a cross review on 10 sep 2026.
+         *
+         * So: the running version means "started here and did not finish", and
+         * the migration literal means "finished, never again".
+         */
+        if ( self::BASELINE_SWEEP_MIGRATION === $marker ) {
             return;
         }
 
-        // Marked before the walk, not after: on a very large network the walk
-        // may not finish inside one request, and repeating it on every single
-        // admin request would be worse than leaving the rest to each site own
-        // scan, which cleans them anyway.
+        if ( VIGILANTE_VERSION === $marker ) {
+            return;
+        }
+
         update_site_option( self::BASELINE_SWEEP_OPTION, VIGILANTE_VERSION );
 
+        // Only this network. WP_Site_Query filters by network solely when
+        // network_id is given, so on a multi-network install the walk would
+        // otherwise reach the sites of other networks and promote their copies
+        // into this network's record (get_current_network_id() below does not
+        // change with switch_to_blog()).
         $site_ids = get_sites(
             array(
                 'fields'                 => 'ids',
                 'number'                 => 0,
+                'network_id'             => get_current_network_id(),
                 'update_site_meta_cache' => false,
             )
         );
+
+        $pending = 0;
 
         foreach ( $site_ids as $site_id ) {
             switch_to_blog( $site_id );
@@ -419,38 +672,25 @@ class Vigilante_File_Integrity {
             $per_site = get_option( self::BASELINE_OPTION, null );
 
             if ( null !== $per_site ) {
-                /*
-                 * Same care as the per-site cleanup: what a copy records is
-                 * which version was approved, so the last one standing is
-                 * promoted before it goes. Without this, a network whose main
-                 * site had never run a scan would lose the only record it had,
-                 * and a wp-config.php modified and awaiting review would be
-                 * approved in silence.
-                 */
-                if ( is_array( $per_site ) && ! get_site_option( self::BASELINE_OPTION, false ) ) {
-                    $promoted = array();
-
-                    foreach ( $per_site as $filename => $data ) {
-                        if ( ! is_array( $data ) || ! isset( $data['hash'] ) ) {
-                            continue;
-                        }
-
-                        if ( isset( $data['content'] ) && is_string( $data['content'] ) ) {
-                            $data['content'] = $this->baseline_content( $filename, $data['content'] );
-                        }
-
-                        $promoted[ $filename ] = $data;
-                    }
-
-                    if ( $promoted ) {
-                        $this->write_baseline( $promoted );
-                    }
+                // Same care as the per-site cleanup, and the same helper, so
+                // the two paths cannot drift apart the way they nearly did.
+                if ( $this->promote_per_site_baseline( $per_site ) ) {
+                    delete_option( self::BASELINE_OPTION );
+                } elseif ( is_array( $per_site ) ) {
+                    $this->redact_in_place( $per_site );
+                    $pending++;
                 }
-
-                delete_option( self::BASELINE_OPTION );
             }
 
             restore_current_blog();
+        }
+
+        // Finished, and with nothing left behind, so it never has to run again
+        // in any version. A site whose copy could not be promoted keeps the
+        // marker on the running version instead, which is what gets the walk
+        // retried by the next release.
+        if ( ! $pending ) {
+            update_site_option( self::BASELINE_SWEEP_OPTION, self::BASELINE_SWEEP_MIGRATION );
         }
     }
 
@@ -585,7 +825,22 @@ class Vigilante_File_Integrity {
         $this->options       = $settings ? $settings->get_section( 'file_integrity' ) : array();
         $this->wp_version    = get_bloginfo( 'version' );
         $this->ignored_files = get_option( 'vigilante_ignored_files', array() );
+    }
 
+    /**
+     * Register the hooks of the scanner itself
+     *
+     * Until 2.11.4 all of this lived in the constructor, and the constructor is
+     * called from a dozen places: the module gate, the activator, the hook that
+     * runs after Vigilant writes a watched file, and the admin handlers that
+     * only want the class as a tool. Every
+     * one of them registered these hooks again, and one runs during admin_init
+     * itself. Registering apart from constructing means a `new` is only a
+     * `new`, and it is what lets the cleanup below stand on its own.
+     *
+     * @since 2.11.4
+     */
+    public function init_hooks() {
         // Schedule automated scans only if options available
         if ( ! empty( $this->options['auto_scan'] ) ) {
             add_action( 'vigilante_file_integrity_scan', array( $this, 'run_scheduled_scan' ) );
@@ -597,14 +852,34 @@ class Vigilante_File_Integrity {
         // scheduled scan does not raise false positives while wp.org is still
         // publishing the new version's checksums. Registered regardless of
         // auto_scan because it reacts to update events, not to the schedule.
-        // Clean the secrets an earlier version stored in the baseline. On
-        // admin_init because that is where the baseline is looked at, and it
-        // does one option read per admin request until it has run once.
-        add_action( 'admin_init', array( $this, 'maybe_redact_stored_baseline' ) );
-        add_action( 'admin_init', array( $this, 'maybe_sweep_network_baselines' ) );
-
         add_action( 'upgrader_process_complete', array( $this, 'on_upgrade_complete' ), 20, 2 );
         add_action( 'vigilante_fi_postupdate_verify', array( $this, 'run_postupdate_verify' ) );
+    }
+
+    /**
+     * Register the cleanup of what earlier versions stored, module on or off
+     *
+     * These two are not integrity monitoring. They take out of the database
+     * something the plugin stored and should not have, which is the copy of
+     * wp-config.php carrying the database password and the eight keys and
+     * salts. Whoever switched the module off did not decide to keep that, and
+     * for that person the cleanup matters more, not less: they are not going
+     * to pass through the scanner again.
+     *
+     * Until 2.11.4 these were registered in the constructor, so they only ran
+     * where the module was on. A site with the module off kept the credentials
+     * with 2.11.3 installed, and a network whose main site had it off lost the
+     * sweep too, which was the one path that reached the sites nobody visits.
+     * Reported by @calzbert after reading the 2.11.3 diff.
+     *
+     * On admin_init because that is where the baseline is looked at, and it
+     * does one option read per admin request until it has run once.
+     *
+     * @since 2.11.4
+     */
+    public function init_cleanup_hooks() {
+        add_action( 'admin_init', array( $this, 'maybe_redact_stored_baseline' ) );
+        add_action( 'admin_init', array( $this, 'maybe_sweep_network_baselines' ) );
     }
 
     /**
@@ -1374,26 +1649,32 @@ class Vigilante_File_Integrity {
                 continue;
             }
 
-            // Compare against stored baseline
-            if ( $baseline[ $filename ]['hash'] !== $current_hash ) {
-                // Both sides go through the same redaction, or every
-                // credential line would read as a change nobody made.
-                $baseline_content = $baseline[ $filename ]['content'] ?? '';
-                $current_content  = $this->baseline_content( $filename, $normalized );
-                $diff = ( '' !== $baseline_content && '' !== $current_content )
-                    ? $this->compute_simple_diff( $baseline_content, $current_content )
-                    : array( 'added' => array(), 'removed' => array(), 'unavailable' => true );
+            /*
+             * Everything from here down is the changed file, and only that: the
+             * branch above returns on every matching hash, so there is no third
+             * case and no condition left to test. It used to be wrapped in an
+             * `if` repeating the opposite comparison, which read as if some
+             * other path could reach this point. It could not. Flagged by
+             * @calzbert, and worth the two lines it costs to say so.
+             *
+             * Both sides go through the same redaction, or every credential
+             * line would read as a change nobody made.
+             */
+            $baseline_content = $baseline[ $filename ]['content'] ?? '';
+            $current_content  = $this->baseline_content( $filename, $normalized );
+            $diff = ( '' !== $baseline_content && '' !== $current_content )
+                ? $this->compute_simple_diff( $baseline_content, $current_content )
+                : array( 'added' => array(), 'removed' => array(), 'unavailable' => true );
 
-                $modified[] = array(
-                    'file'          => $filename,
-                    'type'          => 'critical_config',
-                    'expected_hash' => $baseline[ $filename ]['hash'],
-                    'actual_hash'   => $current_hash,
-                    'baseline_size' => $baseline[ $filename ]['size'],
-                    'current_size'  => strlen( $content ),
-                    'diff'          => $diff,
-                );
-            }
+            $modified[] = array(
+                'file'          => $filename,
+                'type'          => 'critical_config',
+                'expected_hash' => $baseline[ $filename ]['hash'],
+                'actual_hash'   => $current_hash,
+                'baseline_size' => $baseline[ $filename ]['size'],
+                'current_size'  => strlen( $content ),
+                'diff'          => $diff,
+            );
         }
 
         if ( $baseline_changed ) {
@@ -1535,6 +1816,34 @@ class Vigilante_File_Integrity {
         $normalized = $this->normalize_critical_file( $filename, $content );
 
         $baseline = $this->get_critical_files_baseline();
+
+        /*
+         * No guard here, and there was one for a few hours during 2.11.4 that
+         * had to come out. It refused to rewrite the record when the stored hash
+         * no longer matched the file, meant to stop a write of ours from
+         * approving somebody else's pending edit. Two things were wrong with it,
+         * both measured on 10 sep 2026 by a third cross review:
+         *
+         * - This is also the Approve button (Vigilante_Admin_Ajax::
+         *   ajax_approve_critical_file). A moved hash is exactly the state in
+         *   which Approve is pressed, so the guard made Approve fail every time
+         *   and the warning could never be closed.
+         * - Its premise, "our own write cannot move the normalized hash", holds
+         *   for the block and not for the rest of what the writers do.
+         *   comment_existing_constants() turns a define() into a
+         *   [VIGILANTE_ORIGINAL] line that normalize_critical_file() leaves as
+         *   an empty line, and remove_old_rules() deletes legacy .htaccess blocks
+         *   that normalize_critical_file() does not know. Both move the hash, so
+         *   the guard would have raised a false "file modified" after Vigilant's
+         *   own work, on sites that updated.
+         *
+         * The real fix is to know what the hash was before WE touched the file:
+         * the writers capture it and pass it along vigilante_critical_file_
+         * written, and this compares against that instead of against the
+         * record. Until then this behaves as it always has, which does mean a
+         * write of ours can adopt a third-party edit that was pending review.
+         * That is pre-existing, and written down in the roadmap.
+         */
         $baseline[ $filename ] = array(
             'hash'    => md5( $normalized ),
             'size'    => strlen( $content ),

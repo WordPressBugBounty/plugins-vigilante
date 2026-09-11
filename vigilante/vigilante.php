@@ -3,7 +3,7 @@
  * Plugin Name: Vigilant - 100% Free Security Suite: Firewall, 2FA, Login, Headers, Scanner…
  * Plugin URI: https://servicios.ayudawp.com
  * Description: Complete security solution for WordPress. Firewall, 2FA, security headers, login protection, file integrity monitoring, activity logging and more.
- * Version: 2.11.3
+ * Version: 2.11.4
  * Author: Fernando Tellado
  * Author URI: https://ayudawp.com
  * Text Domain: vigilante
@@ -24,7 +24,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Plugin constants
  */
-define( 'VIGILANTE_VERSION', '2.11.3' );
+define( 'VIGILANTE_VERSION', '2.11.4' );
 define( 'VIGILANTE_PLUGIN_FILE', __FILE__ );
 define( 'VIGILANTE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'VIGILANTE_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -380,8 +380,39 @@ final class Vigilante_Main {
 
         // File Integrity Scanner
         if ( ! empty( $options['modules']['file_integrity'] ) ) {
-            new Vigilante_File_Integrity( $this->settings, $this->database, $this->activity_log );
+            $file_integrity = new Vigilante_File_Integrity( $this->settings, $this->database, $this->activity_log );
+            $file_integrity->init_hooks();
+            $file_integrity->init_cleanup_hooks();
+
             new Vigilante_Plugin_Status( $this->settings, $this->activity_log );
+        } elseif ( is_admin() ) {
+            /*
+             * The module is off, and the cleanup goes on anyway. It is not
+             * integrity monitoring: it takes out of the database the copy of
+             * wp-config.php that earlier versions stored, credentials and all.
+             * Turning the module off is not a decision to keep them.
+             *
+             * Two holes closed here, both reported by @calzbert after reading the
+             * 2.11.3 diff. A site with the module off cleaned itself by neither
+             * of its own two paths, because both hang off this class. And with
+             * the module off on the MAIN site, the network sweep was not
+             * registered either, which is what would have reached every other
+             * site: the sweep removes each site's option without asking whether
+             * the module is on over there.
+             *
+             * Only in the admin, because both hooks are admin_init and there is
+             * nothing to gain from building this on a front-end request. Note
+             * that admin-ajax.php fires admin_init too (wp-admin/admin-ajax.php
+             * :45), so this also runs on wp_ajax_nopriv_* requests from
+             * visitors with no session. That is deliberate and it is what the
+             * module has been doing since 2.11.2: the cleanup asks for no
+             * capability because it also runs under wp-cron with nobody logged
+             * in, and all it does is take the plugin's own copy out of the
+             * database. The network sweep, which does reach across sites, is
+             * the one that demands manage_network_options.
+             */
+            $file_integrity = new Vigilante_File_Integrity( $this->settings, $this->database, $this->activity_log );
+            $file_integrity->init_cleanup_hooks();
         }
 
         // Activity Log is always initialized (core component)
@@ -466,7 +497,7 @@ final class Vigilante_Main {
          * an update, and the one-shot snapshot behind it was consumed without
          * being taken, so not even a network administrator visiting afterwards
          * retried, because the version had already been marked. Reported by
-         * calzbert, who found it reading the code.
+         * @calzbert, who found it reading the code.
          */
         if ( ! Vigilante_Settings::owns_shared_files() ) {
             $this->mark_server_files_synced();

@@ -155,6 +155,8 @@ function vigilante_uninstall_site() {
     $options_to_delete = array(
         'vigilante_options',
         'vigilante_db_version',
+        'vigilante_purge_2_11_0_done',
+        'vigilante_baseline_redaction',
         'vigilante_backup_timestamp',
         'vigilante_last_integrity_scan',
         'vigilante_last_integrity_results',
@@ -247,6 +249,9 @@ function vigilante_uninstall_final_sweep() {
         OR option_name IN (
             'vigilante_options',
             'vigilante_db_version',
+            'vigilante_purge_2_11_0_done',
+            'vigilante_baseline_redaction',
+            'vigilante_critical_files_baseline',
             'vigilante_ignored_closed_plugins',
             'vigilante_ignored_files',
             'vigilante_dismissed_notices',

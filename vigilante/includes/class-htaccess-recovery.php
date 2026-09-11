@@ -120,7 +120,7 @@ class Vigilante_Htaccess_Recovery {
      * in the twelve keys it dropped, which is indistinguishable from a site that
      * simply never customised its headers.
      *
-     * What is distinguishable is the desync that Albert reported: the file still
+     * What is distinguishable is the desync that @calzbert reported: the file still
      * describes what the owner chose while the options already say factory. So
      * that is what is looked at here. The file is the older truth, and this is
      * the last moment it exists.

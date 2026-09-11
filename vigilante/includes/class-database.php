@@ -30,6 +30,16 @@ class Vigilante_Database {
     const DB_VERSION_OPTION = 'vigilante_db_version';
 
     /**
+     * Records that the destructive part of the 2.11.0 migration already ran.
+     *
+     * A marker of its own, not a point on the version chain, because what it
+     * governs deletes rows. See purge_for_2_11_0().
+     *
+     * @since 2.11.4
+     */
+    const PURGE_2_11_0_OPTION = 'vigilante_purge_2_11_0_done';
+
+    /**
      * Activity log table name (without prefix)
      *
      * @var string
@@ -318,10 +328,44 @@ class Vigilante_Database {
 
         dbDelta( $two_factor_totp_sql );
 
-        // Store database version
-        update_option( self::DB_VERSION_OPTION, self::DB_VERSION );
+        $this->store_schema_version();
 
         return $result;
+    }
+
+    /**
+     * Write the schema version, but never walk the stored value backwards
+     *
+     * vigilante_db_version is written on two different scales into the same
+     * option: this class counts in schema versions, currently 1.4.0, and
+     * Vigilante_Admin::run_migrations() counts in plugin versions, currently
+     * 2.11.0. For version_compare, 1.4.0 is LOWER than 1.14.0, so a site whose
+     * option was last written here reads as being behind almost every step of
+     * that chain and runs them all again.
+     *
+     * That was not a corner case. create_tables() is called unconditionally by
+     * the activator, so deactivating and reactivating the plugin on a perfectly
+     * up-to-date site sent it back to 1.4.0 and replayed eleven migrations,
+     * among them the one that empties the trusted devices and the pending
+     * second-factor codes. Every user of that site had to pass the second
+     * factor again, for no reason, every single time somebody toggled the
+     * plugin. Reported by @calzbert, who worked it out from the code after the
+     * 1.4.0 reading turned up on a site here.
+     *
+     * Refusing to go backwards fixes that without touching the two scales,
+     * which is a separate job. A brand new site still starts here, with no
+     * option at all, and that is correct: it has never run the chain.
+     *
+     * @since 2.11.4
+     *
+     * @return void
+     */
+    private function store_schema_version() {
+        $stored = get_option( self::DB_VERSION_OPTION, '0' );
+
+        if ( version_compare( $stored, self::DB_VERSION, '<' ) ) {
+            update_option( self::DB_VERSION_OPTION, self::DB_VERSION );
+        }
     }
 
     /**
@@ -376,8 +420,7 @@ class Vigilante_Database {
         }
         // phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared
 
-        // Update stored version
-        update_option( self::DB_VERSION_OPTION, self::DB_VERSION );
+        $this->store_schema_version();
     }
 
     /**
@@ -397,8 +440,38 @@ class Vigilante_Database {
      *   minutes and a new one is a click away.
      *
      * @since 2.11.0
+     *
+     * @return bool True when it ran, false when it had already run.
      */
     public function purge_for_2_11_0() {
+        /*
+         * Its own one-off marker, and not a point on the version chain.
+         *
+         * This deletes rows, and it hung off a version comparison that could
+         * walk backwards, so every reactivation replayed it. store_schema_version()
+         * closes that particular door, but the lesson is more general than the
+         * door: a migration that deletes rows should not depend on a version
+         * number staying where it was put.
+         *
+         * Both the marker and the tables are per site (get_table_name() builds
+         * on $wpdb->prefix), so the pair travels together and there is no case
+         * where one site's marker stops another site's purge. A subsite created
+         * after a network-wide activation is NOT covered by this marker, and
+         * does not need to be: it has no marker, so it purges, and what it
+         * purges are its own tables, created empty moments earlier.
+         *
+         * Marked AFTER the deletes, unlike the network sweep of the baselines,
+         * and the asymmetry is deliberate. There, repeating the walk is
+         * expensive and not finishing it costs only time. Here, repeating the
+         * deletes costs one more prompt for the second factor, while not doing
+         * them at all would leave the trusted devices that were identified by
+         * User-Agent in place, which is the bypass this purge exists to close.
+         * When in doubt, repeat the harmless one. Marker added in 2.11.4.
+         */
+        if ( get_option( self::PURGE_2_11_0_OPTION ) ) {
+            return false;
+        }
+
         // phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- %i placeholder requires WP 6.2+, and the sniff reports inside prepare(). Plugin tables, no cache to invalidate.
         $this->wpdb->query(
             $this->wpdb->prepare( 'DELETE FROM %i', $this->get_2fa_devices_table() )
@@ -407,6 +480,10 @@ class Vigilante_Database {
             $this->wpdb->prepare( 'DELETE FROM %i', $this->get_2fa_codes_table() )
         );
         // phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared
+
+        update_option( self::PURGE_2_11_0_OPTION, '1', false );
+
+        return true;
     }
 
     /**
@@ -432,6 +509,7 @@ class Vigilante_Database {
         // phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.DirectDatabaseQuery.SchemaChange
 
         delete_option( self::DB_VERSION_OPTION );
+        delete_option( self::PURGE_2_11_0_OPTION );
 
         return true;
     }

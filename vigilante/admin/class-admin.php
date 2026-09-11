@@ -1469,6 +1469,9 @@ class Vigilante_Admin {
             'logoutUrl'     => wp_logout_url( wp_login_url() ),
             'adminUrl'      => admin_url( 'admin.php?page=vigilante' ),
             'searchIndex'   => $this->get_search_index(),
+            // The scan repaints this table from JavaScript, so the same gate
+            // has to travel with it or half the screen keeps the dead button.
+            'approvalLocked' => $this->critical_approval_locked(),
             'underAttack'   => array(
                 'active'    => ( new Vigilante_Under_Attack( $this->settings, $this->activity_log ) )->is_active(),
                 'remaining' => ( new Vigilante_Under_Attack( $this->settings, $this->activity_log ) )->get_remaining_time(),
@@ -1537,6 +1540,7 @@ class Vigilante_Admin {
                 'criticalConfigDesc'  => __( 'These files are common targets for code injection. Review the changes and approve if they are legitimate. Vigilant\'s own blocks are excluded from this check.', 'vigilante' ),
                 'approve'             => __( 'Approve', 'vigilante' ),
                 'approving'           => __( 'Approving...', 'vigilante' ),
+                'approvalLockedNotice' => $this->critical_approval_notice(),
                 'criticalApproved'    => __( 'Change approved. Next scan will use the current state as baseline.', 'vigilante' ),
                 'reviewChanges'       => __( 'Review changes', 'vigilante' ),
                 'hideChanges'         => __( 'Hide changes', 'vigilante' ),
@@ -2097,6 +2101,35 @@ class Vigilante_Admin {
             <p style="margin:0;"><?php esc_html_e( 'These tools act on user accounts, which on a network belong to the whole network rather than to one site. WordPress reserves that to network administrators, so they are managed from the network admin.', 'vigilante' ); ?></p>
         </div>
         <?php
+    }
+
+    /**
+     * Approving a change to the shared config files needs the network
+     *
+     * Since 2.11.3 the handler behind the Approve button asks for
+     * manage_network_options, because the two files it approves, wp-config.php
+     * and the root .htaccess, belong to the installation, and so does the
+     * record of them. The button, though, went on being painted for everybody,
+     * so the administrator of a subsite saw the warning, saw the button,
+     * pressed it and got "Permission denied" with no explanation. That is
+     * exactly what user_actions_locked() above exists to avoid, one release
+     * later and one screen over. Flagged by @calzbert.
+     *
+     * @since 2.11.4
+     * @return bool
+     */
+    private function critical_approval_locked() {
+        return is_multisite() && ! current_user_can( 'manage_network_options' );
+    }
+
+    /**
+     * The line that replaces the Approve button where it cannot be used
+     *
+     * @since 2.11.4
+     * @return string
+     */
+    private function critical_approval_notice() {
+        return __( 'These files belong to the whole network rather than to this site, so a change to them is approved from the network admin.', 'vigilante' );
     }
 
     /**
@@ -6348,9 +6381,15 @@ class Vigilante_Admin {
                                         <button type="button" class="button button-small vigilante-toggle-critical-content" data-target="vigilante-critical-content-<?php echo esc_attr( $crit_id ); ?>" data-label-show="<?php esc_attr_e( 'Review changes', 'vigilante' ); ?>" data-label-hide="<?php esc_attr_e( 'Hide changes', 'vigilante' ); ?>">
                                             <?php esc_html_e( 'Review changes', 'vigilante' ); ?>
                                         </button>
-                                        <button type="button" class="button button-small button-primary vigilante-approve-critical-file" data-file="<?php echo esc_attr( $crit_file ); ?>">
-                                            <?php esc_html_e( 'Approve', 'vigilante' ); ?>
-                                        </button>
+                                        <?php if ( $this->critical_approval_locked() ) : ?>
+                                            <span class="description" style="display:block;margin-top:4px;">
+                                                <?php echo esc_html( $this->critical_approval_notice() ); ?>
+                                            </span>
+                                        <?php else : ?>
+                                            <button type="button" class="button button-small button-primary vigilante-approve-critical-file" data-file="<?php echo esc_attr( $crit_file ); ?>">
+                                                <?php esc_html_e( 'Approve', 'vigilante' ); ?>
+                                            </button>
+                                        <?php endif; ?>
                                     </td>
                                 </tr>
                                 <tr id="vigilante-critical-content-<?php echo esc_attr( $crit_id ); ?>" class="vigilante-critical-content-row" style="display:none;">
