@@ -93,6 +93,14 @@ class Vigilante_Promo_Banner {
                 /* translators: SiteGround affiliate URL. Change this URL in translations to use a localized landing page. */
                 'url'         => __( 'https://stgrnd.co/telladowpbox', 'vigilante' ),
             ),
+            'plugins' => array(
+                'icon'        => 'dashicons-admin-plugins',
+                'title'       => __( 'Premium WordPress plugins', 'vigilante' ),
+                'description' => __( 'Focused plugins for WordPress and WooCommerce, each solving one problem well. No bloated suites, no upsell nags, no telemetry.', 'vigilante' ),
+                'button'      => __( 'Browse plugins', 'vigilante' ),
+                /* translators: AyudaWP premium plugins store URL. Change this URL in translations to use a localized landing page. */
+                'url'         => __( 'https://plugins.ayudawp.com/en/', 'vigilante' ),
+            ),
         );
     }
 

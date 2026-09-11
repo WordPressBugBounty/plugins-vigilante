@@ -231,11 +231,15 @@ class Vigilante_Deactivator {
         delete_option( 'vigilante_db_version' );
         delete_option( 'vigilante_purge_2_11_0_done' );
         delete_option( 'vigilante_baseline_redaction' );
+        delete_option( 'vigilante_owned_blocks' );
+        delete_option( 'vigilante_owned_blocks_claim' );
         if ( is_multisite() ) {
             // The network one was in uninstall.php and missing here, so after
             // deleting the data and reactivating, the one-off sweep never ran
             // again and the per-site copies stayed where they were.
             delete_site_option( 'vigilante_baseline_sweep' );
+            delete_site_option( 'vigilante_owned_blocks' );
+            delete_site_option( 'vigilante_owned_blocks_claim' );
         }
         delete_option( 'vigilante_activated_time' );
         delete_option( 'vigilante_dismissed_notices' );

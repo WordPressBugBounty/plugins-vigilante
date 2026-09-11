@@ -68,6 +68,8 @@ function vigilante_uninstall() {
     if ( is_multisite() ) {
         delete_site_option( 'vigilante_critical_files_baseline' );
         delete_site_option( 'vigilante_baseline_sweep' );
+        delete_site_option( 'vigilante_owned_blocks' );
+        delete_site_option( 'vigilante_owned_blocks_claim' );
     }
 
     // Remove backup directory. WP_CONTENT_DIR is shared by the whole network,
@@ -157,6 +159,8 @@ function vigilante_uninstall_site() {
         'vigilante_db_version',
         'vigilante_purge_2_11_0_done',
         'vigilante_baseline_redaction',
+        'vigilante_owned_blocks',
+        'vigilante_owned_blocks_claim',
         'vigilante_backup_timestamp',
         'vigilante_last_integrity_scan',
         'vigilante_last_integrity_results',
@@ -252,6 +256,8 @@ function vigilante_uninstall_final_sweep() {
             'vigilante_purge_2_11_0_done',
             'vigilante_baseline_redaction',
             'vigilante_critical_files_baseline',
+            'vigilante_owned_blocks',
+            'vigilante_owned_blocks_claim',
             'vigilante_ignored_closed_plugins',
             'vigilante_ignored_files',
             'vigilante_dismissed_notices',

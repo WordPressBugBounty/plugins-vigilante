@@ -191,6 +191,13 @@ class Vigilante_Htaccess_Manager {
                 return new WP_Error( 'verify_failed', __( 'The .htaccess was written but did not read back as expected, so the previous content was restored', 'vigilante' ) );
             }
 
+            // Record the block as Vigilant's own. The integrity scan leaves
+            // out of its hash only the blocks whose fingerprint is recorded,
+            // so anything else carrying these markers is still checked.
+            if ( class_exists( 'Vigilante_File_Integrity' ) ) {
+                Vigilante_File_Integrity::remember_owned_block( '.htaccess', $marker_start, $block );
+            }
+
             return true;
         } finally {
             $this->release_lock();
@@ -235,6 +242,19 @@ class Vigilante_Htaccess_Manager {
     }
 
     /**
+     * Drop the integrity scan's record of a block Vigilant no longer has in the file
+     *
+     * @since 2.11.5
+     *
+     * @param string $marker_start Start marker of the block.
+     */
+    private function forget_owned_block( $marker_start ) {
+        if ( class_exists( 'Vigilante_File_Integrity' ) ) {
+            Vigilante_File_Integrity::forget_owned_blocks( '.htaccess', $marker_start );
+        }
+    }
+
+    /**
      * Remove a block from .htaccess
      *
      * Takes the same write lock as add_block(): until 2.11.0 this
@@ -266,11 +286,17 @@ class Vigilante_Htaccess_Manager {
             $content = $this->read_file();
 
             if ( false === $content || empty( $content ) ) {
+                // An unreadable file proves nothing about the block, so its
+                // record stays. A missing or empty one has no block left.
+                if ( false !== $content ) {
+                    $this->forget_owned_block( $marker_start );
+                }
                 return true; // Nothing to remove
             }
 
             // Check if block exists
             if ( strpos( $content, $marker_start ) === false ) {
+                $this->forget_owned_block( $marker_start );
                 return true; // Block doesn't exist, nothing to do
             }
 
@@ -290,6 +316,7 @@ class Vigilante_Htaccess_Manager {
 
             // Write file
             if ( $this->write_file( $new_content ) ) {
+                $this->forget_owned_block( $marker_start );
                 return true;
             }
 

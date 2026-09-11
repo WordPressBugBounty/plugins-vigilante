@@ -126,6 +126,35 @@ class Vigilante_File_Integrity {
     const BASELINE_SWEEP_MIGRATION = 'network-sweep-done';
 
     /**
+     * Network option with the fingerprint of every block Vigilant itself wrote
+     * into wp-config.php or the root .htaccess.
+     *
+     * The integrity scan leaves Vigilant's own blocks out of the hash, so that
+     * rewriting them is not reported as somebody else's change. Until 2.11.5 it
+     * left out whatever sat between the markers, without looking. From 2.11.5 a
+     * block is left out only if its content is exactly what Vigilant wrote, as
+     * recorded here at write time.
+     *
+     * @since 2.11.5
+     */
+    const OWNED_BLOCKS_OPTION = 'vigilante_owned_blocks';
+
+    /**
+     * Network option marking that the blocks already on disk have been claimed.
+     *
+     * @since 2.11.5
+     */
+    const OWNED_BLOCKS_CLAIM_OPTION = 'vigilante_owned_blocks_claim';
+
+    /**
+     * Value stored when the claim is done. Deliberately not a version number:
+     * that is the lesson of BASELINE_SWEEP_MIGRATION above.
+     *
+     * @since 2.11.5
+     */
+    const OWNED_BLOCKS_CLAIMED = 'claimed';
+
+    /**
      * What replaces a secret value kept in the baseline.
      *
      * Fixed forever: if this string ever changes, every stored baseline
@@ -194,6 +223,110 @@ class Vigilante_File_Integrity {
      */
     private function write_baseline( $baseline ) {
         return update_site_option( self::BASELINE_OPTION, $baseline );
+    }
+
+    /**
+     * Fingerprint of a block exactly as the integrity scan reads it back
+     *
+     * @since 2.11.5
+     *
+     * @param string $block Block from start marker to end marker, inclusive.
+     * @return string
+     */
+    private static function block_fingerprint( $block ) {
+        return md5( str_replace( array( "\r\n", "\r" ), "\n", (string) $block ) );
+    }
+
+    /**
+     * Record a block Vigilant has just written
+     *
+     * Called by the writers right after a verified write, so the scan can tell
+     * Vigilant's block from anything else carrying the same markers. By default
+     * it replaces the earlier record for that marker: after a write, only the
+     * block just written is Vigilant's.
+     *
+     * @since 2.11.5
+     *
+     * @param string $filename     'wp-config.php' or '.htaccess'.
+     * @param string $marker_start Start marker of the block.
+     * @param string $block        Block from start marker to end marker, inclusive.
+     * @param bool   $replace      Drop earlier records for the same marker first.
+     * @return bool
+     */
+    public static function remember_owned_block( $filename, $marker_start, $block, $replace = true ) {
+        $owned = get_site_option( self::OWNED_BLOCKS_OPTION, array() );
+        $owned = is_array( $owned ) ? $owned : array();
+        $file  = ( isset( $owned[ $filename ] ) && is_array( $owned[ $filename ] ) ) ? $owned[ $filename ] : array();
+
+        if ( $replace ) {
+            foreach ( $file as $fingerprint => $marker ) {
+                if ( $marker === $marker_start ) {
+                    unset( $file[ $fingerprint ] );
+                }
+            }
+        }
+
+        $file[ self::block_fingerprint( $block ) ] = $marker_start;
+        $owned[ $filename ]                         = $file;
+
+        return update_site_option( self::OWNED_BLOCKS_OPTION, $owned );
+    }
+
+    /**
+     * Forget the blocks recorded for a marker, once Vigilant has removed them
+     *
+     * @since 2.11.5
+     *
+     * @param string $filename     'wp-config.php' or '.htaccess'.
+     * @param string $marker_start Start marker of the block.
+     * @return bool
+     */
+    public static function forget_owned_blocks( $filename, $marker_start ) {
+        $owned = get_site_option( self::OWNED_BLOCKS_OPTION, array() );
+
+        if ( ! is_array( $owned ) || empty( $owned[ $filename ] ) || ! is_array( $owned[ $filename ] ) ) {
+            return true;
+        }
+
+        $changed = false;
+
+        foreach ( $owned[ $filename ] as $fingerprint => $marker ) {
+            if ( $marker === $marker_start ) {
+                unset( $owned[ $filename ][ $fingerprint ] );
+                $changed = true;
+            }
+        }
+
+        return $changed ? update_site_option( self::OWNED_BLOCKS_OPTION, $owned ) : true;
+    }
+
+    /**
+     * Whether a block is one Vigilant wrote
+     *
+     * @since 2.11.5
+     *
+     * @param string $filename 'wp-config.php' or '.htaccess'.
+     * @param string $block    Block from start marker to end marker, inclusive.
+     * @return bool
+     */
+    private static function is_owned_block( $filename, $block ) {
+        $owned = get_site_option( self::OWNED_BLOCKS_OPTION, array() );
+
+        return is_array( $owned )
+            && isset( $owned[ $filename ] )
+            && is_array( $owned[ $filename ] )
+            && isset( $owned[ $filename ][ self::block_fingerprint( $block ) ] );
+    }
+
+    /**
+     * Whether the blocks already on disk have been claimed
+     *
+     * @since 2.11.5
+     *
+     * @return bool
+     */
+    private function owned_blocks_claimed() {
+        return self::OWNED_BLOCKS_CLAIMED === get_site_option( self::OWNED_BLOCKS_CLAIM_OPTION );
     }
 
     /**
@@ -880,6 +1013,7 @@ class Vigilante_File_Integrity {
     public function init_cleanup_hooks() {
         add_action( 'admin_init', array( $this, 'maybe_redact_stored_baseline' ) );
         add_action( 'admin_init', array( $this, 'maybe_sweep_network_baselines' ) );
+        add_action( 'admin_init', array( $this, 'maybe_claim_owned_blocks' ) );
     }
 
     /**
@@ -1588,6 +1722,10 @@ class Vigilante_File_Integrity {
         // credentials included, for as long as nobody visited it.
         $this->maybe_redact_stored_baseline();
 
+        // And claim the blocks already on disk before anything is compared,
+        // so the first scan after updating uses the rule that will stay.
+        $this->maybe_claim_owned_blocks();
+
         $modified = array();
         $baseline = $this->get_critical_files_baseline();
         $baseline_changed = false;
@@ -1752,28 +1890,47 @@ class Vigilante_File_Integrity {
      * @param string $content  Raw file content.
      * @return string Normalized content for hashing.
      */
-    private function normalize_critical_file( $filename, $content ) {
+    private function normalize_critical_file( $filename, $content, $drop_all_original = false ) {
         // Normalize line endings first (CRLF and CR to LF)
         $content = str_replace( array( "\r\n", "\r" ), "\n", $content );
 
+        /*
+         * Vigilant's own blocks are left out of the hash, so rewriting them is
+         * not reported as somebody else's change. Until 2.11.5 that covered
+         * everything between the markers, and every line carrying the
+         * [VIGILANTE_ORIGINAL] marker, whatever they contained. From 2.11.5 a
+         * block is left out only if it is exactly a block Vigilant wrote (see
+         * remember_owned_block()), and a marked line only while uncommenting it
+         * would still give a harmless define() (see is_vigilant_original_line()).
+         *
+         * Until the blocks already on disk have been claimed, the old rule
+         * applies unchanged. That is what keeps an update from changing the
+         * hash of a file nobody touched.
+         */
+        $claimed = $this->owned_blocks_claimed();
+
         if ( 'wp-config.php' === $filename ) {
-            // Remove Vigilante constants blocks (current and legacy)
+            // Vigilante constants blocks (current and legacy)
             foreach ( $this->wpconfig_markers as $markers ) {
-                $pattern = '/' . preg_quote( $markers[0], '/' ) . '.*?' . preg_quote( $markers[1], '/' ) . '\s*/s';
-                $content = preg_replace( $pattern, '', $content );
+                $content = $this->strip_vigilant_blocks( $filename, $content, $markers, $claimed );
             }
 
-            // Remove lines commented out by Vigilante (original constants)
-            $content = preg_replace(
+            // Lines commented out by Vigilante (original constants)
+            $content = preg_replace_callback(
                 '/^.*' . preg_quote( $this->wpconfig_original_marker, '/' ) . '.*$/m',
-                '',
+                function ( $line ) use ( $claimed, $drop_all_original ) {
+                    // $drop_all_original reproduce la regla anterior a la 2.11.5 (quitar
+                    // toda linea marcada) sobre los bloques de la regla nueva. Solo lo usa
+                    // el re-base de la transicion, para decidir si la unica diferencia con
+                    // el registro aprobado son estas lineas. Ver rebase_original_line_shift().
+                    return ( ! $claimed || $drop_all_original || $this->is_vigilant_original_line( $line[0] ) ) ? '' : $line[0];
+                },
                 $content
             );
         } elseif ( '.htaccess' === $filename ) {
-            // Remove Vigilante htaccess blocks (firewall + security headers)
+            // Vigilante htaccess blocks (firewall + security headers)
             foreach ( $this->htaccess_markers as $markers ) {
-                $pattern = '/' . preg_quote( $markers[0], '/' ) . '.*?' . preg_quote( $markers[1], '/' ) . '\s*/s';
-                $content = preg_replace( $pattern, '', $content );
+                $content = $this->strip_vigilant_blocks( $filename, $content, $markers, $claimed );
             }
         }
 
@@ -1781,6 +1938,372 @@ class Vigilante_File_Integrity {
         $content = preg_replace( '/\n{3,}/', "\n\n", $content );
 
         return trim( $content );
+    }
+
+    /**
+     * Leave Vigilant's blocks for one pair of markers out of the content
+     *
+     * Before the claim, every block, as it always was. After it, only the blocks
+     * whose fingerprint was recorded when Vigilant wrote them. A block that does
+     * not match, edited or planted, stays in the content: it counts in the hash
+     * and shows up in the diff.
+     *
+     * The match runs from marker to marker and the removal also takes the
+     * whitespace after the block, exactly as before, so a file whose blocks are
+     * all Vigilant's normalizes to the same text under both rules.
+     *
+     * @since 2.11.5
+     *
+     * @param string $filename 'wp-config.php' or '.htaccess'.
+     * @param string $content  Content with normalized line endings.
+     * @param array  $markers  Start and end marker.
+     * @param bool   $claimed  Whether the claim has run.
+     * @return string
+     */
+    private function strip_vigilant_blocks( $filename, $content, $markers, $claimed ) {
+        $pattern = '/(' . preg_quote( $markers[0], '/' ) . '.*?' . preg_quote( $markers[1], '/' ) . ')\s*/s';
+
+        if ( ! $claimed ) {
+            return preg_replace( $pattern, '', $content );
+        }
+
+        return preg_replace_callback(
+            $pattern,
+            function ( $match ) use ( $filename ) {
+                return self::is_owned_block( $filename, $match[1] ) ? '' : $match[0];
+            },
+            $content
+        );
+    }
+
+    /**
+     * Whether a line carrying the original-constant marker is one Vigilant wrote
+     *
+     * comment_existing_constants() puts the marker in front of a define() of a
+     * constant it manages, and uncomment_original_constants() takes it away
+     * again whenever the constants are applied or removed, so whatever follows
+     * the marker gets to run some day. The line is left out of the hash only
+     * when there is nothing but indentation before the marker, nothing after it
+     * but a harmless define() and at most a line comment, and no PHP tag
+     * anywhere on it. That keeps it a comment today and harmless once
+     * uncommented. Anything else counts, and shows up in the diff.
+     *
+     * @since 2.11.5
+     *
+     * @param string $line One line of wp-config.php.
+     * @return bool
+     */
+    private function is_vigilant_original_line( $line ) {
+        if ( false !== strpos( $line, '<?' ) || false !== strpos( $line, '?>' ) ) {
+            return false;
+        }
+
+        return 1 === preg_match(
+            '/^[ \t]*' . preg_quote( $this->wpconfig_original_marker, '/' ) . self::harmless_define_pattern() . '[ \t]*(?:(?:\/\/|#(?!\[)).*)?$/',
+            $line
+        );
+    }
+
+    /**
+     * A define() that runs nothing but itself, as a regular expression fragment
+     *
+     * The name is one of the constants Vigilant has managed in any version. The
+     * value is made only of literals (true, false, null, a number, a quoted
+     * string with nothing to interpolate) and of ABSPATH, WP_CONTENT_DIR and
+     * __DIR__, which is what a debug log path is usually built from, joined
+     * with dots. No call, no variable, no backtick, no include.
+     *
+     * @since 2.11.5
+     *
+     * @return string Pattern without delimiters.
+     */
+    private static function harmless_define_pattern() {
+        $names = 'DISALLOW_FILE_EDIT|DISALLOW_FILE_MODS|FORCE_SSL_ADMIN|FORCE_SSL_LOGIN|WP_DEBUG|WP_DEBUG_LOG|WP_DEBUG_DISPLAY|SCRIPT_DEBUG|DISABLE_WP_CRON'
+            . '|WP_POST_REVISIONS|AUTOSAVE_INTERVAL|EMPTY_TRASH_DAYS|WP_MEMORY_LIMIT|WP_MAX_MEMORY_LIMIT|WP_AUTO_UPDATE_CORE|CONCATENATE_SCRIPTS';
+
+        $value = '(?:(?i:true|false|null)|-?\d+|\'(?:[^\'\\\\]|\\\\.)*\'|"[^"\\\\$]*"|ABSPATH|WP_CONTENT_DIR|__DIR__)';
+
+        return 'define\s*\(\s*[\'"](?:' . $names . ')[\'"]\s*,\s*' . $value . '(?:\s*\.\s*' . $value . ')*\s*\)\s*;';
+    }
+
+    /**
+     * Whether a wp-config.php constants block can only be one Vigilant wrote
+     *
+     * Every version of generate_constants() has written the start marker on its
+     * own line, then comments, blank lines and define() calls, bare or wrapped
+     * in if ( ! defined() ), then the end marker on its own line. A block made
+     * only of those lines runs nothing but the defines, whatever version wrote
+     * it and whatever settings it was written with. One line of anything else,
+     * or a PHP tag on any line, and the block is not taken.
+     *
+     * @since 2.11.5
+     *
+     * @param string $block   Block from start marker to end marker, inclusive.
+     * @param array  $markers Start and end marker.
+     * @return bool
+     */
+    private static function is_harmless_constants_block( $block, $markers ) {
+        $lines = explode( "\n", str_replace( array( "\r\n", "\r" ), "\n", (string) $block ) );
+
+        if ( count( $lines ) < 2
+            || rtrim( array_shift( $lines ), " \t" ) !== $markers[0]
+            || ltrim( array_pop( $lines ), " \t" ) !== $markers[1]
+        ) {
+            return false;
+        }
+
+        $define  = self::harmless_define_pattern();
+        $guarded = '/^if\s*\(\s*!\s*defined\s*\(\s*[\'"][A-Z_]+[\'"]\s*\)\s*\)\s*\{\s*' . $define . '\s*\}$/';
+
+        foreach ( $lines as $line ) {
+            $line = trim( $line, " \t" );
+
+            if ( false !== strpos( $line, '<?' ) || false !== strpos( $line, '?>' ) ) {
+                return false;
+            }
+
+            if ( '' === $line
+                || 0 === strpos( $line, '//' )
+                || preg_match( '/^' . $define . '$/', $line )
+                || preg_match( $guarded, $line )
+            ) {
+                continue;
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Take ownership of the blocks already on disk, once
+     *
+     * Fingerprints are recorded when Vigilant writes a block, which leaves every
+     * block written before 2.11.5 without one. This records the blocks that can
+     * be recognised as Vigilant's without having seen them written:
+     *
+     * - A .htaccess block, when it is exactly what Vigilant would write today
+     *   with the settings it has, the timestamp and the version apart. After an
+     *   update, maybe_sync_server_files() rewrites those blocks on the next
+     *   request, so the claim waits for it. Unless it has already failed: a
+     *   block Vigilant cannot rewrite is not going to start matching, and
+     *   waiting for it would keep the old rule for good.
+     * - A wp-config.php constants block, when every line in it is a comment, a
+     *   blank line or a harmless define(). Nothing rewrites that block on an
+     *   update and its format has changed five times, so comparing it with
+     *   today's output would report every site that has not saved those
+     *   settings since. A line that could run anything is never accepted.
+     *
+     * A block that is not recognised stays in the hash and is reported as a
+     * change, so the owner gets to look at it, and the activity log says why.
+     * Nothing in the stored baseline is rewritten.
+     *
+     * Only where the shared files belong, a single site or the main site of a
+     * network, because the expected blocks come from that site's settings. Until
+     * it has run, normalize_critical_file() keeps the old rule on every site.
+     *
+     * @since 2.11.5
+     */
+    public function maybe_claim_owned_blocks() {
+        if ( $this->owned_blocks_claimed() || ! Vigilante_Settings::owns_shared_files() ) {
+            return;
+        }
+
+        $sync_due = get_option( 'vigilante_server_files_pending' )
+            || VIGILANTE_VERSION !== get_option( 'vigilante_server_files_version' );
+
+        if ( $sync_due && ! get_option( 'vigilante_server_files_retry_after' ) ) {
+            return;
+        }
+
+        $root_path = untrailingslashit( ABSPATH );
+        $expected  = null;
+        $unclaimed = array();
+
+        foreach ( $this->critical_root_files as $filename ) {
+            $full_path = $root_path . '/' . $filename;
+
+            if ( ! file_exists( $full_path ) ) {
+                continue;
+            }
+
+            $content = file_get_contents( $full_path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+
+            if ( false === $content ) {
+                // Unreadable right now: leave the claim open and try again later.
+                return;
+            }
+
+            $content   = str_replace( array( "\r\n", "\r" ), "\n", $content );
+            $is_config = 'wp-config.php' === $filename;
+
+            foreach ( ( $is_config ? $this->wpconfig_markers : $this->htaccess_markers ) as $markers ) {
+                $pattern = '/' . preg_quote( $markers[0], '/' ) . '.*?' . preg_quote( $markers[1], '/' ) . '/s';
+
+                if ( ! preg_match_all( $pattern, $content, $found ) ) {
+                    continue;
+                }
+
+                foreach ( $found[0] as $block ) {
+                    if ( $is_config ) {
+                        $ours = self::is_harmless_constants_block( $block, $markers );
+                    } else {
+                        $expected = null === $expected ? $this->expected_htaccess_blocks() : $expected;
+                        $ours     = isset( $expected[ $markers[0] ] )
+                            && self::comparable_block( $block ) === self::comparable_block( $expected[ $markers[0] ] );
+                    }
+
+                    if ( $ours ) {
+                        self::remember_owned_block( $filename, $markers[0], $block, false );
+                    } else {
+                        $unclaimed[ $filename ] = $filename;
+                    }
+                }
+            }
+
+            // The commented-out originals are judged line by line at scan time.
+            // Looking at them here only keeps the log entry below complete.
+            if ( $is_config && preg_match_all( '/^.*' . preg_quote( $this->wpconfig_original_marker, '/' ) . '.*$/m', $content, $marked ) ) {
+                foreach ( $marked[0] as $line ) {
+                    if ( ! $this->is_vigilant_original_line( $line ) ) {
+                        $unclaimed[ $filename ] = $filename;
+                    }
+                }
+            }
+        }
+
+        update_site_option( self::OWNED_BLOCKS_CLAIM_OPTION, self::OWNED_BLOCKS_CLAIMED );
+
+        // With the claim in place normalize uses the new rule, so a file nobody
+        // touched whose only difference is an original line the old rule dropped
+        // would read as changed. Re-base those, and only those, once.
+        $this->rebase_original_line_shift();
+
+        if ( $unclaimed && $this->activity_log ) {
+            $this->activity_log->log(
+                'file',
+                'critical_file_unrecognized_block',
+                sprintf(
+                    /* translators: %s: comma-separated file names, such as wp-config.php or .htaccess. */
+                    __( 'Content marked as written by Vigilant in %s does not match what Vigilant writes. From now on it is checked like the rest of the file, so the file integrity scan reports it as a change for you to review.', 'vigilante' ),
+                    implode( ', ', $unclaimed )
+                ),
+                array( 'files' => array_values( $unclaimed ) ),
+                'warning'
+            );
+        }
+    }
+
+    /**
+     * Re-base the critical files whose only change is a newly kept original line
+     *
+     * Until 2.11.5 the hash left out every [VIGILANTE_ORIGINAL] line; from 2.11.5
+     * it keeps the ones whose value is not a plain constant define, which is the
+     * right thing for the hash but moves it on a file nobody edited: the stored
+     * baseline was taken under the old rule, and nothing re-bases wp-config.php on
+     * an update (maybe_sync_server_files() only rewrites the .htaccess). So the
+     * first scan after updating would report wp-config.php as changed.
+     *
+     * This runs once, in the same pass that claims the blocks. For each file it
+     * re-bases to the new hash only when the baseline still matches the file with
+     * every original line dropped, which means the blocks are exactly the approved
+     * ones and the sole difference is those lines, the user's own commented-out
+     * defines. A block that was edited or planted does not match with the lines
+     * dropped, so it is left to be reported: this closes the false positive
+     * without adopting anything that was hidden before.
+     *
+     * @since 2.11.5
+     */
+    private function rebase_original_line_shift() {
+        $baseline = $this->get_critical_files_baseline();
+        $root     = untrailingslashit( ABSPATH );
+        $changed  = false;
+
+        foreach ( $this->critical_root_files as $filename ) {
+            $full_path = $root . '/' . $filename;
+
+            if ( ! file_exists( $full_path ) || empty( $baseline[ $filename ]['hash'] ) ) {
+                continue;
+            }
+
+            $content = file_get_contents( $full_path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+
+            if ( false === $content ) {
+                continue;
+            }
+
+            $current = md5( $this->normalize_critical_file( $filename, $content ) );
+
+            // Already in step, or a real change to something other than the
+            // original lines: nothing to re-base here.
+            if ( $baseline[ $filename ]['hash'] === $current
+                || $baseline[ $filename ]['hash'] !== md5( $this->normalize_critical_file( $filename, $content, true ) )
+            ) {
+                continue;
+            }
+
+            $normalized                       = $this->normalize_critical_file( $filename, $content );
+            $baseline[ $filename ]['hash']    = $current;
+            $baseline[ $filename ]['size']    = strlen( $content );
+            $baseline[ $filename ]['content'] = $this->baseline_content( $filename, $normalized );
+            $baseline[ $filename ]['updated'] = time();
+            $changed                          = true;
+        }
+
+        if ( $changed ) {
+            $this->write_baseline( $baseline );
+        }
+    }
+
+    /**
+     * The .htaccess blocks Vigilant would write today, keyed by start marker
+     *
+     * @since 2.11.5
+     *
+     * @return array
+     */
+    private function expected_htaccess_blocks() {
+        $settings = $this->settings ? $this->settings : new Vigilante_Settings();
+
+        $classes = array(
+            'Vigilante_Htaccess_Protection' => 'class-htaccess-protection.php',
+            'Vigilante_Security_Headers'    => 'class-security-headers.php',
+        );
+
+        foreach ( $classes as $class => $file ) {
+            if ( ! class_exists( $class ) ) {
+                require_once VIGILANTE_INCLUDES_DIR . $file;
+            }
+        }
+
+        $headers = new Vigilante_Security_Headers( $settings );
+
+        return array(
+            Vigilante_Htaccess_Protection::MARKER_START => ( new Vigilante_Htaccess_Protection( $settings ) )->generate_rules(),
+            Vigilante_Security_Headers::MARKER_START    => Vigilante_Security_Headers::MARKER_START . "\n" . $headers->generate_rules_content() . "\n" . Vigilante_Security_Headers::MARKER_END,
+        );
+    }
+
+    /**
+     * A .htaccess block with the parts that change on every write evened out
+     *
+     * Two blocks Vigilant wrote with the same settings differ only in the time
+     * they were generated and, across an update, in the version the firewall
+     * block names. Everything else has to be identical for the claim to take
+     * the block.
+     *
+     * @since 2.11.5
+     *
+     * @param string $block Block from start marker to end marker, inclusive.
+     * @return string
+     */
+    private static function comparable_block( $block ) {
+        $block = str_replace( array( "\r\n", "\r" ), "\n", (string) $block );
+        $block = preg_replace( '/^# Generated: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$/m', '# Generated:', $block );
+        $block = preg_replace( '/^# Vigilante for WordPress - Firewall v[0-9][0-9A-Za-z.\-]*$/m', '# Vigilante for WordPress - Firewall v', $block );
+
+        return rtrim( $block, "\n" );
     }
 
     /**

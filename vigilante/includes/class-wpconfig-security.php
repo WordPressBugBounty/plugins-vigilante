@@ -133,6 +133,12 @@ class Vigilante_Wpconfig_Security {
         // Regenerate critical file baseline so the integrity scan does not
         // flag our own modifications as unauthorized changes.
         if ( true === $result ) {
+            // Record the block as Vigilant's own first: the baseline refreshed
+            // below leaves out of its hash only the blocks recorded this way.
+            if ( class_exists( 'Vigilante_File_Integrity' ) ) {
+                Vigilante_File_Integrity::remember_owned_block( 'wp-config.php', self::MARKER_START, rtrim( $constants, "\n" ) );
+            }
+
             /**
              * Fires after Vigilante successfully writes to wp-config.php.
              * Used by the file integrity module to update the baseline hash.
@@ -367,6 +373,17 @@ class Vigilante_Wpconfig_Security {
     }
 
     /**
+     * Drop the integrity scan's record of the constants block once it is gone
+     *
+     * @since 2.11.5
+     */
+    private function forget_owned_block() {
+        if ( class_exists( 'Vigilante_File_Integrity' ) ) {
+            Vigilante_File_Integrity::forget_owned_blocks( 'wp-config.php', self::MARKER_START );
+        }
+    }
+
+    /**
      * Remove our security constants from wp-config.php and restore originals
      *
      * @return bool|WP_Error
@@ -390,6 +407,7 @@ class Vigilante_Wpconfig_Security {
 
         // If our markers don't exist, just try to uncomment originals
         if ( strpos( $content, self::MARKER_START ) === false ) {
+            $this->forget_owned_block();
             return $this->uncomment_original_constants();
         }
 
@@ -415,6 +433,8 @@ class Vigilante_Wpconfig_Security {
         if ( ! $this->write_file_directly( $this->wpconfig_path, $new_content ) ) {
             return false;
         }
+
+        $this->forget_owned_block();
 
         // Now uncomment the original constants
         return $this->uncomment_original_constants();

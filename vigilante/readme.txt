@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.11.4
+Stable tag: 2.11.5
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -343,7 +343,7 @@ The scanner compares WordPress core files, plugin files, and theme files against
 
 = I updated from a version that stored wp-config.php in the database. Is there anything else to do? =
 
-Versions before 2.11.2 kept a copy of wp-config.php in an option so the integrity scan could show which lines had changed, and that copy carried the database password and the eight authentication keys and salts. Updating removes the copy, but no update can undo an exposure that already happened. So if your database, or any backup of it, may have been read by somebody else while that copy was stored, replace the eight keys and salts in your wp-config.php with fresh ones from the WordPress.org secret-key service, and change the database password if your host lets you. Replacing the salts signs everybody out, yourself included, which is the whole point of doing it.
+Previous versions kept a copy of wp-config.php in an option so the integrity scan could show which lines had changed, and that copy carried the database password and the eight authentication keys and salts. Updating removes the copy, but no update can undo an exposure that already happened. So if your database, or any backup of it, may have been read by somebody else while that copy was stored, replace the eight keys and salts in your wp-config.php with fresh ones from the WordPress.org secret-key service, and change the database password if your host lets you. Replacing the salts signs everybody out, yourself included, which is the whole point of doing it.
 
 = How often does the file integrity scan run? =
 
@@ -415,6 +415,11 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 2.11.5 =
+The file integrity scan now inspects the content inside the blocks Vigilant writes in wp-config.php and the root .htaccess, which earlier versions skipped. Blocks already on disk are recognised once after updating, so a file nobody changed is not reported.
+
+* Fix: the file integrity scan now checks the content inside the blocks Vigilant writes in wp-config.php and the root .htaccess. Those blocks, and the lines Vigilant comments out when it manages a constant, were left out of the hash so that Vigilant rewriting its own block would not read as somebody else's change; the side effect was that a change made inside them did not move the hash and did not show up in a scan. From now on a block is left out only when it is exactly a block Vigilant wrote, which is recorded at the moment Vigilant writes it, and a commented-out original line only while uncommenting it would still give a plain constant define. Anything else is hashed like the rest of the file and reported for review. The blocks already on disk are recognised once, on the first scan after updating, so a file nobody changed is not reported; a block that cannot be recognised as Vigilant's own is reported instead, and the activity log names the file. Present since 1.14.0, the version that first kept these blocks out of the hash.
+
 = 2.11.4 =
 * Fix: the cleanup that removes the credentials stored by versions before 2.11.2 now runs whether the File Integrity module is on or off. Both cleanup paths were registered inside that module, so a site with file monitoring turned off kept the database password and the eight keys and salts in its options table with 2.11.3 installed and nothing to show for it, and a network whose main site had the module off did not register the network sweep either, which was the one path that reached the sites nobody visits. Turning the module off is not a decision to keep those credentials, and for whoever did it the cleanup matters more rather than less. With the module off there is no scan, so on such a site the cleanup arrives on the first admin page load, and on a network the sweep from the main site reaches the sites nobody opens. Reported by @calzbert, who reviewed the 2.11.3 diff and found every fix in this release.
 * Fix: reactivating the plugin no longer replays eleven migrations, one of which empties the trusted devices and the pending second-factor codes. The schema version and the plugin version are written to the same option on two different scales, and the activator wrote the schema one unconditionally, so a site that was completely up to date read as older than almost every migration and ran them all again: every user of that site had to pass the second factor once more, every time somebody toggled the plugin. The schema version no longer walks the stored value backwards, and the migration that deletes rows carries a marker of its own so that no version comparison can replay it. A site that is already sitting on the lower scale, which is also where a subsite created after a network-wide activation starts, may still ask for the second factor once more when it updates.
@@ -464,8 +469,8 @@ For older changelog entries, please check the [changelog.txt](https://plugins.sv
 
 == Upgrade Notice ==
 
-= 2.11.4 =
-Closes a gap in the credential cleanup: it did not run on sites with File Integrity turned off. Also stops the plugin replaying old migrations when it is reactivated, which was clearing every trusted device.
+= 2.11.5 =
+The file integrity scan now inspects the content inside the blocks Vigilant writes in wp-config.php and the root .htaccess, which earlier versions skipped. Blocks already on disk are recognised once after updating, so a file nobody changed is not reported.
 
 == Support ==
 
