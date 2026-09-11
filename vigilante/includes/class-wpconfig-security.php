@@ -107,10 +107,10 @@ class Vigilante_Wpconfig_Security {
             return new WP_Error( 'not_writable', __( 'wp-config.php is not writable', 'vigilante' ) );
         }
 
-        // Safety check 2: Create backup BEFORE any modification
-        $backup_result = $this->create_backup();
-        if ( is_wp_error( $backup_result ) ) {
-            return $backup_result;
+        // Safety check 2: the file must look whole BEFORE any modification
+        $check_result = $this->check_before_write();
+        if ( is_wp_error( $check_result ) ) {
+            return $check_result;
         }
 
         // First clean up old plugin constants
@@ -150,11 +150,16 @@ class Vigilante_Wpconfig_Security {
     }
 
     /**
-     * Create a backup of wp-config.php before modification
+     * Check wp-config.php before modifying it
+     *
+     * Until 2.11.6 this also stored the whole file in vigilante_wpconfig_backup,
+     * and with it the database password and the authentication keys and salts.
+     * Nothing ever read that copy back to restore anything: the checks are what
+     * protected the file, and the copy only put its secrets in the options table.
      *
      * @return bool|WP_Error
      */
-    private function create_backup() {
+    private function check_before_write() {
         if ( ! file_exists( $this->wpconfig_path ) ) {
             return new WP_Error( 'no_config', __( 'wp-config.php does not exist', 'vigilante' ) );
         }
@@ -170,36 +175,49 @@ class Vigilante_Wpconfig_Security {
             return new WP_Error( 'invalid_config', __( 'wp-config.php does not appear to be a valid WordPress configuration file', 'vigilante' ) );
         }
 
-        // Store the backup in a private database option, never as a file under
-        // the web root. wp-config.php holds DB credentials and salts; a file in
-        // wp-content could be served by a misconfigured server. The option is
-        // not reachable over HTTP and is not autoloaded.
-        $stored = update_option(
-            'vigilante_wpconfig_backup',
-            array(
-                'content' => $content,
-                'time'    => time(),
-            ),
-            false
-        );
-
-        // update_option() returns false both on failure and when the value is
-        // unchanged; only treat it as an error if the content was not stored.
-        if ( false === $stored && $content !== $this->get_wpconfig_backup_content() ) {
-            return new WP_Error( 'backup_failed', __( 'Could not create wp-config.php backup', 'vigilante' ) );
+        if ( ! self::constants_blocks_are_whole( $content ) ) {
+            return new WP_Error( 'block_incomplete', __( 'A Vigilant block in wp-config.php is missing one of its markers, so the file was left as it is.', 'vigilante' ) );
         }
 
         return true;
     }
 
     /**
-     * Get the stored wp-config.php backup content, or '' if none.
+     * Whether no constants block in wp-config.php is left without its END
      *
-     * @return string
+     * A BEGIN with no END after it, or a second BEGIN before the END, means the
+     * block cannot be found whole. Removing it would still rewrite the file and
+     * uncomment the original constants around it while the block keeps defining
+     * them, and writing a new one would leave the broken block in place for the
+     * next removal to pair with the new END, taking everything in between. So
+     * the file is left as it is, and the block keeps working until someone
+     * removes it by hand. An END with no BEGIN before it is left out of the
+     * question: each BEGIN is paired with the next END and a stray END is left
+     * alone.
+     *
+     * Until 2.11.6 only deactivation asked this, from its own copy of the check.
+     *
+     * @since 2.11.6
+     *
+     * @param string $content wp-config.php content.
+     * @return bool
      */
-    private function get_wpconfig_backup_content() {
-        $backup = get_option( 'vigilante_wpconfig_backup' );
-        return ( is_array( $backup ) && isset( $backup['content'] ) ) ? (string) $backup['content'] : '';
+    private static function constants_blocks_are_whole( $content ) {
+        preg_match_all( '/' . preg_quote( self::MARKER_START, '/' ) . '|' . preg_quote( self::MARKER_END, '/' ) . '/', $content, $markers );
+
+        $inside = false;
+        foreach ( $markers[0] as $marker ) {
+            if ( self::MARKER_START === $marker ) {
+                if ( $inside ) {
+                    return false;
+                }
+                $inside = true;
+            } else {
+                $inside = false;
+            }
+        }
+
+        return ! $inside;
     }
 
     /**
@@ -403,6 +421,12 @@ class Vigilante_Wpconfig_Security {
         
         if ( false === $content ) {
             return false;
+        }
+
+        // A block that lost a marker cannot come out without cutting or
+        // duplicating what surrounds it, so the file is left as it is.
+        if ( ! self::constants_blocks_are_whole( $content ) ) {
+            return new WP_Error( 'block_incomplete', __( 'A Vigilant block in wp-config.php is missing one of its markers, so the file was left as it is.', 'vigilante' ) );
         }
 
         // If our markers don't exist, just try to uncomment originals

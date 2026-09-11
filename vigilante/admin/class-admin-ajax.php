@@ -341,6 +341,16 @@ trait Vigilante_Admin_Ajax {
             }
         }
 
+        // On the main site of a network the whitelists also build the .htaccess
+        // rules every site shares, so a user without network rights cannot put
+        // an entry in them or take one out (2.11.6).
+        $locked          = Vigilante_Settings::get_locked_file_settings();
+        $locked_firewall = ( isset( $locked['firewall'] ) && is_array( $locked['firewall'] ) ) ? $locked['firewall'] : array();
+
+        if ( in_array( $option_key, $locked_firewall, true ) || ( $removed_from_opposite && in_array( $opposite_key, $locked_firewall, true ) ) ) {
+            wp_send_json_error( Vigilante_Settings::get_shared_files_notice() );
+        }
+
         wp_cache_delete( Vigilante_Settings::OPTION_NAME, 'options' );
         update_option( Vigilante_Settings::OPTION_NAME, $all_options );
         $this->settings->clear_cache();

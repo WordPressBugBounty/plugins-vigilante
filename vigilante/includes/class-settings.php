@@ -805,7 +805,12 @@ class Vigilante_Settings {
      * Note this is not every setting that reaches .htaccess. Blocking bad bots
      * or empty user agents also runs in PHP, per site, so those stay editable on
      * a subsite: the PHP half protects that site and the .htaccess half is
-     * refused, leaving the main site's rules standing.
+     * refused, leaving the main site's rules standing. On the main site they
+     * are locked too, see get_main_site_file_settings().
+     *
+     * The PHP blocks for plugins and themes have no field on the settings
+     * screen, but an imported file carries them, and readme.html and
+     * license.txt are removed from the root the whole network shares.
      *
      * @since 2.9.8
      *
@@ -815,8 +820,113 @@ class Vigilante_Settings {
         return array(
             'security_headers' => true,
             'wp_hardening'     => array( 'disallow_file_edit', 'disallow_file_mods', 'force_ssl_admin', 'force_ssl_login', 'wp_debug', 'disable_wp_cron' ),
-            'firewall'         => array( 'disable_directory_browsing', 'protect_wp_config', 'protect_wp_includes', 'protect_uploads_php', 'protect_sensitive_files', 'protect_wp_cron', 'limit_http_methods' ),
+            'firewall'         => array( 'disable_directory_browsing', 'protect_wp_config', 'protect_wp_includes', 'protect_uploads_php', 'protect_sensitive_files', 'protect_wp_cron', 'limit_http_methods', 'block_php_in_plugins', 'block_php_in_themes' ),
+            'advanced'         => array( 'remove_readme', 'remove_license' ),
         );
+    }
+
+    /**
+     * Settings the shared files are built from that also act on the site storing them
+     *
+     * get_shared_file_settings() lists what does nothing but end up in a shared
+     * file. These do both: blocking bad bots and bad query strings, the visitor
+     * IP detection and the two whitelists run in PHP for the site that stores
+     * them, and on the main site of a network they are also what the .htaccess
+     * rules of every site are generated from; the three module switches decide
+     * whether the .htaccess blocks and the wp-config.php constants exist at all.
+     * On a subsite they only act on that site, so they stay editable there.
+     *
+     * Until 2.11.6 an administrator of the main site without network rights
+     * could change any of them, and the file-only ones too: the write to the
+     * file was refused at that moment, but the value stayed stored, and the
+     * refresh after the next update, or the next save by a network
+     * administrator, published it to the whole network.
+     *
+     * @since 2.11.6
+     *
+     * @return array<string,string[]>
+     */
+    public static function get_main_site_file_settings() {
+        return array(
+            'modules'  => array( 'firewall', 'security_headers', 'wp_hardening' ),
+            'firewall' => array( 'block_bad_bots', 'block_bad_query_strings', 'trusted_proxy_header', 'ip_whitelist', 'ua_whitelist' ),
+        );
+    }
+
+    /**
+     * Shared file settings the current user may not change on this site
+     *
+     * Empty when the user can write the shared files. Otherwise the file-only
+     * settings on every site, plus, on the main site, the ones it also builds
+     * the shared files from.
+     *
+     * @since 2.11.6
+     *
+     * @return array<string,true|string[]>
+     */
+    public static function get_locked_file_settings() {
+        if ( self::can_write_shared_files() ) {
+            return array();
+        }
+
+        $locked = self::get_shared_file_settings();
+
+        if ( self::owns_shared_files() ) {
+            foreach ( self::get_main_site_file_settings() as $section => $keys ) {
+                if ( ! isset( $locked[ $section ] ) ) {
+                    $locked[ $section ] = $keys;
+                } elseif ( is_array( $locked[ $section ] ) ) {
+                    $locked[ $section ] = array_values( array_unique( array_merge( $locked[ $section ], $keys ) ) );
+                }
+            }
+        }
+
+        return $locked;
+    }
+
+    /**
+     * Put back the stored value of every shared file setting the user may not change
+     *
+     * For every writer of the whole configuration: saving a tab, importing a
+     * file, applying a preset, restoring the defaults. Hiding a field on the
+     * screen decides nothing, because the request can carry the key anyway. A
+     * key that was not stored is dropped, so its default keeps applying.
+     *
+     * @since 2.11.6
+     *
+     * @param array $options Configuration about to be stored.
+     * @param array $stored  Configuration stored now, as read from the option.
+     * @return array
+     */
+    public static function keep_locked_file_settings( $options, $stored ) {
+        $options = is_array( $options ) ? $options : array();
+        $stored  = is_array( $stored ) ? $stored : array();
+
+        foreach ( self::get_locked_file_settings() as $section => $keys ) {
+            if ( true === $keys ) {
+                if ( array_key_exists( $section, $stored ) ) {
+                    $options[ $section ] = $stored[ $section ];
+                } else {
+                    unset( $options[ $section ] );
+                }
+                continue;
+            }
+
+            $stored_section = ( isset( $stored[ $section ] ) && is_array( $stored[ $section ] ) ) ? $stored[ $section ] : array();
+
+            foreach ( $keys as $key ) {
+                if ( array_key_exists( $key, $stored_section ) ) {
+                    if ( ! isset( $options[ $section ] ) || ! is_array( $options[ $section ] ) ) {
+                        $options[ $section ] = array();
+                    }
+                    $options[ $section ][ $key ] = $stored_section[ $key ];
+                } elseif ( isset( $options[ $section ] ) && is_array( $options[ $section ] ) ) {
+                    unset( $options[ $section ][ $key ] );
+                }
+            }
+        }
+
+        return $options;
     }
 
     /**

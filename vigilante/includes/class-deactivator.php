@@ -21,19 +21,64 @@ class Vigilante_Deactivator {
 
     /**
      * Run deactivation tasks
+     *
+     * @param bool $network_wide Whether core is deactivating the plugin for the
+     *                           whole network, as it passes it to the hook.
      */
-    public static function deactivate() {
-        // ALWAYS remove htaccess rules using the centralized manager
-        self::remove_htaccess_rules();
+    public static function deactivate( $network_wide = false ) {
+        /*
+         * wp-config.php and the root .htaccess belong to the main site of a
+         * network, and the gate that protects them asks whether the request is
+         * on the main site. A network-wide deactivation can arrive from any site,
+         * though: the REST plugins endpoint answers on every site's URL, and
+         * WP-CLI takes --network together with the --url of a subsite. Asked
+         * there, the gate said no and the blocks stayed behind, with no plugin
+         * left to remove them. So the question is asked on the main site. Only
+         * the site changes: the capability is still checked against whoever is
+         * deactivating, so a subsite administrator gains nothing from it.
+         */
+        $switched = false;
+        if ( $network_wide && is_multisite() && ! is_main_site() ) {
+            switch_to_blog( get_main_site_id() );
+            $switched = true;
+        }
 
-        // ALWAYS remove wp-config security constants and restore originals
-        self::remove_wpconfig_security();
+        try {
+            /*
+             * Activating network-wide does not clear a site's own activation, so
+             * a Vigilant that was active on the main site before it was activated
+             * for the network is still running there after a network
+             * deactivation. Its blocks are still in use, and removing them would
+             * leave that copy running without the protections it wrote.
+             */
+            if ( ! self::still_active_here( $network_wide ) ) {
+                // ALWAYS remove htaccess rules using the centralized manager
+                self::remove_htaccess_rules();
 
-        // Clear scheduled events
-        self::clear_scheduled_events();
+                // ALWAYS remove wp-config security constants and restore originals
+                self::remove_wpconfig_security();
+            }
+        } finally {
+            if ( $switched ) {
+                restore_current_blog();
+            }
+        }
 
-        // Send deactivation email
-        self::send_deactivation_email();
+        /*
+         * The same question for the site the request is on: a copy that keeps
+         * running here keeps its schedule, and since it has not been deactivated
+         * it is not the one to announce that protection is off. The transients
+         * below are cleared either way; for a copy that keeps running that only
+         * resets the alert engine's counters and cooldowns, so an alert can come
+         * back sooner than it would have.
+         */
+        if ( ! self::still_active_here( $network_wide ) ) {
+            // Clear scheduled events
+            self::clear_scheduled_events();
+
+            // Send deactivation email
+            self::send_deactivation_email();
+        }
 
         // Clear transients
         delete_transient( 'vigilante_activated' );
@@ -69,78 +114,54 @@ class Vigilante_Deactivator {
      * Remove wp-config security constants and restore original values
      */
     private static function remove_wpconfig_security() {
+        /*
+         * One removal for the whole plugin. This used to be a copy of
+         * Vigilante_Wpconfig_Security::remove_constants(), and the copy had
+         * drifted from it in three ways. Until 2.11.5 it did not ask the network
+         * gate, so the administrator of a subsite who deactivated a per-site
+         * Vigilant stripped the constants for every site of the network (reported
+         * by the wordpress.org automated security review). It cut the block line
+         * by line, so a block that had lost its END marker took everything after
+         * it, the require of wp-settings.php included. And it wrote through
+         * WP_Filesystem with FS_CHMOD_FILE, which is "permissions of index.php |
+         * 0644", so a wp-config.php kept at 0600 or 0640 was left at 0644; a
+         * direct write keeps the permissions the file already has.
+         */
         $wpconfig_path = ABSPATH . 'wp-config.php';
 
-        if ( ! file_exists( $wpconfig_path ) ) {
+        // remove_constants() writes the file directly, so there is nothing to do
+        // when PHP cannot.
+        if ( ! file_exists( $wpconfig_path ) || ! wp_is_writable( $wpconfig_path ) ) {
             return;
         }
 
-        // Initialize WP_Filesystem
-        global $wp_filesystem;
-        if ( ! function_exists( 'WP_Filesystem' ) ) {
-            require_once ABSPATH . 'wp-admin/includes/file.php';
-        }
-        WP_Filesystem();
+        require_once VIGILANTE_INCLUDES_DIR . 'class-wpconfig-security.php';
 
-        if ( ! $wp_filesystem || ! $wp_filesystem->is_writable( $wpconfig_path ) ) {
-            return;
-        }
+        // remove_constants() asks the network gate and leaves alone a block that
+        // has lost one of its markers.
+        $wpconfig = new Vigilante_Wpconfig_Security( new Vigilante_Settings() );
+        $wpconfig->remove_constants();
+    }
 
-        $content = $wp_filesystem->get_contents( $wpconfig_path );
-
-        if ( false === $content || empty( $content ) ) {
-            return;
-        }
-
-        $modified = false;
-
-        // Step 1: Remove our Vigilante block
-        if ( strpos( $content, '/* BEGIN Vigilante Security Constants */' ) !== false ) {
-            $lines = explode( "\n", $content );
-            $new_lines = array();
-            $inside_block = false;
-
-            foreach ( $lines as $line ) {
-                if ( strpos( $line, '/* BEGIN Vigilante Security Constants */' ) !== false ) {
-                    $inside_block = true;
-                    continue;
-                }
-
-                if ( strpos( $line, '/* END Vigilante Security Constants */' ) !== false ) {
-                    $inside_block = false;
-                    continue;
-                }
-
-                if ( ! $inside_block ) {
-                    $new_lines[] = $line;
-                }
-            }
-
-            $content = implode( "\n", $new_lines );
-            $modified = true;
-        }
-
-        // Step 2: Uncomment original constants (restore [VIGILANTE_ORIGINAL] lines)
-        $original_marker = '// [VIGILANTE_ORIGINAL] ';
-        if ( strpos( $content, $original_marker ) !== false ) {
-            $pattern = '/^(\s*)' . preg_quote( $original_marker, '/' ) . '(.+)$/m';
-            $content = preg_replace( $pattern, '$1$2', $content );
-            $modified = true;
-        }
-
-        if ( ! $modified ) {
-            return;
-        }
-
-        // Clean up multiple empty lines
-        $content = preg_replace( '/\n{3,}/', "\n\n", $content );
-
-        // Safety check: must still have basic wp-config content
-        if ( strpos( $content, 'DB_NAME' ) === false ) {
-            return; // Don't write if it would corrupt wp-config
-        }
-
-        $wp_filesystem->put_contents( $wpconfig_path, $content, FS_CHMOD_FILE );
+    /**
+     * Whether a per-site Vigilant keeps running on the current site
+     *
+     * Only a network-wide deactivation can leave one behind, and only then is
+     * the site's own list final when the hook runs: core saves the lists after
+     * the hook, so for a per-site deactivation the list still names the plugin.
+     * Code that calls deactivate_plugins() without saying whether it is
+     * network-wide on a plugin active both ways drops the site's entry too,
+     * after the hook, and then this answers yes for a copy that is going away;
+     * core itself never makes that call.
+     *
+     * @since 2.11.6
+     *
+     * @param bool $network_wide Whether the deactivation is network-wide.
+     * @return bool
+     */
+    private static function still_active_here( $network_wide ) {
+        return $network_wide && is_multisite()
+            && in_array( VIGILANTE_PLUGIN_BASENAME, (array) get_option( 'active_plugins', array() ), true );
     }
 
     /**
@@ -215,101 +236,5 @@ class Vigilante_Deactivator {
         ) );
 
         Vigilante_Email_Template::send( $to, $subject, __( 'Plugin deactivated', 'vigilante' ), $body );
-    }
-
-    /**
-     * Full uninstall - removes all data
-     * Called from uninstall.php
-     */
-    public static function uninstall() {
-        // Drop database tables
-        $database = new Vigilante_Database();
-        $database->drop_tables();
-
-        // Remove all options
-        delete_option( 'vigilante_options' );
-        delete_option( 'vigilante_db_version' );
-        delete_option( 'vigilante_purge_2_11_0_done' );
-        delete_option( 'vigilante_baseline_redaction' );
-        delete_option( 'vigilante_owned_blocks' );
-        delete_option( 'vigilante_owned_blocks_claim' );
-        if ( is_multisite() ) {
-            // The network one was in uninstall.php and missing here, so after
-            // deleting the data and reactivating, the one-off sweep never ran
-            // again and the per-site copies stayed where they were.
-            delete_site_option( 'vigilante_baseline_sweep' );
-            delete_site_option( 'vigilante_owned_blocks' );
-            delete_site_option( 'vigilante_owned_blocks_claim' );
-        }
-        delete_option( 'vigilante_activated_time' );
-        delete_option( 'vigilante_dismissed_notices' );
-        delete_option( 'vigilante_backup_timestamp' );
-        delete_option( 'vigilante_last_integrity_results' );
-        delete_option( 'vigilante_last_integrity_scan' );
-        delete_option( 'vigilante_critical_files_baseline' );
-        if ( is_multisite() ) {
-            delete_site_option( 'vigilante_critical_files_baseline' );
-        }
-        delete_option( 'vigilante_analyzer_last_scan' );
-        delete_option( 'vigilante_analyzer_history' );
-        delete_option( 'vigilante_analyzer_fix_log' );
-
-        // Remove transients
-        delete_transient( 'vigilante_activated' );
-        delete_transient( 'vigilante_restore_on_deactivate' );
-        delete_transient( 'vigilante_backup_error' );
-        delete_transient( 'vigilante_file_integrity_last_scan' );
-
-        // Audit Alerts: remove every engine transient (counters, cooldowns and
-        // the immediate anti-duplicate keys), including their timeout twins.
-        // Names are dynamic (md5 per event), so a prefix sweep is the only way.
-        global $wpdb;
-        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- One-off uninstall cleanup; dynamic transient names cannot be enumerated individually.
-        $wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '\\_transient\\_vigilante\\_aa\\_%' OR option_name LIKE '\\_transient\\_timeout\\_vigilante\\_aa\\_%'" );
-
-        // Remove backup directory
-        self::remove_backup_directory();
-
-        // Clear scheduled events
-        self::clear_scheduled_events();
-
-        // Remove htaccess rules
-        self::remove_htaccess_rules();
-
-        // Remove wp-config security constants and restore originals
-        self::remove_wpconfig_security();
-    }
-
-    /**
-     * Remove backup directory and its contents
-     */
-    private static function remove_backup_directory() {
-        $backup_dirs = array(
-            WP_CONTENT_DIR . '/vigilante-backups',
-        );
-
-        if ( defined( 'VIGILANTE_BACKUP_DIR' ) ) {
-            $backup_dirs[] = VIGILANTE_BACKUP_DIR;
-        }
-
-        // Initialize WP_Filesystem
-        global $wp_filesystem;
-        if ( ! function_exists( 'WP_Filesystem' ) ) {
-            require_once ABSPATH . 'wp-admin/includes/file.php';
-        }
-        WP_Filesystem();
-
-        if ( ! $wp_filesystem ) {
-            return;
-        }
-
-        foreach ( $backup_dirs as $backup_dir ) {
-            if ( ! $wp_filesystem->is_dir( $backup_dir ) ) {
-                continue;
-            }
-
-            // Remove directory and contents recursively
-            $wp_filesystem->delete( $backup_dir, true );
-        }
     }
 }

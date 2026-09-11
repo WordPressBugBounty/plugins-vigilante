@@ -2056,6 +2056,39 @@ class Vigilante_Admin {
     }
 
     /**
+     * Whether this is the main site and the user cannot change what it builds the shared files from
+     *
+     * See Vigilante_Settings::get_main_site_file_settings(). On a subsite those
+     * settings only act on that site, so they are never locked there.
+     *
+     * @since 2.11.6
+     *
+     * @return bool
+     */
+    private function main_site_files_locked() {
+        return $this->shared_files_locked() && Vigilante_Settings::owns_shared_files();
+    }
+
+    /**
+     * Sentence added to a bulk change when some settings were left as they were
+     *
+     * Importing a file, applying a preset and restoring the defaults touch every
+     * section at once, so the user is told that the shared file settings did
+     * not move.
+     *
+     * @since 2.11.6
+     *
+     * @return string Empty when the user can change every setting.
+     */
+    private function locked_file_settings_message() {
+        if ( ! Vigilante_Settings::get_locked_file_settings() ) {
+            return '';
+        }
+
+        return ' ' . __( 'The settings that end up in wp-config.php or .htaccess were left as they were.', 'vigilante' ) . ' ' . Vigilante_Settings::get_shared_files_notice();
+    }
+
+    /**
      * Print the shared-files notice for a section that cannot be edited here
      *
      * @since 2.9.8
@@ -2684,6 +2717,7 @@ class Vigilante_Admin {
                     <?php foreach ( $options['modules'] as $module => $enabled ) :
                         $label = isset( $module_labels[ $module ] ) ? $module_labels[ $module ] : ucwords( str_replace( '_', ' ', $module ) );
                         $description = isset( $module_descriptions[ $module ] ) ? $module_descriptions[ $module ] : '';
+                        $vg_module_locked = $this->main_site_files_locked() && in_array( $module, Vigilante_Settings::get_main_site_file_settings()['modules'], true );
                         ?>
                         <div class="vigilante-module-item <?php echo $enabled ? 'enabled' : 'disabled'; ?>">
                             <div class="vigilante-module-header">
@@ -2698,6 +2732,7 @@ class Vigilante_Admin {
                                            name="modules[<?php echo esc_attr( $module ); ?>]"
                                            value="1"
                                            <?php checked( $enabled ); ?>
+                                           <?php disabled( $vg_module_locked ); ?>
                                            aria-label="<?php echo esc_attr( $toggle_label ); ?>"
                                            data-module="<?php echo esc_attr( $module ); ?>">
                                     <span class="vigilante-toggle-slider"></span>
@@ -2705,6 +2740,9 @@ class Vigilante_Admin {
                             </div>
                             <?php if ( $description ) : ?>
                             <p class="vigilante-module-desc"><?php echo esc_html( $description ); ?></p>
+                            <?php endif; ?>
+                            <?php if ( $vg_module_locked ) : ?>
+                            <p class="vigilante-module-desc"><?php esc_html_e( 'On the main site of a network this module also writes files every site shares, so only a network administrator can switch it.', 'vigilante' ); ?></p>
                             <?php endif; ?>
                         </div>
                     <?php endforeach; ?>
@@ -3097,12 +3135,19 @@ class Vigilante_Admin {
                     </p>
                 </div>
 
+                <?php $vg_main_locked = $this->main_site_files_locked(); ?>
+                <?php if ( $vg_main_locked ) : ?>
+                <div class="notice notice-info inline" style="margin:10px 0 16px;padding:8px 12px;">
+                    <p style="margin:0;"><?php esc_html_e( 'On the main site of a network, blocking bad bots and bad query strings, the visitor IP detection and the two whitelists also build the .htaccess rules every site shares, so only a network administrator can change them.', 'vigilante' ); ?></p>
+                </div>
+                <?php endif; ?>
+
                 <table class="form-table">
                     <tr>
                         <th scope="row"><?php esc_html_e( 'Block Bad Query Strings', 'vigilante' ); ?></th>
                         <td>
                             <label>
-                                <input type="checkbox" name="firewall[block_bad_query_strings]" value="1" <?php checked( ! empty( $options['block_bad_query_strings'] ) ); ?>>
+                                <input type="checkbox" name="firewall[block_bad_query_strings]" value="1" <?php disabled( $vg_main_locked ); ?> <?php checked( ! empty( $options['block_bad_query_strings'] ) ); ?>>
                                 <?php esc_html_e( 'Block malicious query string patterns', 'vigilante' ); ?>
                             </label>
                         </td>
@@ -3147,7 +3192,7 @@ class Vigilante_Admin {
                         <th scope="row"><?php esc_html_e( 'Block Bad Bots', 'vigilante' ); ?></th>
                         <td>
                             <label>
-                                <input type="checkbox" name="firewall[block_bad_bots]" value="1" <?php checked( ! empty( $options['block_bad_bots'] ) ); ?>>
+                                <input type="checkbox" name="firewall[block_bad_bots]" value="1" <?php disabled( $vg_main_locked ); ?> <?php checked( ! empty( $options['block_bad_bots'] ) ); ?>>
                                 <?php esc_html_e( 'Block known malicious bots and scanners', 'vigilante' ); ?>
                             </label>
                         </td>
@@ -3278,7 +3323,7 @@ class Vigilante_Admin {
                         <th scope="row"><label for="vigilante-f-firewall-trusted-proxy-header"><?php esc_html_e( 'Visitor IP detection', 'vigilante' ); ?></label></th>
                         <td>
                             <?php $proxy_header = $options['trusted_proxy_header'] ?? ''; ?>
-                            <select id="vigilante-f-firewall-trusted-proxy-header" name="firewall[trusted_proxy_header]">
+                            <select id="vigilante-f-firewall-trusted-proxy-header" name="firewall[trusted_proxy_header]" <?php disabled( $vg_main_locked ); ?>>
                                 <option value="" <?php selected( $proxy_header, '' ); ?>><?php esc_html_e( 'Direct connection, only REMOTE_ADDR (recommended)', 'vigilante' ); ?></option>
                                 <option value="cf-connecting-ip" <?php selected( $proxy_header, 'cf-connecting-ip' ); ?>><?php esc_html_e( 'Behind Cloudflare (CF-Connecting-IP)', 'vigilante' ); ?></option>
                                 <option value="x-forwarded-for" <?php selected( $proxy_header, 'x-forwarded-for' ); ?>><?php esc_html_e( 'Behind a reverse proxy or load balancer (X-Forwarded-For)', 'vigilante' ); ?></option>
@@ -3292,7 +3337,7 @@ class Vigilante_Admin {
                     <tr>
                         <th scope="row"><label for="vigilante-f-firewall-ip-whitelist"><?php esc_html_e( 'IP Whitelist', 'vigilante' ); ?></label></th>
                         <td>
-                            <textarea id="vigilante-f-firewall-ip-whitelist" name="firewall[ip_whitelist]" rows="4" class="large-text code" placeholder="192.168.1.50&#10;192.168.1.0/24&#10;192.168.1.*"><?php echo esc_textarea( implode( "\n", $options['ip_whitelist'] ?? array() ) ); ?></textarea>
+                            <textarea id="vigilante-f-firewall-ip-whitelist" name="firewall[ip_whitelist]" <?php disabled( $vg_main_locked ); ?> rows="4" class="large-text code" placeholder="192.168.1.50&#10;192.168.1.0/24&#10;192.168.1.*"><?php echo esc_textarea( implode( "\n", $options['ip_whitelist'] ?? array() ) ); ?></textarea>
                             <p class="description">
                                 <?php esc_html_e( 'One IP per line. These IPs bypass the firewall checks, and they also reach wp-admin when the login URL is hidden, so remote managers such as MainWP or ManageWP are not turned away with a 404. The hidden login form itself stays hidden for every IP, this one included.', 'vigilante' ); ?>
                                 <br>
@@ -3333,7 +3378,7 @@ class Vigilante_Admin {
                     <tr>
                         <th scope="row"><label for="vigilante-f-firewall-ua-whitelist"><?php esc_html_e( 'User-Agent Whitelist', 'vigilante' ); ?></label></th>
                         <td>
-                            <textarea id="vigilante-f-firewall-ua-whitelist" name="firewall[ua_whitelist]" rows="4" class="large-text code"><?php echo esc_textarea( implode( "\n", $options['ua_whitelist'] ?? array() ) ); ?></textarea>
+                            <textarea id="vigilante-f-firewall-ua-whitelist" name="firewall[ua_whitelist]" <?php disabled( $vg_main_locked ); ?> rows="4" class="large-text code"><?php echo esc_textarea( implode( "\n", $options['ua_whitelist'] ?? array() ) ); ?></textarea>
                             <p class="description"><?php esc_html_e( 'One User-Agent per line. These will bypass all firewall checks. Example: ManageWP, MainWP, UptimeRobot.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
@@ -6734,6 +6779,25 @@ class Vigilante_Admin {
         // Read ONLY saved options from database (not merged with defaults)
         $saved_options = get_option( Vigilante_Settings::OPTION_NAME, array() );
 
+        // What is stored before this request changes anything: the shared file
+        // settings this user may not change are put back from here (2.11.6).
+        $stored_options = $saved_options;
+        $locked         = Vigilante_Settings::get_locked_file_settings();
+
+        if ( isset( $locked[ $section ] ) && true === $locked[ $section ] ) {
+            wp_send_json_error( Vigilante_Settings::get_shared_files_notice() );
+        }
+
+        // A module switch is a single key, so refusing says more than a success
+        // that changed nothing, and the dashboard puts the toggle back.
+        if ( 'modules' === $section && isset( $locked['modules'], $data['modules'] ) && is_array( $locked['modules'] ) && is_array( $data['modules'] ) ) {
+            foreach ( array_keys( $data['modules'] ) as $vg_module ) {
+                if ( in_array( sanitize_key( $vg_module ), $locked['modules'], true ) ) {
+                    wp_send_json_error( Vigilante_Settings::get_shared_files_notice() );
+                }
+            }
+        }
+
         $rejected_ips = array();
 
         // Handle modules
@@ -6774,6 +6838,8 @@ class Vigilante_Admin {
         // Clear cache before saving
         wp_cache_delete( Vigilante_Settings::OPTION_NAME, 'options' );
         
+        $saved_options = Vigilante_Settings::keep_locked_file_settings( $saved_options, $stored_options );
+
         // Save to database
         update_option( Vigilante_Settings::OPTION_NAME, $saved_options );
         
@@ -7216,6 +7282,7 @@ class Vigilante_Admin {
         }
 
         // Save
+        $merged = Vigilante_Settings::keep_locked_file_settings( $merged, get_option( Vigilante_Settings::OPTION_NAME, array() ) );
         update_option( Vigilante_Settings::OPTION_NAME, $merged );
         $this->settings->clear_cache();
 
@@ -7240,7 +7307,7 @@ class Vigilante_Admin {
             wp_schedule_single_event( time() + 5, 'vigilante_under_attack_post_scan' );
         }
 
-        wp_send_json_success( __( 'Settings imported successfully.', 'vigilante' ) );
+        wp_send_json_success( __( 'Settings imported successfully.', 'vigilante' ) . $this->locked_file_settings_message() );
     }
 
     /**
@@ -7345,7 +7412,9 @@ class Vigilante_Admin {
         
         // Handle reset to defaults
         if ( 'reset' === $preset ) {
-            $defaults = Vigilante_Settings::get_defaults_preserving_user_data( get_option( Vigilante_Settings::OPTION_NAME, array() ) );
+            $stored_options = get_option( Vigilante_Settings::OPTION_NAME, array() );
+            $defaults       = Vigilante_Settings::get_defaults_preserving_user_data( $stored_options );
+            $defaults       = Vigilante_Settings::keep_locked_file_settings( $defaults, $stored_options );
             update_option( Vigilante_Settings::OPTION_NAME, $defaults );
             $this->settings->clear_cache();
             
@@ -7355,7 +7424,7 @@ class Vigilante_Admin {
             // Apply file changes after reset
             $this->apply_all_file_changes( $defaults );
             
-            wp_send_json_success( __( 'Settings reset to defaults.', 'vigilante' ) );
+            wp_send_json_success( __( 'Settings reset to defaults.', 'vigilante' ) . $this->locked_file_settings_message() );
             return;
         }
         
@@ -7383,6 +7452,7 @@ class Vigilante_Admin {
         $current = Vigilante_Settings::merge_preset( $this->settings->get_default_options(), $current );
 
         $merged = Vigilante_Settings::merge_preset( $current, $preset_options );
+        $merged = Vigilante_Settings::keep_locked_file_settings( $merged, get_option( Vigilante_Settings::OPTION_NAME, array() ) );
 
         update_option( Vigilante_Settings::OPTION_NAME, $merged );
         $this->settings->clear_cache();
@@ -7393,7 +7463,7 @@ class Vigilante_Admin {
         // Apply file changes after preset
         $this->apply_all_file_changes( $merged );
 
-        wp_send_json_success( __( 'Preset applied successfully.', 'vigilante' ) );
+        wp_send_json_success( __( 'Preset applied successfully.', 'vigilante' ) . $this->locked_file_settings_message() );
     }
 
     /**
@@ -7430,25 +7500,17 @@ class Vigilante_Admin {
          * the main site's business. Resetting the local copy of those would only
          * make this screen disagree with the file, so they are carried over
          * untouched, and a section that is nothing but shared settings is not
-         * reset at all.
+         * reset at all. On the main site, a user without network rights keeps
+         * the ones the shared files are built from as well (2.11.6).
          */
-        if ( ! Vigilante_Settings::can_write_shared_files() ) {
-            $shared = Vigilante_Settings::get_shared_file_settings();
+        $locked = Vigilante_Settings::get_locked_file_settings();
 
-            if ( isset( $shared[ $section ] ) ) {
-                if ( true === $shared[ $section ] ) {
-                    wp_send_json_error( Vigilante_Settings::get_shared_files_notice() );
-                }
-
-                foreach ( $shared[ $section ] as $shared_key ) {
-                    if ( array_key_exists( $shared_key, (array) $current_options[ $section ] ) ) {
-                        $new_values[ $shared_key ] = $current_options[ $section ][ $shared_key ];
-                    }
-                }
-            }
+        if ( isset( $locked[ $section ] ) && true === $locked[ $section ] ) {
+            wp_send_json_error( Vigilante_Settings::get_shared_files_notice() );
         }
 
         $current_options[ $section ] = $new_values;
+        $current_options             = Vigilante_Settings::keep_locked_file_settings( $current_options, get_option( Vigilante_Settings::OPTION_NAME, array() ) );
 
         // Save
         update_option( Vigilante_Settings::OPTION_NAME, $current_options );

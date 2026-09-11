@@ -3,7 +3,7 @@
  * Plugin Name: Vigilant - 100% Free Security Suite: Firewall, 2FA, Login, Headers, Scanner…
  * Plugin URI: https://servicios.ayudawp.com
  * Description: Complete security solution for WordPress. Firewall, 2FA, security headers, login protection, file integrity monitoring, activity logging and more.
- * Version: 2.11.5
+ * Version: 2.11.7
  * Author: Fernando Tellado
  * Author URI: https://ayudawp.com
  * Text Domain: vigilante
@@ -24,7 +24,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Plugin constants
  */
-define( 'VIGILANTE_VERSION', '2.11.5' );
+define( 'VIGILANTE_VERSION', '2.11.7' );
 define( 'VIGILANTE_PLUGIN_FILE', __FILE__ );
 define( 'VIGILANTE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'VIGILANTE_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -258,6 +258,11 @@ final class Vigilante_Main {
             Vigilante_Backup_Manager::cleanup_legacy_files();
             update_option( 'vigilante_legacy_backups_cleaned', 1, false );
         }
+
+        // Once (2.11.6): the copies of wp-config.php, .htaccess and robots.txt
+        // that earlier versions kept in the options table, on this site and, on
+        // a network, on every site of it.
+        Vigilante_Backup_Manager::maybe_purge_stored_copies();
 
         // One-time migration (2.9.0): add '.css' to File Integrity's excluded
         // extensions on existing installs. Stylesheets are rewritten so often by
@@ -572,22 +577,27 @@ final class Vigilante_Main {
          * stays out of the way. Treating it as a failure would arm the one hour
          * backoff for something that is already being handled.
          */
-        $locked = false;
+        $locked     = false;
+        $incomplete = false;
 
         if ( $needs_protection_block ) {
             require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-protection.php';
-            $result  = ( new Vigilante_Htaccess_Protection( $this->settings ) )->apply_rules( true );
-            $locked  = $locked || ( is_wp_error( $result ) && 'locked' === $result->get_error_code() );
-            $failed  = $failed || ( is_wp_error( $result ) && 'locked' !== $result->get_error_code() );
-            $rewrote = true;
+            $result     = ( new Vigilante_Htaccess_Protection( $this->settings ) )->apply_rules( true );
+            $code       = is_wp_error( $result ) ? $result->get_error_code() : ( true === $result ? '' : 'unexpected_result' );
+            $locked     = $locked || 'locked' === $code;
+            $incomplete = $incomplete || 'block_incomplete' === $code;
+            $failed     = $failed || ( '' !== $code && 'locked' !== $code && 'block_incomplete' !== $code );
+            $rewrote    = true;
         }
 
         if ( ! $locked && ! empty( $options['modules']['security_headers'] ) ) {
             require_once VIGILANTE_INCLUDES_DIR . 'class-security-headers.php';
-            $result  = ( new Vigilante_Security_Headers( $this->settings ) )->apply_rules( true );
-            $locked  = $locked || ( is_wp_error( $result ) && 'locked' === $result->get_error_code() );
-            $failed  = $failed || ( is_wp_error( $result ) && 'locked' !== $result->get_error_code() );
-            $rewrote = true;
+            $result     = ( new Vigilante_Security_Headers( $this->settings ) )->apply_rules( true );
+            $code       = is_wp_error( $result ) ? $result->get_error_code() : ( true === $result ? '' : 'unexpected_result' );
+            $locked     = $locked || 'locked' === $code;
+            $incomplete = $incomplete || 'block_incomplete' === $code;
+            $failed     = $failed || ( '' !== $code && 'locked' !== $code && 'block_incomplete' !== $code );
+            $rewrote    = true;
         }
 
         if ( $locked ) {
@@ -613,9 +623,26 @@ final class Vigilante_Main {
             return;
         }
 
+        /*
+         * A block with a BEGIN line and no END is not going to mend itself, so
+         * retrying every hour would only repeat the refusal: it is recorded once
+         * for this version, with what to do about it, and the job is marked done.
+         * Saving the Firewall or Headers tab after fixing the file writes the
+         * rules again.
+         */
+        if ( $incomplete && $this->activity_log ) {
+            $this->activity_log->log(
+                'system',
+                'server_rules_block_incomplete',
+                __( 'The .htaccess rules were not rewritten after the update because a Vigilant block in that file has a BEGIN line without its END, and rewriting it would have cut everything below it. Remove the broken block by hand, then save the Firewall or Headers tab.', 'vigilante' ),
+                array( 'version' => VIGILANTE_VERSION ),
+                'warning'
+            );
+        }
+
         $this->mark_server_files_synced();
 
-        if ( $rewrote && $this->activity_log ) {
+        if ( $rewrote && ! $incomplete && $this->activity_log ) {
             $this->activity_log->log(
                 'system',
                 'server_rules_refreshed',
@@ -683,8 +710,11 @@ final class Vigilante_Main {
         $this->database->cleanup_expired_trusted_devices();
 
         // Remove sensitive files (readme.html, license.txt, licencia.txt)
-        // WordPress core updates recreate these files, so we clean them daily
-        $advanced = $this->settings->get_section( 'advanced' );
+        // WordPress core updates recreate these files, so we clean them daily.
+        // They sit in the root every site of a network shares, so only the main
+        // site removes them, from its own settings; until 2.11.6 the daily
+        // maintenance of any site did.
+        $advanced = Vigilante_Settings::owns_shared_files() ? $this->settings->get_section( 'advanced' ) : array();
         if ( ! empty( $advanced['remove_readme'] ) ) {
             $readme_path = ABSPATH . 'readme.html';
             if ( file_exists( $readme_path ) ) {
@@ -826,14 +856,17 @@ register_activation_hook( __FILE__, 'vigilante_activate' );
 
 /**
  * Plugin deactivation hook
+ *
+ * @param bool $network_wide Whether core is deactivating the plugin for the whole network.
  */
-function vigilante_deactivate() {
+function vigilante_deactivate( $network_wide = false ) {
     require_once VIGILANTE_INCLUDES_DIR . 'class-database.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-settings.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-backup-manager.php';
+    require_once VIGILANTE_INCLUDES_DIR . 'class-wpconfig-security.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-deactivator.php';
 
-    Vigilante_Deactivator::deactivate();
+    Vigilante_Deactivator::deactivate( (bool) $network_wide );
 }
 register_deactivation_hook( __FILE__, 'vigilante_deactivate' );
 

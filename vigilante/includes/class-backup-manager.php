@@ -2,9 +2,9 @@
 /**
  * Backup Manager Class
  *
- * Handles backup and restoration of critical files. Backups are stored in
- * private database options (autoload off), never as files under the web root,
- * so a copy of wp-config.php or .htaccess can never be served over HTTP.
+ * Builds the downloadable archive of the configuration files, and cleans up
+ * the copies of those files that earlier versions kept: on disk under the web
+ * root until 2.7.0, and in the options table until 2.11.6.
  *
  * @package Vigilante
  */
@@ -17,9 +17,34 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Class Vigilante_Backup_Manager
  *
- * Manages file backups for security modifications.
+ * Configuration file archive and cleanup of stored copies.
  */
 class Vigilante_Backup_Manager {
+
+    /**
+     * Option recording that the stored copies are gone
+     *
+     * 1 once this site is clean, 2 once the walk over the network has finished
+     * as well, so the site stops asking the network. Autoloaded, because it is
+     * read on every request.
+     *
+     * @since 2.11.6
+     */
+    const COPIES_PURGED_OPTION = 'vigilante_config_copies_purged';
+
+    /**
+     * Network option holding the last site the walk cleaned, or 'done'
+     *
+     * @since 2.11.6
+     */
+    const COPIES_SWEEP_OPTION = 'vigilante_config_copies_sweep';
+
+    /**
+     * Sites the walk cleans per request
+     *
+     * @since 2.11.6
+     */
+    const COPIES_SWEEP_BATCH = 50;
 
     /**
      * Legacy on-disk backup directory (kept only to clean it up on upgrade).
@@ -29,14 +54,7 @@ class Vigilante_Backup_Manager {
     private $backup_dir;
 
     /**
-     * Maximum number of backups to keep
-     *
-     * @var int
-     */
-    private $max_backups = 5;
-
-    /**
-     * Files to backup
+     * Configuration files the archive carries
      *
      * @var array
      */
@@ -71,219 +89,88 @@ class Vigilante_Backup_Manager {
     }
 
     /**
-     * Create backups of all important files
+     * Delete the copies of the configuration files kept in this site's options
      *
-     * The content is stored in the database, never copied to a file under the
-     * web root.
+     * Until 2.11.6 activating Vigilant copied wp-config.php, .htaccess and
+     * robots.txt into vigilante_backup_info_<date>, up to five of them, and
+     * writing the constants block kept one more copy of wp-config.php in
+     * vigilante_wpconfig_backup. Nothing read them back: the method that
+     * restored the files had no caller. wp-config.php carries the database
+     * password and the authentication keys and salts, so every copy put them in
+     * the options table, within reach of anyone who can read the database or a
+     * dump of it. 2.7.0 moved the copies there from files under the web root,
+     * which changed where they lived and not whether they should exist.
      *
-     * @return true|WP_Error True on success, WP_Error on failure.
+     * @since 2.11.6
      */
-    public function create_backups() {
-        $timestamp   = gmdate( 'Y-m-d_H-i-s' );
-        $backup_info = array();
-        $errors      = array();
-
-        foreach ( $this->backup_files as $key => $file ) {
-            if ( file_exists( $file['source'] ) ) {
-                // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_get_contents -- reading a known local config file to store it in the DB, not a filesystem op on user input.
-                $content = file_get_contents( $file['source'] );
-
-                if ( false !== $content ) {
-                    $backup_info[ $key ] = array(
-                        'content' => $content,
-                        'hash'    => md5( $content ),
-                        'size'    => strlen( $content ),
-                        'exists'  => true,
-                        'time'    => time(),
-                    );
-                } else {
-                    $errors[] = sprintf(
-                        /* translators: %s: File name */
-                        __( 'Failed to backup %s', 'vigilante' ),
-                        basename( $file['source'] )
-                    );
-                }
-            } else {
-                // Mark as non-existent (important for restoration).
-                $backup_info[ $key ] = array(
-                    'content' => '',
-                    'exists'  => false,
-                    'time'    => time(),
-                );
-            }
-        }
-
-        if ( ! empty( $errors ) ) {
-            return new WP_Error( 'backup_partial', implode( ', ', $errors ) );
-        }
-
-        // Store metadata + content in non-autoloaded options (may be large and
-        // is only needed on demand).
-        $backup_info['timestamp'] = $timestamp;
-        update_option( 'vigilante_backup_timestamp', $timestamp, false );
-        update_option( 'vigilante_backup_info_' . $timestamp, $backup_info, false );
-
-        $this->cleanup_old_backups();
-
-        return true;
-    }
-
-    /**
-     * Restore files from backup
-     *
-     * @param string $timestamp Optional specific timestamp to restore.
-     * @return true|WP_Error
-     */
-    public function restore_backups( $timestamp = '' ) {
-        if ( empty( $timestamp ) ) {
-            $timestamp = get_option( 'vigilante_backup_timestamp' );
-        }
-
-        if ( empty( $timestamp ) ) {
-            return new WP_Error(
-                'no_backup',
-                __( 'No backup found to restore.', 'vigilante' )
-            );
-        }
-
-        $backup_info = get_option( 'vigilante_backup_info_' . $timestamp );
-
-        if ( empty( $backup_info ) ) {
-            return new WP_Error(
-                'backup_info_missing',
-                __( 'Backup information not found.', 'vigilante' )
-            );
-        }
-
-        $errors = array();
-
-        foreach ( $this->backup_files as $key => $file ) {
-            if ( ! isset( $backup_info[ $key ] ) ) {
-                continue;
-            }
-
-            $info = $backup_info[ $key ];
-
-            // If the file did not exist originally, delete it.
-            if ( isset( $info['exists'] ) && false === $info['exists'] ) {
-                if ( file_exists( $file['source'] ) ) {
-                    wp_delete_file( $file['source'] );
-                }
-                continue;
-            }
-
-            if ( ! isset( $info['content'] ) || '' === $info['content'] ) {
-                continue;
-            }
-
-            // Verify integrity against the stored hash.
-            if ( isset( $info['hash'] ) && md5( $info['content'] ) !== $info['hash'] ) {
-                $errors[] = sprintf(
-                    /* translators: %s: File name */
-                    __( 'Backup integrity check failed for %s', 'vigilante' ),
-                    $file['name']
-                );
-                continue;
-            }
-
-            // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- restoring a known local config file from the DB backup.
-            if ( false === file_put_contents( $file['source'], $info['content'] ) ) {
-                $errors[] = sprintf(
-                    /* translators: %s: File name */
-                    __( 'Failed to restore %s', 'vigilante' ),
-                    basename( $file['source'] )
-                );
-            }
-        }
-
-        if ( ! empty( $errors ) ) {
-            return new WP_Error( 'restore_partial', implode( ', ', $errors ) );
-        }
-
-        return true;
-    }
-
-    /**
-     * Cleanup old backups keeping only the most recent
-     */
-    private function cleanup_old_backups() {
-        $settings        = new Vigilante_Settings();
-        $backup_settings = $settings->get_section( 'backup' );
-        // The default is stored as keep_backups. Until 2.9.9 this read max_backups,
-        // a key nothing ever wrote, so the configured value was ignored and the
-        // hardcoded 5 always won.
-        $this->max_backups = isset( $backup_settings['keep_backups'] ) ? absint( $backup_settings['keep_backups'] ) : 5;
-
+    public static function purge_stored_copies() {
         global $wpdb;
 
-        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- one-off maintenance scan of our own option names.
-        $backup_options = $wpdb->get_col(
-            "SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE 'vigilante_backup_info_%' ORDER BY option_name DESC"
-        );
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- one-off cleanup of our own dated option names, which the options API cannot list.
+        $names = $wpdb->get_col( "SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE 'vigilante\\_backup\\_info\\_%'" );
 
-        if ( count( $backup_options ) > $this->max_backups ) {
-            $to_delete = array_slice( $backup_options, $this->max_backups );
-
-            foreach ( $to_delete as $option_name ) {
-                $timestamp = str_replace( 'vigilante_backup_info_', '', $option_name );
-                $this->delete_backup( $timestamp );
-            }
+        foreach ( (array) $names as $name ) {
+            delete_option( $name );
         }
+
+        delete_option( 'vigilante_backup_timestamp' );
+        delete_option( 'vigilante_wpconfig_backup' );
     }
 
     /**
-     * Delete a specific backup
+     * Run purge_stored_copies() once on this site, and once over the network
      *
-     * @param string $timestamp Backup timestamp.
-     * @return bool
+     * The walk exists for the sites where Vigilant no longer runs: a copy made
+     * by a per-site activation stays in that site's options after the plugin is
+     * deactivated there, and nothing on that site would ever clean it. It
+     * advances one batch of sites per request, from whichever site runs
+     * Vigilant, remembers the last site it cleaned, and only visits this
+     * network.
+     *
+     * @since 2.11.6
      */
-    public function delete_backup( $timestamp ) {
-        delete_option( 'vigilante_backup_info_' . $timestamp );
+    public static function maybe_purge_stored_copies() {
+        $state = (int) get_option( self::COPIES_PURGED_OPTION, 0 );
 
-        $current_timestamp = get_option( 'vigilante_backup_timestamp' );
-        if ( $current_timestamp === $timestamp ) {
-            delete_option( 'vigilante_backup_timestamp' );
+        if ( $state >= 2 ) {
+            return;
         }
 
-        return true;
-    }
+        if ( $state < 1 ) {
+            self::purge_stored_copies();
+        }
 
-    /**
-     * Get list of available backups
-     *
-     * @return array
-     */
-    public function get_available_backups() {
-        global $wpdb;
+        if ( ! is_multisite() ) {
+            update_option( self::COPIES_PURGED_OPTION, 2, true );
+            return;
+        }
 
-        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- listing our own option names.
-        $backup_options = $wpdb->get_col(
-            "SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE 'vigilante_backup_info_%' ORDER BY option_name DESC"
-        );
+        $sweep = get_site_option( self::COPIES_SWEEP_OPTION, 0 );
 
-        $backups = array();
+        if ( 'done' !== $sweep ) {
+            global $wpdb;
 
-        foreach ( $backup_options as $option_name ) {
-            $timestamp = str_replace( 'vigilante_backup_info_', '', $option_name );
-            $info      = get_option( $option_name );
+            // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- the walk needs the sites after the last one it cleaned, in id order, and get_sites() cannot ask for ids greater than a value.
+            $site_ids = $wpdb->get_col(
+                $wpdb->prepare(
+                    "SELECT blog_id FROM {$wpdb->blogs} WHERE site_id = %d AND blog_id > %d ORDER BY blog_id ASC LIMIT %d",
+                    get_current_network_id(),
+                    (int) $sweep,
+                    self::COPIES_SWEEP_BATCH
+                )
+            );
 
-            if ( ! empty( $info ) ) {
-                $backups[] = array(
-                    'timestamp' => $timestamp,
-                    'date'      => date_i18n( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), strtotime( str_replace( '_', ' ', $timestamp ) ) ),
-                    'files'     => count(
-                        array_filter(
-                            $info,
-                            function ( $item ) {
-                                return is_array( $item ) && ! empty( $item['exists'] );
-                            }
-                        )
-                    ),
-                );
+            foreach ( $site_ids as $site_id ) {
+                switch_to_blog( (int) $site_id );
+                self::purge_stored_copies();
+                restore_current_blog();
             }
+
+            $sweep = count( $site_ids ) < self::COPIES_SWEEP_BATCH ? 'done' : (int) end( $site_ids );
+            update_site_option( self::COPIES_SWEEP_OPTION, $sweep );
         }
 
-        return $backups;
+        update_option( self::COPIES_PURGED_OPTION, 'done' === $sweep ? 2 : 1, true );
     }
 
     /**
@@ -296,25 +183,6 @@ class Vigilante_Backup_Manager {
      */
     public function get_backup_dir() {
         return $this->backup_dir;
-    }
-
-    /**
-     * Check if backups exist
-     *
-     * @return bool
-     */
-    public function has_backups() {
-        $timestamp = get_option( 'vigilante_backup_timestamp' );
-        return ! empty( $timestamp );
-    }
-
-    /**
-     * Get last backup timestamp
-     *
-     * @return string|false
-     */
-    public function get_last_backup_timestamp() {
-        return get_option( 'vigilante_backup_timestamp' );
     }
 
     /**
@@ -382,76 +250,6 @@ class Vigilante_Backup_Manager {
         readfile( $zip_path );
         wp_delete_file( $zip_path );
         exit;
-    }
-
-    /**
-     * Verify backup integrity
-     *
-     * @param string $timestamp Backup timestamp.
-     * @return array Verification results.
-     */
-    public function verify_backup( $timestamp ) {
-        $backup_info = get_option( 'vigilante_backup_info_' . $timestamp );
-
-        if ( empty( $backup_info ) ) {
-            return array(
-                'valid'  => false,
-                'errors' => array( __( 'Backup information not found.', 'vigilante' ) ),
-            );
-        }
-
-        $results = array(
-            'valid'  => true,
-            'errors' => array(),
-            'files'  => array(),
-        );
-
-        foreach ( $this->backup_files as $key => $file ) {
-            if ( ! isset( $backup_info[ $key ] ) ) {
-                continue;
-            }
-
-            $info = $backup_info[ $key ];
-
-            // Skip non-existent files.
-            if ( isset( $info['exists'] ) && false === $info['exists'] ) {
-                $results['files'][ $key ] = array(
-                    'status' => 'skipped',
-                    'reason' => __( 'File did not exist', 'vigilante' ),
-                );
-                continue;
-            }
-
-            if ( ! isset( $info['content'] ) ) {
-                $results['valid']         = false;
-                $results['errors'][]      = sprintf(
-                    /* translators: %s: File name */
-                    __( 'Backup content missing: %s', 'vigilante' ),
-                    $file['name']
-                );
-                $results['files'][ $key ] = array( 'status' => 'missing' );
-                continue;
-            }
-
-            // Verify hash.
-            if ( isset( $info['hash'] ) && md5( $info['content'] ) !== $info['hash'] ) {
-                $results['valid']         = false;
-                $results['errors'][]      = sprintf(
-                    /* translators: %s: File name */
-                    __( 'Backup corrupted: %s', 'vigilante' ),
-                    $file['name']
-                );
-                $results['files'][ $key ] = array( 'status' => 'corrupted' );
-                continue;
-            }
-
-            $results['files'][ $key ] = array(
-                'status' => 'valid',
-                'size'   => isset( $info['size'] ) ? (int) $info['size'] : strlen( $info['content'] ),
-            );
-        }
-
-        return $results;
     }
 
     /**

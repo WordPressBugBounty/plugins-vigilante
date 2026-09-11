@@ -73,9 +73,6 @@ class Vigilante_Activator {
             }
         }
 
-        // Create backup of current files FIRST (before any modifications)
-        self::create_activation_backup( $settings );
-
         // Apply htaccess protection (part of firewall module)
         if ( $settings->is_module_enabled( 'firewall' ) ) {
             self::apply_htaccess_protection( $settings );
@@ -227,23 +224,6 @@ class Vigilante_Activator {
     }
 
     /**
-     * Create backup of important files
-     *
-     * @param Vigilante_Settings $settings Settings instance.
-     */
-    private static function create_activation_backup( $settings ) {
-        require_once VIGILANTE_INCLUDES_DIR . 'class-backup-manager.php';
-        
-        $backup_manager = new Vigilante_Backup_Manager();
-        $result = $backup_manager->create_backups();
-
-        if ( is_wp_error( $result ) ) {
-            // Store error for admin notice
-            set_transient( 'vigilante_backup_error', $result->get_error_message(), 60 );
-        }
-    }
-
-    /**
      * Apply htaccess protection
      *
      * @param Vigilante_Settings $settings Settings instance.
@@ -335,6 +315,12 @@ class Vigilante_Activator {
      * @param Vigilante_Settings $settings Settings instance.
      */
     private static function remove_sensitive_files( $settings ) {
+        // They sit in the root every site of a network shares. Until 2.11.6 the
+        // activation on any site removed them.
+        if ( ! Vigilante_Settings::can_write_shared_files() ) {
+            return;
+        }
+
         $advanced = $settings->get_section( 'advanced' );
 
         // Remove readme.html

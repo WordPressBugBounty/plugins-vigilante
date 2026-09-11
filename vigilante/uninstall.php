@@ -70,6 +70,7 @@ function vigilante_uninstall() {
         delete_site_option( 'vigilante_baseline_sweep' );
         delete_site_option( 'vigilante_owned_blocks' );
         delete_site_option( 'vigilante_owned_blocks_claim' );
+        delete_site_option( 'vigilante_config_copies_sweep' );
     }
 
     // Remove backup directory. WP_CONTENT_DIR is shared by the whole network,
@@ -186,6 +187,7 @@ function vigilante_uninstall_site() {
         // the options table long after the plugin is gone.
         'vigilante_htaccess_backup',
         'vigilante_wpconfig_backup',
+        'vigilante_config_copies_purged',
         'vigilante_plugin_status_state',
         'vigilante_plugin_status_last_check',
         'vigilante_ignored_closed_plugins',

@@ -284,6 +284,7 @@ class Vigilante_Under_Attack {
         $previous_preset  = $current_status['previous_preset'] ?? null;
 
         if ( is_array( $previous_options ) && ! empty( $previous_options ) ) {
+            $previous_options = $this->keep_file_settings_changed_meanwhile( $previous_options, $current_status );
             update_option( Vigilante_Settings::OPTION_NAME, $previous_options );
         }
         if ( null !== $previous_preset ) {
@@ -463,12 +464,153 @@ class Vigilante_Under_Attack {
         $hardened = Vigilante_Settings::merge_preset( $base_options, $maximum_preset );
         $hardened = Vigilante_Settings::merge_preset( $hardened, $ua_overrides );
 
+        // The hardening is for this site. On the main site of a network, a user
+        // without network rights does not get to rewrite the rules every site
+        // shares with it (2.11.6). The restore does not use this check: it runs
+        // from whichever request switches the mode off or notices that it
+        // expired, often with no user, and deactivate() sorts out instead what
+        // changed while the mode was on.
+        $hardened = Vigilante_Settings::keep_locked_file_settings( $hardened, $base_options );
+
         update_option( Vigilante_Settings::OPTION_NAME, $hardened );
         $this->settings->clear_cache();
+        $this->remember_applied_file_settings();
 
         // Drop any lingering active preset marker — under-attack is not a preset
         // and the previous preset is already saved in our own status option.
         delete_option( 'vigilante_active_preset' );
+    }
+
+    /**
+     * Record what the hardening left in the settings the shared files are built from
+     *
+     * deactivate() compares them with what is stored when the mode ends, to tell
+     * a value the mode applied from one somebody changed while it was on.
+     *
+     * @since 2.11.7
+     */
+    private function remember_applied_file_settings() {
+        $status = get_option( self::OPTION_NAME, array() );
+
+        if ( ! is_array( $status ) || empty( $status['active'] ) ) {
+            return;
+        }
+
+        $status['applied_file_settings'] = self::file_settings_values( get_option( Vigilante_Settings::OPTION_NAME, array() ) );
+        update_option( self::OPTION_NAME, $status );
+        $this->status = null;
+    }
+
+    /**
+     * Keep the shared file settings that somebody changed while the mode was on
+     *
+     * The snapshot is what the site had before the mode, and putting all of it
+     * back also undid what a network administrator changed meanwhile in the
+     * settings the shared wp-config.php and .htaccess are built from. Any
+     * administrator of the main site can switch the mode off, so one without
+     * network rights could roll those changes back, and the next rewrite of the
+     * files would publish the old values (wordpress.org automated review of
+     * 2.11.6).
+     *
+     * Asking who switches the mode off, as the saving code does, is not enough
+     * here: the mode also ends on the first request after it expires, usually
+     * with no user, and there that check would keep the hardened values for
+     * good. So each of those settings is compared with what the mode applied:
+     * the unchanged ones go back to the snapshot and the changed ones keep their
+     * current value. A mode switched on by a version that kept no record falls
+     * back to the check.
+     *
+     * @since 2.11.7
+     *
+     * @param array $previous Snapshot taken when the mode was switched on.
+     * @param array $status   Mode status, with the record of what it applied.
+     * @return array
+     */
+    private function keep_file_settings_changed_meanwhile( $previous, $status ) {
+        if ( ! is_multisite() ) {
+            return $previous;
+        }
+
+        $current = get_option( Vigilante_Settings::OPTION_NAME, array() );
+        $current = is_array( $current ) ? $current : array();
+
+        if ( ! isset( $status['applied_file_settings'] ) || ! is_array( $status['applied_file_settings'] ) ) {
+            return Vigilante_Settings::keep_locked_file_settings( $previous, $current );
+        }
+
+        $applied = $status['applied_file_settings'];
+
+        foreach ( self::file_settings_values( $current ) as $path => $now ) {
+            if ( ! array_key_exists( $path, $applied ) || $now === $applied[ $path ] ) {
+                continue;
+            }
+
+            $parts   = explode( '.', $path, 2 );
+            $section = $parts[0];
+
+            if ( ! isset( $parts[1] ) ) {
+                if ( $now['set'] ) {
+                    $previous[ $section ] = $now['value'];
+                } else {
+                    unset( $previous[ $section ] );
+                }
+                continue;
+            }
+
+            if ( $now['set'] ) {
+                if ( ! isset( $previous[ $section ] ) || ! is_array( $previous[ $section ] ) ) {
+                    $previous[ $section ] = array();
+                }
+                $previous[ $section ][ $parts[1] ] = $now['value'];
+            } elseif ( isset( $previous[ $section ] ) && is_array( $previous[ $section ] ) ) {
+                unset( $previous[ $section ][ $parts[1] ] );
+            }
+        }
+
+        return $previous;
+    }
+
+    /**
+     * The value of every setting the shared files are built from, by path
+     *
+     * 'section' for a section shared whole, 'section.key' for a single key. Each
+     * entry says whether the setting is stored and what it holds, so an absent
+     * key and a stored one never compare as equal.
+     *
+     * @since 2.11.7
+     *
+     * @param array $options Configuration.
+     * @return array
+     */
+    private static function file_settings_values( $options ) {
+        $options = is_array( $options ) ? $options : array();
+        $keys    = Vigilante_Settings::get_shared_file_settings();
+
+        foreach ( Vigilante_Settings::get_main_site_file_settings() as $section => $list ) {
+            if ( ! isset( $keys[ $section ] ) ) {
+                $keys[ $section ] = $list;
+            } elseif ( is_array( $keys[ $section ] ) ) {
+                $keys[ $section ] = array_values( array_unique( array_merge( $keys[ $section ], $list ) ) );
+            }
+        }
+
+        $values = array();
+
+        foreach ( $keys as $section => $list ) {
+            $stored = ( isset( $options[ $section ] ) && is_array( $options[ $section ] ) ) ? $options[ $section ] : null;
+
+            if ( true === $list ) {
+                $values[ $section ] = array( 'set' => null !== $stored, 'value' => $stored );
+                continue;
+            }
+
+            foreach ( $list as $key ) {
+                $set = null !== $stored && array_key_exists( $key, $stored );
+                $values[ $section . '.' . $key ] = array( 'set' => $set, 'value' => $set ? $stored[ $key ] : null );
+            }
+        }
+
+        return $values;
     }
 
     // =========================================================================

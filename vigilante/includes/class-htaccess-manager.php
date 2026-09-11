@@ -145,6 +145,21 @@ class Vigilante_Htaccess_Manager {
                 $original = '';
             }
 
+            /*
+             * A block that has lost a marker would take the rest of the file with
+             * it. The other known blocks are asked too: validate_content() below
+             * refuses any result where one of them is unmatched, and saying why
+             * here keeps that refusal from reading as a write failure worth
+             * retrying every hour.
+             */
+            $whole = $this->blocks_are_whole( $original, $marker_start, $marker_end );
+            foreach ( $this->known_blocks as $known_start => $known_end ) {
+                $whole = $whole && $this->blocks_are_whole( $original, $known_start, $known_end );
+            }
+            if ( ! $whole ) {
+                return new WP_Error( 'block_incomplete', __( 'A Vigilant block in .htaccess is missing one of its markers, so the file was left as it is.', 'vigilante' ) );
+            }
+
             // Create backup before modification
             if ( ! empty( $original ) ) {
                 $this->create_backup( $original );
@@ -300,6 +315,11 @@ class Vigilante_Htaccess_Manager {
                 return true; // Block doesn't exist, nothing to do
             }
 
+            // A block that has lost a marker would take the rest of the file with it.
+            if ( ! $this->blocks_are_whole( $content, $marker_start, $marker_end ) ) {
+                return new WP_Error( 'block_incomplete', __( 'A Vigilant block in .htaccess is missing one of its markers, so the file was left as it is.', 'vigilante' ) );
+            }
+
             // Create backup before modification
             $this->create_backup( $content );
 
@@ -340,6 +360,45 @@ class Vigilante_Htaccess_Manager {
             return false;
         }
         return strpos( $content, $marker_start ) !== false;
+    }
+
+    /**
+     * Whether no start marker of a block is left without its end
+     *
+     * The removal below works line by line and keeps dropping lines from a start
+     * marker until it meets an end marker, so a start whose end is missing, or a
+     * second start before the end, takes everything after it. Neither existing
+     * check catches that: remove_block() only looks for "# BEGIN WordPress",
+     * which the rules Network Setup hands out do not carry, and the
+     * validate_content() of add_block() only compares marker pairs, which still
+     * match once both WordPress markers have been cut away. An end marker with
+     * no start before it is harmless to the removal, which just drops that
+     * line, so it does not count against the content.
+     *
+     * @since 2.11.6
+     *
+     * @param string $content      Content to check.
+     * @param string $marker_start Start marker.
+     * @param string $marker_end   End marker.
+     * @return bool
+     */
+    private function blocks_are_whole( $content, $marker_start, $marker_end ) {
+        $inside = false;
+
+        foreach ( explode( "\n", $content ) as $line ) {
+            $line = trim( $line );
+
+            if ( $line === $marker_start ) {
+                if ( $inside ) {
+                    return false;
+                }
+                $inside = true;
+            } elseif ( $line === $marker_end ) {
+                $inside = false;
+            }
+        }
+
+        return ! $inside;
     }
 
     /**
@@ -544,8 +603,18 @@ class Vigilante_Htaccess_Manager {
             }
         }
 
+        /*
+         * Keep the permissions the file already has. put_contents() always sets
+         * a mode, and FS_CHMOD_FILE is "permissions of index.php | 0644", so
+         * until 2.11.6 every write left a .htaccess kept at 0640 at 0644 or
+         * wider. A mode that cannot be read falls back to the old one rather
+         * than to 0, which would lock the server out of the file.
+         */
+        $perms = file_exists( $this->htaccess_path ) ? fileperms( $this->htaccess_path ) : false;
+        $mode  = ( false !== $perms && ( $perms & 0777 ) ) ? ( $perms & 0777 ) : FS_CHMOD_FILE;
+
         // Write with WP_Filesystem
-        return $wp_filesystem->put_contents( $this->htaccess_path, $content, FS_CHMOD_FILE );
+        return $wp_filesystem->put_contents( $this->htaccess_path, $content, $mode );
     }
 
     /**
