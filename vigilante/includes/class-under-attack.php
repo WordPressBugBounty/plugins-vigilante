@@ -41,12 +41,27 @@ class Vigilante_Under_Attack {
     const CHALLENGE_DIFFICULTY = 4;
 
     /**
-     * Challenge nonce TTL in seconds (15 minutes).
+     * Challenge token lifetime in seconds (15 minutes).
      *
      * Long enough to tolerate slow Proof-of-Work on weak CPUs and short tab
-     * idle, but not so long that abandoned challenges accumulate transients.
+     * idle, but short enough that a token copied from an old page is useless.
      */
     const NONCE_TTL = 900;
+
+    /**
+     * Requests per minute per address while the mode is active
+     */
+    const RATE_LIMIT = 30;
+
+    /**
+     * Requests per minute for a visitor who passed the challenge
+     *
+     * Ten times the aggressive limit: far above what a person browsing sends
+     * through WordPress, far below a flood.
+     *
+     * @since 2.11.8
+     */
+    const VERIFIED_RATE_LIMIT = 300;
 
     /**
      * .htaccess block markers for cache bypass
@@ -94,14 +109,11 @@ class Vigilante_Under_Attack {
             // JS challenge for frontend visitors + challenge response handler
             add_action( 'template_redirect', array( $this, 'maybe_serve_challenge' ), 1 );
 
-            // Override rate limiting to aggressive values
+            // Override rate limiting to aggressive values. Verified visitors get a
+            // higher limit from the same filter, not an exemption.
             add_filter( 'vigilante_rate_limit_requests', array( $this, 'aggressive_rate_limit' ) );
             add_filter( 'vigilante_rate_limit_duration', array( $this, 'aggressive_block_duration' ) );
-
-            // Verified visitors bypass rate limiting — once a human passed the JS challenge
-            // they should not be capped at the aggressive 30 req/min limit while loading
-            // a page with many image/asset requests served through WordPress.
-            add_filter( 'vigilante_skip_rate_limit', array( $this, 'maybe_skip_rate_limit' ) );
+            add_filter( 'vigilante_rate_limit_key', array( $this, 'verified_rate_limit_key' ) );
 
             // Block restricted HTTP methods and empty user agents (wp_loaded fires after init)
             add_action( 'wp_loaded', array( $this, 'restrict_http_methods' ) );
@@ -821,6 +833,19 @@ class Vigilante_Under_Attack {
      * Failures are silently ignored (cache purge is best-effort).
      */
     private function purge_page_caches() {
+        /*
+         * Every purge below reaches the whole network: the object cache is one
+         * for all sites, the cache plugins purge everything they hold, and the
+         * SiteGround folder is shared. Until 2.11.8 the administrator of any
+         * subsite ran all of it by switching the mode on, as many times as they
+         * liked. Found by the audits of the network and of the admin surface for
+         * 2.11.8. The mode itself does not depend on it: the challenge, the rate
+         * limit and the REST restriction work the same without the purge.
+         */
+        if ( is_multisite() && ! current_user_can( 'manage_network_options' ) ) {
+            return;
+        }
+
         // WordPress object cache
         wp_cache_flush();
 
@@ -1025,15 +1050,11 @@ class Vigilante_Under_Attack {
         // phpcs:ignore WordPress.Security.NonceVerification.Missing
         $redirect  = esc_url_raw( wp_unslash( $_POST['vigilante_ua_redirect'] ?? '' ) );
 
-        // Verify the challenge nonce (stored as transient)
-        $stored_nonce = get_transient( 'vigilante_ua_nonce_' . $this->get_visitor_ip_hash() );
-
-        if ( ! $stored_nonce || ! hash_equals( $stored_nonce, $nonce_val ) ) {
+        // The token is checked, never stored or deleted, so a wrong answer
+        // changes nothing for anybody else. See issue_challenge_token().
+        if ( strlen( $response ) > 64 || ! $this->challenge_token_is_valid( $nonce_val ) ) {
             return false;
         }
-
-        // Delete used nonce
-        delete_transient( 'vigilante_ua_nonce_' . $this->get_visitor_ip_hash() );
 
         // Verify the proof-of-work response
         if ( $this->verify_challenge( $response, $nonce_val ) ) {
@@ -1049,6 +1070,74 @@ class Vigilante_Under_Attack {
         }
 
         return false;
+    }
+
+    /**
+     * A challenge token of its own for this page
+     *
+     * Signed, not stored. Until 2.11.7 the challenge nonce was a transient keyed
+     * by the visitor address, reused by every page that address loaded, and any
+     * answer carrying it deleted it before the proof of work was checked. A
+     * client sharing the address, behind the same NAT, or every visitor behind a
+     * proxy with no trusted header configured, could keep the others in a
+     * challenge loop by sending junk answers (wordpress.org automated security
+     * review of 2.11.7). Each page now gets its own token, bound to the address
+     * and to the time it was issued and signed with the secret of this
+     * activation: nothing is shared, nothing is deleted, a refresh no longer has
+     * to reuse a nonce to avoid a loop, and no transient is written per address.
+     *
+     * @since 2.11.8
+     *
+     * @return string
+     */
+    private function issue_challenge_token() {
+        $id     = wp_generate_password( 16, false );
+        $issued = time();
+
+        return $id . '.' . $issued . '.' . $this->sign_challenge( $id, $issued );
+    }
+
+    /**
+     * Signature of a challenge token for the current visitor
+     *
+     * The 'challenge|' prefix keeps it from ever matching the signature of a
+     * verification cookie, which uses the same secret.
+     *
+     * @since 2.11.8
+     *
+     * @param string $id     Random part of the token.
+     * @param int    $issued Time the token was issued.
+     * @return string
+     */
+    private function sign_challenge( $id, $issued ) {
+        $status = $this->get_status();
+
+        return hash_hmac( 'sha256', 'challenge|' . $id . '|' . $issued . '|' . $this->get_visitor_ip_hash(), (string) ( $status['secret'] ?? '' ) );
+    }
+
+    /**
+     * Whether a challenge token was issued to this visitor, recently, by this activation
+     *
+     * @since 2.11.8
+     *
+     * @param string $token Token sent back with the answer.
+     * @return bool
+     */
+    private function challenge_token_is_valid( $token ) {
+        $status = $this->get_status();
+        $parts  = explode( '.', (string) $token );
+
+        if ( empty( $status['secret'] ) || 3 !== count( $parts ) || '' === $parts[0] || ! ctype_digit( $parts[1] ) ) {
+            return false;
+        }
+
+        $age = time() - (int) $parts[1];
+
+        if ( $age < 0 || $age > self::NONCE_TTL ) {
+            return false;
+        }
+
+        return hash_equals( $this->sign_challenge( $parts[0], (int) $parts[1] ), $parts[2] );
     }
 
     /**
@@ -1159,16 +1248,9 @@ class Vigilante_Under_Attack {
     private function render_challenge_page() {
         $site_name = get_bloginfo( 'name' );
 
-        // Reuse an existing nonce if one is still valid for this visitor.
-        // Without reuse, a refresh while the JS solver is running invalidates
-        // the in-flight nonce and the visitor gets stuck in a challenge loop.
-        $transient_key   = 'vigilante_ua_nonce_' . $this->get_visitor_ip_hash();
-        $challenge_nonce = get_transient( $transient_key );
-
-        if ( ! $challenge_nonce ) {
-            $challenge_nonce = wp_generate_password( 32, false );
-            set_transient( $transient_key, $challenge_nonce, self::NONCE_TTL );
-        }
+        // A token of its own for this page. An earlier token stays valid until it
+        // expires, so a refresh while the solver runs does not break it.
+        $challenge_nonce = $this->issue_challenge_token();
 
         // Get current URL for redirect after verification
         $current_url = ( is_ssl() ? 'https' : 'http' ) . '://' . sanitize_text_field( wp_unslash( $_SERVER['HTTP_HOST'] ?? '' ) ) . sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ?? '/' ) );
@@ -1225,28 +1307,53 @@ class Vigilante_Under_Attack {
     /**
      * Override rate limiting to aggressive values
      *
-     * @param int $requests Original requests per minute.
-     * @return int Aggressive limit.
+     * Visitors who passed the JS challenge get VERIFIED_RATE_LIMIT, or the
+     * site's own limit if that is higher, so a human loading a page with many
+     * requests through WordPress does not burn the aggressive cap and get a 429,
+     * which used to look like the challenge was failing.
+     *
+     * Until 2.11.8 they skipped rate limiting altogether, for as long as the
+     * mode lasted. The proof of work takes a script a few milliseconds, so a
+     * bot solved it once and then flooded with no limit at all, which is the
+     * flood the mode exists to cap. Found by the audit of Under Attack for
+     * 2.11.8.
+     *
+     * @param int $requests Requests per minute configured for the site.
+     * @return int
      */
     public function aggressive_rate_limit( $requests ) {
-        return 30;
+        if ( $this->has_valid_cookie() ) {
+            return max( absint( $requests ), self::VERIFIED_RATE_LIMIT );
+        }
+
+        return self::RATE_LIMIT;
     }
 
     /**
-     * Skip rate limiting for visitors who already passed the JS challenge.
+     * A count of their own for visitors who passed the challenge
      *
-     * Without this bypass, a verified human loading a normal page (with 20-30
-     * images/scripts served through WordPress) burns the aggressive 30 req/min
-     * cap and gets a 429 — which used to look like the challenge was failing.
+     * The firewall counts and blocks by address. Without the exemption that
+     * 2.11.8 removed, a verified visitor was counted with everybody else at the
+     * same address, so an unverified client behind the same NAT, or any visitor
+     * of a site behind a proxy with no trusted header, got the address blocked
+     * for fifteen minutes and the verified visitors with it. Found by the cross
+     * review of 2.11.8. The key adds the signature of the verification cookie,
+     * which is tied to the address and to this activation: verified visitors
+     * of one address share a count of VERIFIED_RATE_LIMIT, apart from the rest.
      *
-     * @param bool $skip Current value passed by the filter chain.
-     * @return bool True to skip the check, otherwise the value passed in.
+     * @since 2.11.8
+     *
+     * @param string $key Key the firewall would use, the address.
+     * @return string
      */
-    public function maybe_skip_rate_limit( $skip ) {
-        if ( $skip ) {
-            return true;
+    public function verified_rate_limit_key( $key ) {
+        if ( ! $this->has_valid_cookie() || ! isset( $_COOKIE[ self::COOKIE_NAME ] ) ) {
+            return $key;
         }
-        return $this->has_valid_cookie();
+
+        $parts = explode( '|', sanitize_text_field( wp_unslash( $_COOKIE[ self::COOKIE_NAME ] ) ) );
+
+        return $key . '|verified|' . end( $parts );
     }
 
     /**

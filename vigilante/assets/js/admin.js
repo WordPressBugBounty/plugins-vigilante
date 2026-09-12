@@ -1400,7 +1400,13 @@
                     html += '<tr id="vigilante-critical-content-' + fileId + '" class="vigilante-critical-content-row" style="display:none;">';
                     html += '<td colspan="3" style="padding: 0;">';
                     html += '<div class="vigilante-critical-content" style="max-height: 400px; overflow: auto; background: #fff; padding: 10px; font-size: 12px; line-height: 1.5; font-family: Consolas, Monaco, monospace; border-top: 1px solid #c3c4c7;">';
-                    if (diffUnavailable) {
+                    if (diff.network) {
+                        html += '<p style="color: #50575e; font-style: italic; margin: 0;">' + escHtml(strings.diffNetwork || '') + '</p>';
+                    } else if (diff.rescan) {
+                        html += '<p style="color: #50575e; font-style: italic; margin: 0;">' + escHtml(strings.diffRescan || '') + '</p>';
+                    } else if (diff.redaction) {
+                        html += '<p style="color: #50575e; font-style: italic; margin: 0;">' + escHtml(strings.diffRedaction || '') + '</p>';
+                    } else if (diffUnavailable) {
                         html += '<p style="color: #50575e; font-style: italic; margin: 0;">' + (strings.diffUnavailable || 'Diff not available.') + '</p>';
                     } else if (added.length === 0 && removed.length === 0) {
                         html += '<p style="color: #50575e; font-style: italic; margin: 0;">' + (strings.diffEmpty || 'No line changes detected.') + '</p>';

@@ -2052,7 +2052,13 @@ class Vigilante_User_Security {
         // Honor both affected_roles AND the per-user exclusion list, and
         // clear stale flags if the user no longer matches the rules.
         if ( ! $this->is_password_expiration_applicable( $user_id ) ) {
-            if ( get_user_meta( $user_id, 'vigilante_must_change_password', true ) ) {
+            // Only on a single site, for the same reason as in
+            // force_password_change_redirect(): on a network the flag belongs to
+            // the account, and this site's policy says nothing about the site
+            // that set it. The 2.11.8 fix only covered that method, and this
+            // notice cleared the flag anyway on the next admin page; found by
+            // the cross review of 2.11.8.
+            if ( ! is_multisite() && get_user_meta( $user_id, 'vigilante_must_change_password', true ) ) {
                 delete_user_meta( $user_id, 'vigilante_must_change_password' );
             }
             return;
@@ -2147,7 +2153,14 @@ class Vigilante_User_Security {
         // outlives the configuration change and locks the user in a redirect
         // loop into profile.php.
         if ( ! $this->is_password_expiration_applicable( $user_id ) ) {
-            delete_user_meta( $user_id, 'vigilante_must_change_password' );
+            // On a network the flag is a user meta that every site shares, and the
+            // policy just checked is only this site's: another site may have set
+            // it, and clearing it here let a user skip that site's forced change
+            // by visiting any other dashboard. It is only cleared on a single
+            // site (2.11.8); on a network the user is just not redirected here.
+            if ( ! is_multisite() ) {
+                delete_user_meta( $user_id, 'vigilante_must_change_password' );
+            }
             return;
         }
 
@@ -2694,18 +2707,20 @@ class Vigilante_User_Security {
             exit;
         }
 
-        $stored_hash = get_user_meta( $user_id, 'vigilante_verification_token', true );
-        $expires = get_user_meta( $user_id, 'vigilante_verification_expires', true );
+        $stored_hash = (string) get_user_meta( $user_id, 'vigilante_verification_token', true );
+        $expires     = (int) get_user_meta( $user_id, 'vigilante_verification_expires', true );
 
-        // Check expiration
-        if ( time() > $expires ) {
-            wp_safe_redirect( add_query_arg( 'vigilante_message', 'expired', wp_login_url() ) );
+        // The token first. Checking the expiry before it answered "expired" for
+        // any account with no verification pending and "invalid" for one waiting,
+        // so a wrong link revealed which user ids were waiting (2.11.8). Only the
+        // holder of the right token learns that it expired.
+        if ( '' === $stored_hash || ! hash_equals( $stored_hash, wp_hash( $token ) ) ) {
+            wp_safe_redirect( add_query_arg( 'vigilante_message', 'invalid', wp_login_url() ) );
             exit;
         }
 
-        // Verify token
-        if ( ! hash_equals( $stored_hash, wp_hash( $token ) ) ) {
-            wp_safe_redirect( add_query_arg( 'vigilante_message', 'invalid', wp_login_url() ) );
+        if ( time() > $expires ) {
+            wp_safe_redirect( add_query_arg( 'vigilante_message', 'expired', wp_login_url() ) );
             exit;
         }
 

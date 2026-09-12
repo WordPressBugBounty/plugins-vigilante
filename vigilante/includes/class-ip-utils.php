@@ -376,15 +376,8 @@ class Vigilante_IP_Utils {
         if ( '' !== $trusted_header && isset( $map[ $trusted_header ] ) ) {
             $key = $map[ $trusted_header ];
             if ( ! empty( $server[ $key ] ) ) {
-                $value = (string) $server[ $key ];
-                // X-Forwarded-For may be a "client, proxy1, proxy2" chain; the
-                // original client is the first entry.
-                if ( false !== strpos( $value, ',' ) ) {
-                    $parts = explode( ',', $value );
-                    $value = $parts[0];
-                }
-                $value = trim( $value );
-                if ( filter_var( $value, FILTER_VALIDATE_IP ) ) {
+                $value = self::client_from_chain( (string) $server[ $key ] );
+                if ( '' !== $value ) {
                     return $value;
                 }
             }
@@ -398,6 +391,149 @@ class Vigilante_IP_Utils {
         }
 
         return '0.0.0.0';
+    }
+
+    /**
+     * The visitor address in a forwarded header, read from the proxy's end
+     *
+     * A proxy adds the address it received the connection from to the END of
+     * X-Forwarded-For, and keeps whatever the visitor sent in front of it. So
+     * in "a, b, c" the visitor wrote a and b, and only c was written by the
+     * proxy the site trusts. Until 2.11.7 this took the first entry, the one
+     * the visitor chooses, and on a site set to X-Forwarded-For anybody could
+     * pick the address the firewall saw: out of the blacklist, into the
+     * whitelist, a new address per request for the rate limit and the login
+     * lockout. Found by the audit of the firewall for 2.11.8.
+     *
+     * Read from the right, an address of the site's own network (see
+     * is_own_network()) is taken as one more proxy and passed over, and the
+     * first address outside it is the visitor. When there is none, the nearest
+     * valid address is. An entry that is not an address stops the reading,
+     * since nothing left of it can be told apart from what the visitor wrote,
+     * and the caller falls back to the connection address.
+     *
+     * The first version of this, in the same release, told the two apart with
+     * FILTER_FLAG_NO_PRIV_RANGE and FILTER_FLAG_NO_RES_RANGE, and what those
+     * flags cover changes with the PHP version: from 8.3 an IPv4 address
+     * written as IPv6 (::ffff:a.b.c.d, as a dual stack proxy writes it) counts
+     * as reserved, so it was passed over and the visitor's own entry won
+     * again. Found by the cross review of 2.11.8. The ranges are written out
+     * now, and a mapped address is read as the IPv4 it is.
+     *
+     * Behind a CDN with a reverse proxy in front of PHP that adds to the
+     * header, or a load balancer that adds its own public address, this reads
+     * the address of that CDN or balancer. That is the price of not believing
+     * the visitor; the header of the CDN itself is the setting that fits
+     * there, and the Firewall tab says so when the administrator's own request
+     * shows that shape.
+     *
+     * @since 2.11.8
+     *
+     * @param string $value Header value.
+     * @return string Address, or '' when there is none to trust.
+     */
+    public static function client_from_chain( $value ) {
+        $entries = array_reverse( array_map( 'trim', explode( ',', (string) $value ) ) );
+        $nearest = '';
+
+        foreach ( $entries as $entry ) {
+            $address = self::unmap_ipv4( $entry );
+
+            if ( ! filter_var( $address, FILTER_VALIDATE_IP ) ) {
+                break;
+            }
+
+            if ( ! self::is_own_network( $address ) ) {
+                return $address;
+            }
+
+            if ( '' === $nearest ) {
+                $nearest = $address;
+            }
+        }
+
+        return $nearest;
+    }
+
+    /**
+     * The X-Forwarded-For header of this request, when the site trusts it
+     *
+     * Only for showing: the Firewall tab compares both readings of the
+     * administrator's own request. The firewall resolves the address with
+     * get_client_ip(). It lives here so that every read of a proxy header stays
+     * in this class, which a permanent harness checks.
+     *
+     * @since 2.11.8
+     *
+     * @return string Header value, or '' when it is not trusted or not sent.
+     */
+    public static function trusted_forwarded_for() {
+        if ( 'x-forwarded-for' !== self::trusted_proxy_header() || ! isset( $_SERVER['HTTP_X_FORWARDED_FOR'] ) ) {
+            return '';
+        }
+
+        return sanitize_text_field( wp_unslash( $_SERVER['HTTP_X_FORWARDED_FOR'] ) );
+    }
+
+    /**
+     * Whether an address belongs to a network no visitor comes from
+     *
+     * Private, loopback, link-local and the shared address space providers use
+     * inside their own networks, for IPv4 and IPv6. Written out rather than
+     * taken from filter_var() flags, whose ranges change between PHP versions.
+     *
+     * @since 2.11.8
+     *
+     * @param string $address Valid IP address, IPv4 written as IPv4.
+     * @return bool
+     */
+    public static function is_own_network( $address ) {
+        $ranges = array(
+            '10.0.0.0/8',
+            '172.16.0.0/12',
+            '192.168.0.0/16',
+            '127.0.0.0/8',
+            '169.254.0.0/16',
+            '100.64.0.0/10',
+            '::1/128',
+            'fc00::/7',
+            'fe80::/10',
+        );
+
+        foreach ( $ranges as $range ) {
+            if ( self::cidr_match( $address, $range ) ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * An IPv4 address written as IPv6, as the IPv4 address it is
+     *
+     * Covers both spellings, ::ffff:203.0.113.7 and ::ffff:cb00:7107. Anything
+     * else comes back as it was.
+     *
+     * @since 2.11.8
+     *
+     * @param string $address Address as written in the header.
+     * @return string
+     */
+    public static function unmap_ipv4( $address ) {
+        if ( ! filter_var( $address, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6 ) ) {
+            return $address;
+        }
+
+        $packed = inet_pton( $address );
+
+        if ( false !== $packed && 16 === strlen( $packed ) && str_repeat( "\0", 10 ) . "\xff\xff" === substr( $packed, 0, 12 ) ) {
+            $ipv4 = inet_ntop( substr( $packed, 12 ) );
+
+            return false === $ipv4 ? $address : $ipv4;
+        }
+
+        return $address;
     }
 
     /**

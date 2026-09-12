@@ -3,7 +3,7 @@
  * Plugin Name: Vigilant - 100% Free Security Suite: Firewall, 2FA, Login, Headers, Scanner…
  * Plugin URI: https://servicios.ayudawp.com
  * Description: Complete security solution for WordPress. Firewall, 2FA, security headers, login protection, file integrity monitoring, activity logging and more.
- * Version: 2.11.7
+ * Version: 2.11.8
  * Author: Fernando Tellado
  * Author URI: https://ayudawp.com
  * Text Domain: vigilante
@@ -24,7 +24,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Plugin constants
  */
-define( 'VIGILANTE_VERSION', '2.11.7' );
+define( 'VIGILANTE_VERSION', '2.11.8' );
 define( 'VIGILANTE_PLUGIN_FILE', __FILE__ );
 define( 'VIGILANTE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'VIGILANTE_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -579,6 +579,8 @@ final class Vigilante_Main {
          */
         $locked     = false;
         $incomplete = false;
+        $unreadable = false;
+        $settled    = array( 'locked', 'block_incomplete', 'read_failed' );
 
         if ( $needs_protection_block ) {
             require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-protection.php';
@@ -586,7 +588,8 @@ final class Vigilante_Main {
             $code       = is_wp_error( $result ) ? $result->get_error_code() : ( true === $result ? '' : 'unexpected_result' );
             $locked     = $locked || 'locked' === $code;
             $incomplete = $incomplete || 'block_incomplete' === $code;
-            $failed     = $failed || ( '' !== $code && 'locked' !== $code && 'block_incomplete' !== $code );
+            $unreadable = $unreadable || 'read_failed' === $code;
+            $failed     = $failed || ( '' !== $code && ! in_array( $code, $settled, true ) );
             $rewrote    = true;
         }
 
@@ -596,7 +599,8 @@ final class Vigilante_Main {
             $code       = is_wp_error( $result ) ? $result->get_error_code() : ( true === $result ? '' : 'unexpected_result' );
             $locked     = $locked || 'locked' === $code;
             $incomplete = $incomplete || 'block_incomplete' === $code;
-            $failed     = $failed || ( '' !== $code && 'locked' !== $code && 'block_incomplete' !== $code );
+            $unreadable = $unreadable || 'read_failed' === $code;
+            $failed     = $failed || ( '' !== $code && ! in_array( $code, $settled, true ) );
             $rewrote    = true;
         }
 
@@ -640,9 +644,26 @@ final class Vigilante_Main {
             );
         }
 
+        /*
+         * Same for a .htaccess that PHP can write but not read: since 2.11.8 it is
+         * left as it is rather than replaced by the Vigilant rules alone, and
+         * that does not mend itself either. The first version of that fix left
+         * it to the hourly retry, with a message about read only files; found by
+         * the cross review of 2.11.8.
+         */
+        if ( $unreadable && $this->activity_log ) {
+            $this->activity_log->log(
+                'system',
+                'server_rules_read_failed',
+                __( 'The .htaccess rules were not rewritten after the update because PHP can write that file but cannot read it, and writing it without reading it would have removed every other rule in it. Let PHP read the file, then save the Firewall or Headers tab.', 'vigilante' ),
+                array( 'version' => VIGILANTE_VERSION ),
+                'warning'
+            );
+        }
+
         $this->mark_server_files_synced();
 
-        if ( $rewrote && ! $incomplete && $this->activity_log ) {
+        if ( $rewrote && ! $incomplete && ! $unreadable && $this->activity_log ) {
             $this->activity_log->log(
                 'system',
                 'server_rules_refreshed',

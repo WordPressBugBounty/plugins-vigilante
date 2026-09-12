@@ -332,17 +332,6 @@ class Vigilante_Rest_Api_Security {
     }
 
     /**
-     * Block author query parameter enumeration
-     */
-    public function block_author_enumeration() {
-        // phpcs:ignore WordPress.Security.NonceVerification.Recommended
-        if ( ! is_admin() && isset( $_GET['author'] ) ) {
-            wp_safe_redirect( home_url(), 301 );
-            exit;
-        }
-    }
-
-    /**
      * Get REST API security status
      *
      * @return array

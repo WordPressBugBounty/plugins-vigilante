@@ -141,8 +141,15 @@ class Vigilante_Htaccess_Manager {
         try {
             // Read current content
             $original = $this->read_file();
+
+            /*
+             * read_file() answers '' when there is no file and false when there
+             * is one PHP cannot read. Until 2.11.8 both became an empty string
+             * here, so a .htaccess that PHP could write but not read was replaced
+             * whole by the Vigilant block, and every other rule in it was lost.
+             */
             if ( false === $original ) {
-                $original = '';
+                return new WP_Error( 'read_failed', __( '.htaccess could not be read, so it was left as it is.', 'vigilante' ) );
             }
 
             /*
@@ -222,29 +229,16 @@ class Vigilante_Htaccess_Manager {
     /**
      * Take the write lock, or fail if another process holds it.
      *
-     * add_option() is the atomic part: option_name carries a unique index, so
-     * exactly one caller can create the row. A lock older than the timeout is
-     * treated as abandoned (a fatal between acquire and release) and taken over,
-     * otherwise a single crash would freeze every future write.
+     * Until 2.11.8 this relied on add_option() being atomic, and it is not: it
+     * runs INSERT ... ON DUPLICATE KEY UPDATE, so two writers arriving together
+     * both believed they held the lock. See Vigilante_Settings::acquire_option_lock().
+     * A lock older than the timeout still counts as abandoned and is taken over.
      *
      * @since 2.10.0
      * @return bool
      */
     private function acquire_lock() {
-        $now  = time();
-        $held = get_option( self::LOCK_OPTION );
-
-        if ( false !== $held && is_numeric( $held ) && ( $now - (int) $held ) < self::LOCK_TIMEOUT ) {
-            return false;
-        }
-
-        if ( false !== $held ) {
-            // Abandoned lock: take it over.
-            update_option( self::LOCK_OPTION, $now, false );
-            return true;
-        }
-
-        return (bool) add_option( self::LOCK_OPTION, $now, '', false );
+        return Vigilante_Settings::acquire_option_lock( self::LOCK_OPTION, self::LOCK_TIMEOUT );
     }
 
     /**
@@ -253,7 +247,7 @@ class Vigilante_Htaccess_Manager {
      * @since 2.10.0
      */
     private function release_lock() {
-        delete_option( self::LOCK_OPTION );
+        Vigilante_Settings::release_option_lock( self::LOCK_OPTION );
     }
 
     /**

@@ -1550,41 +1550,6 @@ class Vigilante_Login_Security {
         return $this->database->get_locked_out_ips();
     }
 
-    /**
-     * Get login statistics
-     *
-     * @param int $days Days to look back.
-     * @return array
-     */
-    public function get_statistics( $days = 7 ) {
-        global $wpdb;
-
-        $table = esc_sql( $this->database->get_login_attempts_table() );
-        $since = gmdate( 'Y-m-d H:i:s', strtotime( "-{$days} days" ) );
-
-        // phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        $stats = $wpdb->get_row(
-            $wpdb->prepare(
-                "SELECT 
-                    COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed_attempts,
-                    COUNT(CASE WHEN status = 'lockout' THEN 1 END) as lockouts,
-                    COUNT(DISTINCT ip_address) as unique_ips,
-                    COUNT(DISTINCT username) as unique_usernames
-                FROM `{$table}`
-                WHERE last_attempt >= %s",
-                $since
-            ),
-            ARRAY_A
-        );
-        // phpcs:enable
-
-        return $stats ? $stats : array(
-            'failed_attempts'  => 0,
-            'lockouts'         => 0,
-            'unique_ips'       => 0,
-            'unique_usernames' => 0,
-        );
-    }
 }
 
 /**

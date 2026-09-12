@@ -526,8 +526,10 @@ class Vigilante_Htaccess_Protection {
         $proxy_variables = array(
             'cf-connecting-ip' => array( '%{HTTP:CF-Connecting-IP}', false ),
             'x-real-ip'        => array( '%{HTTP:X-Real-IP}', false ),
-            // X-Forwarded-For may carry a comma-separated proxy chain; the
-            // client is the first hop, so a trailing list is allowed.
+            // X-Forwarded-For may carry a comma-separated chain, and only its
+            // last entry was written by the proxy: see
+            // Vigilante_IP_Utils::client_from_chain(). Until 2.11.8 this
+            // matched the first entry, which the visitor writes.
             'x-forwarded-for'  => array( '%{HTTP:X-Forwarded-For}', true ),
         );
 
@@ -549,10 +551,19 @@ class Vigilante_Htaccess_Protection {
             }
 
             foreach ( $ip_variables as $variable => $is_chain ) {
+                /*
+                 * In a chain, the whitelisted address has to be the LAST entry.
+                 * The PHP layer also passes over private addresses at the end,
+                 * which a regular expression here cannot do without spelling
+                 * out every private range; so behind a proxy of the site's own
+                 * network these rules exempt less than PHP does, never more.
+                 */
                 if ( 'exact' === $pattern['type'] && ! $is_chain ) {
                     $lines[] = '    RewriteCond ' . $variable . ' "!=' . $pattern['ip'] . '" [NC]';
                 } elseif ( 'exact' === $pattern['type'] ) {
-                    $lines[] = '    RewriteCond ' . $variable . ' "!^' . $pattern['regex'] . '(,|$)" [NC]';
+                    $lines[] = '    RewriteCond ' . $variable . ' "!(^|, *)' . $pattern['regex'] . ' *$" [NC]';
+                } elseif ( $is_chain ) {
+                    $lines[] = '    RewriteCond ' . $variable . ' "!(^|, *)' . $pattern['regex'] . '[^,]*$" [NC]';
                 } else {
                     $lines[] = '    RewriteCond ' . $variable . ' "!^' . $pattern['regex'] . '" [NC]';
                 }

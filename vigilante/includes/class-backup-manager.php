@@ -47,6 +47,13 @@ class Vigilante_Backup_Manager {
     const COPIES_SWEEP_BATCH = 50;
 
     /**
+     * Lock that keeps two requests from walking the network at once
+     *
+     * @since 2.11.8
+     */
+    const COPIES_SWEEP_LOCK = 'vigilante_config_copies_sweep_lock';
+
+    /**
      * Legacy on-disk backup directory (kept only to clean it up on upgrade).
      *
      * @var string
@@ -138,6 +145,7 @@ class Vigilante_Backup_Manager {
 
         if ( $state < 1 ) {
             self::purge_stored_copies();
+            update_option( self::COPIES_PURGED_OPTION, 1, true );
         }
 
         if ( ! is_multisite() ) {
@@ -145,32 +153,72 @@ class Vigilante_Backup_Manager {
             return;
         }
 
-        $sweep = get_site_option( self::COPIES_SWEEP_OPTION, 0 );
+        if ( 'done' !== get_site_option( self::COPIES_SWEEP_OPTION, 0 ) ) {
+            /*
+             * One request walks at a time. Right after an update every request
+             * gets here, and until 2.11.8 each of them repeated the same batch of
+             * sites. The lock lives in the options table of the main site, which
+             * every site of the network reaches the same way.
+             */
+            switch_to_blog( get_main_site_id() );
+            $locked = Vigilante_Settings::acquire_option_lock( self::COPIES_SWEEP_LOCK, MINUTE_IN_SECONDS );
+            restore_current_blog();
 
-        if ( 'done' !== $sweep ) {
-            global $wpdb;
-
-            // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- the walk needs the sites after the last one it cleaned, in id order, and get_sites() cannot ask for ids greater than a value.
-            $site_ids = $wpdb->get_col(
-                $wpdb->prepare(
-                    "SELECT blog_id FROM {$wpdb->blogs} WHERE site_id = %d AND blog_id > %d ORDER BY blog_id ASC LIMIT %d",
-                    get_current_network_id(),
-                    (int) $sweep,
-                    self::COPIES_SWEEP_BATCH
-                )
-            );
-
-            foreach ( $site_ids as $site_id ) {
-                switch_to_blog( (int) $site_id );
-                self::purge_stored_copies();
-                restore_current_blog();
+            if ( ! $locked ) {
+                return;
             }
 
-            $sweep = count( $site_ids ) < self::COPIES_SWEEP_BATCH ? 'done' : (int) end( $site_ids );
-            update_site_option( self::COPIES_SWEEP_OPTION, $sweep );
+            try {
+                self::sweep_next_batch();
+            } finally {
+                switch_to_blog( get_main_site_id() );
+                Vigilante_Settings::release_option_lock( self::COPIES_SWEEP_LOCK );
+                restore_current_blog();
+            }
         }
 
-        update_option( self::COPIES_PURGED_OPTION, 'done' === $sweep ? 2 : 1, true );
+        if ( 'done' === get_site_option( self::COPIES_SWEEP_OPTION, 0 ) ) {
+            update_option( self::COPIES_PURGED_OPTION, 2, true );
+        }
+    }
+
+    /**
+     * Clean the next batch of sites of the network, with the walk lock held
+     *
+     * @since 2.11.8
+     */
+    private static function sweep_next_batch() {
+        global $wpdb;
+
+        // Read again inside the lock: the request that held it before may have
+        // moved the walk on.
+        // The core caches network options under "$network_id:$option", and absent
+        // ones in "$network_id:notoptions" (wp-includes/option.php:2091 and :2065).
+        wp_cache_delete( get_current_network_id() . ':' . self::COPIES_SWEEP_OPTION, 'site-options' );
+        wp_cache_delete( get_current_network_id() . ':notoptions', 'site-options' );
+        $sweep = get_site_option( self::COPIES_SWEEP_OPTION, 0 );
+
+        if ( 'done' === $sweep ) {
+            return;
+        }
+
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- the walk needs the sites after the last one it cleaned, in id order, and get_sites() cannot ask for ids greater than a value.
+        $site_ids = $wpdb->get_col(
+            $wpdb->prepare(
+                "SELECT blog_id FROM {$wpdb->blogs} WHERE site_id = %d AND blog_id > %d ORDER BY blog_id ASC LIMIT %d",
+                get_current_network_id(),
+                (int) $sweep,
+                self::COPIES_SWEEP_BATCH
+            )
+        );
+
+        foreach ( $site_ids as $site_id ) {
+            switch_to_blog( (int) $site_id );
+            self::purge_stored_copies();
+            restore_current_blog();
+        }
+
+        update_site_option( self::COPIES_SWEEP_OPTION, count( $site_ids ) < self::COPIES_SWEEP_BATCH ? 'done' : (int) end( $site_ids ) );
     }
 
     /**

@@ -23,91 +23,14 @@ trait Vigilante_Admin_Ajax {
      */
     // ajax_apply_preset() is defined in class-admin.php directly (not in this trait)
 
-    /**
-     * AJAX: Clear lockouts
+    /*
+     * ajax_clear_lockouts(), ajax_clear_logs(), ajax_run_scan() and
+     * ajax_test_headers() live in class-admin.php. Until 2.11.8 this trait
+     * carried older copies of the four, and PHP runs the method of the class,
+     * so the copies never ran: a fix written into one of them would have looked
+     * applied and changed nothing. Removed after the audit of the admin surface
+     * for 2.11.8 found them.
      */
-    public function ajax_clear_lockouts() {
-        check_ajax_referer( 'vigilante_admin_nonce', 'nonce' );
-
-        if ( ! current_user_can( 'manage_options' ) ) {
-            wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
-        }
-
-        $ip = isset( $_POST['ip'] ) ? sanitize_text_field( wp_unslash( $_POST['ip'] ) ) : '';
-
-        if ( ! empty( $ip ) ) {
-            // Clear specific IP
-            $result = $this->database->clear_lockout( $ip );
-        } else {
-            // Clear all
-            $result = $this->database->clear_all_lockouts();
-        }
-
-        if ( $result ) {
-            wp_send_json_success( __( 'Lockouts cleared.', 'vigilante' ) );
-        } else {
-            wp_send_json_error( __( 'Failed to clear lockouts.', 'vigilante' ) );
-        }
-    }
-
-    /**
-     * AJAX: Clear logs
-     */
-    public function ajax_clear_logs() {
-        check_ajax_referer( 'vigilante_admin_nonce', 'nonce' );
-
-        if ( ! current_user_can( 'manage_options' ) ) {
-            wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
-        }
-
-        $result = $this->activity_log->clear_all_logs();
-
-        if ( $result ) {
-            wp_send_json_success( __( 'Logs cleared.', 'vigilante' ) );
-        } else {
-            wp_send_json_error( __( 'Failed to clear logs.', 'vigilante' ) );
-        }
-    }
-
-    /**
-     * AJAX: Run file integrity scan
-     */
-    public function ajax_run_scan() {
-        check_ajax_referer( 'vigilante_admin_nonce', 'nonce' );
-
-        if ( ! current_user_can( 'manage_options' ) ) {
-            wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
-        }
-
-        try {
-            if ( ! class_exists( 'Vigilante_File_Integrity' ) ) {
-                require_once VIGILANTE_PLUGIN_DIR . 'includes/class-file-integrity.php';
-            }
-
-            if ( ! $this->settings ) {
-                wp_send_json_error( 'Settings not initialized' );
-            }
-
-            $activity_log = isset( $this->activity_log ) ? $this->activity_log : null;
-            $database = isset( $this->database ) ? $this->database : null;
-
-            $file_integrity = new Vigilante_File_Integrity( $this->settings, $database, $activity_log );
-            $results = $file_integrity->run_scan();
-
-            // Save results for display
-            update_option( 'vigilante_last_integrity_scan', time() );
-            update_option( 'vigilante_last_integrity_results', $results );
-
-            wp_send_json_success( array(
-                'message' => __( 'Scan completed.', 'vigilante' ),
-                'results' => $results,
-            ) );
-        } catch ( Exception $e ) {
-            wp_send_json_error( 'Exception: ' . $e->getMessage() );
-        } catch ( Error $e ) {
-            wp_send_json_error( 'PHP Error: ' . $e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine() );
-        }
-    }
 
     /**
      * AJAX: Approve a critical config file modification
@@ -398,22 +321,6 @@ trait Vigilante_Admin_Ajax {
         }
 
         wp_send_json_success( $message );
-    }
-
-    /**
-     * AJAX: Test security headers
-     */
-    public function ajax_test_headers() {
-        check_ajax_referer( 'vigilante_admin_nonce', 'nonce' );
-
-        if ( ! current_user_can( 'manage_options' ) ) {
-            wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
-        }
-
-        $security_headers = new Vigilante_Security_Headers( $this->settings );
-        $results = $security_headers->test_headers();
-
-        wp_send_json_success( $results );
     }
 
     /**
@@ -1140,6 +1047,14 @@ trait Vigilante_Admin_Ajax {
             wp_send_json_error( __( 'Invalid user ID.', 'vigilante' ) );
         }
 
+        // The pending flag is a user meta, shared by every site of a network, and
+        // approving opens the login everywhere. Same rule the other account tools
+        // got in 2.10.3: permission over that user, which on a network only a
+        // network administrator has (2.11.8).
+        if ( ! current_user_can( 'edit_user', $user_id ) ) {
+            wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
+        }
+
         $user_security = new Vigilante_User_Security( $this->settings, $this->activity_log );
         $result = $user_security->approve_user( $user_id, get_current_user_id() );
 
@@ -1172,6 +1087,12 @@ trait Vigilante_Admin_Ajax {
 
         if ( ! $user_id ) {
             wp_send_json_error( __( 'Invalid user ID.', 'vigilante' ) );
+        }
+
+        // See ajax_approve_user(): the account and its pending flag belong to the
+        // whole network (2.11.8).
+        if ( ! current_user_can( 'edit_user', $user_id ) ) {
+            wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
         }
 
         $user = get_userdata( $user_id );

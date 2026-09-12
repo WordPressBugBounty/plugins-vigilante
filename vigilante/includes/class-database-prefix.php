@@ -75,7 +75,7 @@ class Vigilante_Database_Prefix {
             return true;
         }
 
-        if ( ! is_main_site() ) {
+        if ( ! is_main_site() || ! is_main_network() ) {
             return new WP_Error(
                 'multisite_not_main_site',
                 __( 'The database prefix is shared by the whole network. Change it from the main site of the network.', 'vigilante' )

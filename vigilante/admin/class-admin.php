@@ -1546,6 +1546,9 @@ class Vigilante_Admin {
                 'hideChanges'         => __( 'Hide changes', 'vigilante' ),
                 'changes'             => __( 'Changes', 'vigilante' ),
                 'diffUnavailable'     => __( 'Diff not available for this file (baseline was created before diff tracking was added). Approve to enable diff on future changes.', 'vigilante' ),
+                'diffNetwork'         => __( 'This file belongs to the whole network, so its line changes are only shown to network administrators, on the main site.', 'vigilante' ),
+                'diffRescan'          => __( 'Run a new scan to see the line changes of this file.', 'vigilante' ),
+                'diffRedaction'       => __( 'The line changes of this file are not shown because a value in it could not be hidden safely. The change itself is still detected.', 'vigilante' ),
                 'diffEmpty'           => __( 'No line-level changes detected (may be whitespace or reordering).', 'vigilante' ),
                 'diffLines'           => __( 'lines', 'vigilante' ),
                 // Under Attack mode strings
@@ -2116,8 +2119,44 @@ class Vigilante_Admin {
      * @since 2.10.4
      * @return bool
      */
+    private function forwarded_chain_readings() {
+        // Shown, not decided on: the firewall resolves the address elsewhere.
+        $chain = Vigilante_IP_Utils::trusted_forwarded_for();
+
+        if ( '' === $chain ) {
+            return array();
+        }
+
+        $public = array();
+
+        foreach ( explode( ',', $chain ) as $entry ) {
+            $address = Vigilante_IP_Utils::unmap_ipv4( trim( $entry ) );
+
+            if ( filter_var( $address, FILTER_VALIDATE_IP ) && ! Vigilante_IP_Utils::is_own_network( $address ) ) {
+                $public[] = $address;
+            }
+        }
+
+        if ( count( $public ) < 2 ) {
+            return array();
+        }
+
+        return array(
+            'now'    => Vigilante_IP_Utils::client_from_chain( $chain ),
+            'before' => $public[0],
+        );
+    }
+
+    /**
+     * Whether the user tools of this screen are out of reach for this user
+     *
+     * @return bool
+     */
     private function user_actions_locked() {
-        return is_multisite() && ! current_user_can( 'manage_network_users' );
+        // On a single site edit_user maps to edit_users, which a custom role with
+        // manage_options may lack: since 2.11.8 approving and rejecting a pending
+        // registration ask for it, so the buttons have to say so there too.
+        return is_multisite() ? ! current_user_can( 'manage_network_users' ) : ! current_user_can( 'edit_users' );
     }
 
     /**
@@ -2131,7 +2170,11 @@ class Vigilante_Admin {
         }
         ?>
         <div class="notice notice-info inline" style="margin:10px 0 16px;padding:8px 12px;">
+            <?php if ( is_multisite() ) : ?>
             <p style="margin:0;"><?php esc_html_e( 'These tools act on user accounts, which on a network belong to the whole network rather than to one site. WordPress reserves that to network administrators, so they are managed from the network admin.', 'vigilante' ); ?></p>
+            <?php else : ?>
+            <p style="margin:0;"><?php esc_html_e( 'These tools act on other user accounts, and your role cannot edit users, so they are not available to you.', 'vigilante' ); ?></p>
+            <?php endif; ?>
         </div>
         <?php
     }
@@ -3305,6 +3348,27 @@ class Vigilante_Admin {
                             <?php endforeach; ?>
                         </tbody>
                     </table>
+                </div>
+                <?php endif; ?>
+
+                <?php
+                // Since 2.11.8 X-Forwarded-For is read from its end, where the proxy
+                // writes. The administrator's own request shows whether that end is
+                // a CDN or a balancer for everybody here. Cross review of 2.11.8.
+                $xff_readings = $this->forwarded_chain_readings();
+                if ( $xff_readings ) :
+                    ?>
+                <div id="vigilante-xff-chain-notice" class="notice notice-warning inline" style="margin:10px 0 16px;padding:8px 12px;">
+                    <p style="margin:0;">
+                        <?php
+                        printf(
+                            /* translators: 1: address Vigilant reads now, 2: address earlier versions read */
+                            esc_html__( 'Your own request reaches the site with more than one public address in X-Forwarded-For. Vigilant reads the last one, %1$s, which is the one your proxy added; up to version 2.11.7 it read the first one, %2$s, which a visitor can write. If %1$s belongs to a CDN or a load balancer rather than to you, every visitor shares it for rate limiting, login lockouts and the IP lists: choose the header of that CDN in Visitor IP detection, such as CF-Connecting-IP for Cloudflare.', 'vigilante' ),
+                            esc_html( $xff_readings['now'] ),
+                            esc_html( $xff_readings['before'] )
+                        );
+                        ?>
+                    </p>
                 </div>
                 <?php endif; ?>
 
@@ -5063,6 +5127,7 @@ class Vigilante_Admin {
                         <p><?php esc_html_e( 'No pending registrations.', 'vigilante' ); ?></p>
                     </div>
                 <?php else : ?>
+                    <?php $this->render_user_actions_notice(); ?>
                     <table class="wp-list-table widefat fixed striped vigilante-pending-users-table">
                         <thead>
                             <tr>
@@ -5093,10 +5158,10 @@ class Vigilante_Admin {
                                     ?>
                                 </td>
                                 <td>
-                                    <button type="button" class="button button-small vigilante-approve-user" data-user-id="<?php echo esc_attr( $pending_user->ID ); ?>">
+                                    <button type="button" class="button button-small vigilante-approve-user" data-user-id="<?php echo esc_attr( $pending_user->ID ); ?>" <?php disabled( $this->user_actions_locked() ); ?>>
                                         <?php esc_html_e( 'Approve', 'vigilante' ); ?>
                                     </button>
-                                    <button type="button" class="button button-small vigilante-reject-user" data-user-id="<?php echo esc_attr( $pending_user->ID ); ?>" style="color: #d63638;">
+                                    <button type="button" class="button button-small vigilante-reject-user" data-user-id="<?php echo esc_attr( $pending_user->ID ); ?>" style="color: #d63638;" <?php disabled( $this->user_actions_locked() ); ?>>
                                         <?php esc_html_e( 'Reject', 'vigilante' ); ?>
                                     </button>
                                 </td>
@@ -5992,6 +6057,11 @@ class Vigilante_Admin {
     private function render_tab_file_integrity() {
         $is_disabled = $this->render_module_disabled_notice( 'file_integrity' );
         $options = $this->settings->get_section( 'file_integrity' );
+        // On the main site of a network the critical-file scan is the network's
+        // canary for a change to wp-config.php or the root .htaccess, so a
+        // main-site admin without network rights cannot turn it off. Since
+        // 2.11.8; see Vigilante_Settings::get_main_site_file_settings().
+        $vg_main_locked = $this->main_site_files_locked();
         $last_scan = get_option( 'vigilante_last_integrity_scan' );
         $last_results = get_option( 'vigilante_last_integrity_results' );
         $ignored_files = get_option( 'vigilante_ignored_files', array() );
@@ -6119,8 +6189,11 @@ class Vigilante_Admin {
                                 </label>
                                 <br>
                                 <label>
-                                    <input type="checkbox" name="file_integrity[scan_critical_config]" value="1" <?php checked( $options['scan_critical_config'] ?? true ); ?>>
+                                    <input type="checkbox" name="file_integrity[scan_critical_config]" value="1" <?php disabled( $vg_main_locked ); ?> <?php checked( $options['scan_critical_config'] ?? true ); ?>>
                                     <?php esc_html_e( 'Critical config files (wp-config.php, .htaccess baseline monitoring)', 'vigilante' ); ?>
+                                    <?php if ( $vg_main_locked ) : ?>
+                                        <span class="description" style="display:block;margin-left:24px;"><?php echo esc_html( Vigilante_Settings::get_shared_files_notice() ); ?></span>
+                                    <?php endif; ?>
                                 </label>
                                 <br>
                                 <label>
@@ -6401,7 +6474,13 @@ class Vigilante_Admin {
                                     $crit_id = sanitize_html_class( $crit_file );
                                     $added_count = is_array( $crit_diff ) ? count( $crit_diff['added'] ?? array() ) : 0;
                                     $removed_count = is_array( $crit_diff ) ? count( $crit_diff['removed'] ?? array() ) : 0;
-                                    $diff_unavailable = is_array( $crit_diff ) && ! empty( $crit_diff['unavailable'] );
+                                    // The lines of a shared file are for whoever approves it. Results
+                                    // stored before 2.11.8 on the main site still carry them, so the
+                                    // screen asks too, not only the scan that wrote them.
+                                    $diff_network     = ( is_array( $crit_diff ) && ! empty( $crit_diff['network'] ) ) || $this->critical_approval_locked();
+                                    $diff_rescan      = is_array( $crit_diff ) && ! empty( $crit_diff['rescan'] );
+                                    $diff_redaction   = is_array( $crit_diff ) && ! empty( $crit_diff['redaction'] );
+                                    $diff_unavailable = $diff_network || ( is_array( $crit_diff ) && ! empty( $crit_diff['unavailable'] ) );
                                 ?>
                                 <tr>
                                     <td><code style="color: #e36210;"><?php echo esc_html( $crit_file ); ?></code></td>
@@ -6440,7 +6519,19 @@ class Vigilante_Admin {
                                 <tr id="vigilante-critical-content-<?php echo esc_attr( $crit_id ); ?>" class="vigilante-critical-content-row" style="display:none;">
                                     <td colspan="3" style="padding: 0;">
                                         <div class="vigilante-critical-content" style="max-height: 400px; overflow: auto; background: #fff; padding: 10px; font-size: 12px; line-height: 1.5; font-family: Consolas, Monaco, monospace; border-top: 1px solid #c3c4c7;">
-                                            <?php if ( $diff_unavailable ) : ?>
+                                            <?php if ( $diff_network ) : ?>
+                                                <p style="color: #50575e; font-style: italic; margin: 0;">
+                                                    <?php esc_html_e( 'This file belongs to the whole network, so its line changes are only shown to network administrators, on the main site.', 'vigilante' ); ?>
+                                                </p>
+                                            <?php elseif ( $diff_rescan ) : ?>
+                                                <p style="color: #50575e; font-style: italic; margin: 0;">
+                                                    <?php esc_html_e( 'Run a new scan to see the line changes of this file.', 'vigilante' ); ?>
+                                                </p>
+                                            <?php elseif ( $diff_redaction ) : ?>
+                                                <p style="color: #50575e; font-style: italic; margin: 0;">
+                                                    <?php esc_html_e( 'The line changes of this file are not shown because a value in it could not be hidden safely. The change itself is still detected.', 'vigilante' ); ?>
+                                                </p>
+                                            <?php elseif ( $diff_unavailable ) : ?>
                                                 <p style="color: #50575e; font-style: italic; margin: 0;">
                                                     <?php esc_html_e( 'Diff not available for this file (baseline was created before diff tracking was added). Approve to enable diff on future changes.', 'vigilante' ); ?>
                                                 </p>
@@ -7595,6 +7686,17 @@ class Vigilante_Admin {
         update_option( 'vigilante_last_integrity_scan', time() );
         update_option( 'vigilante_last_integrity_results', $results );
 
+        // On the main site the scan does compute the lines of wp-config.php and
+        // .htaccess, for the network administrator. Somebody without network
+        // rights gets the change and its sizes, not the lines.
+        if ( $this->critical_approval_locked() && ! empty( $results['modified'] ) && is_array( $results['modified'] ) ) {
+            foreach ( $results['modified'] as $index => $item ) {
+                if ( is_array( $item ) && 'critical_config' === ( $item['type'] ?? '' ) ) {
+                    $results['modified'][ $index ]['diff'] = Vigilante_File_Integrity::network_only_diff();
+                }
+            }
+        }
+
         wp_send_json_success( array(
             'message'      => __( 'Scan completed.', 'vigilante' ),
             'results'      => $results,
@@ -7630,8 +7732,38 @@ class Vigilante_Admin {
             wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
         }
 
+        $results   = get_option( 'vigilante_last_integrity_results' );
+        $scanned_at = get_option( 'vigilante_last_integrity_scan' );
+
         delete_option( 'vigilante_last_integrity_results' );
         delete_option( 'vigilante_last_integrity_scan' );
+
+        /*
+         * A pending change to wp-config.php or the root .htaccess is closed by
+         * approving it, which takes the network. Clearing the results was one
+         * more way to close it without, until the next scan: the ignore list was
+         * shut in 2.11.8 and this button was left open, found by the cross
+         * review of 2.11.8. So for somebody who cannot approve, those entries
+         * stay and everything else goes.
+         */
+        if ( $this->critical_approval_locked() && is_array( $results ) && ! empty( $results['modified'] ) && is_array( $results['modified'] ) ) {
+            $critical = array_values(
+                array_filter(
+                    $results['modified'],
+                    function ( $item ) {
+                        return is_array( $item ) && 'critical_config' === ( $item['type'] ?? '' );
+                    }
+                )
+            );
+
+            if ( $critical ) {
+                $results['modified']   = $critical;
+                $results['suspicious'] = array();
+                $results['extra']      = array();
+                update_option( 'vigilante_last_integrity_results', $results );
+                update_option( 'vigilante_last_integrity_scan', $scanned_at ? $scanned_at : time() );
+            }
+        }
 
         if ( $this->database ) {
             $this->database->clear_file_hashes();
@@ -7658,6 +7790,12 @@ class Vigilante_Admin {
 
         if ( empty( $file ) ) {
             wp_send_json_error( __( 'No file specified.', 'vigilante' ) );
+        }
+
+        // A change to a shared file is closed by approving it, and approving it
+        // takes the network. Ignoring it would close the same warning without.
+        if ( $this->critical_approval_locked() && in_array( $file, array( 'wp-config.php', '.htaccess' ), true ) ) {
+            wp_send_json_error( $this->critical_approval_notice() );
         }
 
         $file_integrity = new Vigilante_File_Integrity( $this->settings, $this->database );
@@ -7725,10 +7863,12 @@ class Vigilante_Admin {
             wp_send_json_error( __( 'Invalid request.', 'vigilante' ) );
         }
 
-        $files = array();
+        $files  = array();
+        $shared = $this->critical_approval_locked() ? array( 'wp-config.php', '.htaccess' ) : array();
         foreach ( $raw_files as $f ) {
             $clean = sanitize_text_field( $f );
-            if ( '' !== $clean ) {
+            // Same rule as ajax_ignore_file() for the two shared files.
+            if ( '' !== $clean && ! in_array( $clean, $shared, true ) ) {
                 $files[] = $clean;
             }
         }

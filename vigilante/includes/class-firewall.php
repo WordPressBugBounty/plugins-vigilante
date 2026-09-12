@@ -1016,8 +1016,47 @@ class Vigilante_Firewall {
     }
 
     /**
+     * Whether the request is addressed to the REST API itself
+     *
+     * The method filter lets the REST API through, and until 2.11.8 it asked
+     * whether "/wp-json/" appeared anywhere in the address, query string
+     * included: TRACE /?x=/wp-json/ skipped the filter and reached a page that
+     * is not the REST API at all. Found by the audit of the firewall for
+     * 2.11.8. Core routes the pretty REST URLs from the start of the home
+     * path, directly or through index.php, so the path has to start there.
+     * The ?rest_route= form never matched the old test and still does not:
+     * widening the exemption was not the point.
+     *
+     * @since 2.11.8
+     *
+     * @return bool
+     */
+    private function is_rest_api_request() {
+        /*
+         * The path is cut by hand, not with wp_parse_url(): with two leading
+         * slashes that reads "//wp-json/..." as a host, and WordPress still routes
+         * it to the REST API. And both the home path and the root are accepted,
+         * for the language folders some multilingual plugins add to home_url().
+         * Both from the cross review of 2.11.8.
+         */
+        $path   = preg_replace( '#/{2,}#', '/', (string) preg_replace( '/[?#].*$/s', '', (string) ( $this->request_data['uri_raw'] ?? '' ) ) );
+        $home   = trailingslashit( (string) wp_parse_url( home_url( '/' ), PHP_URL_PATH ) );
+        $prefix = trim( rest_get_url_prefix(), '/' );
+
+        foreach ( array_unique( array( $home, '/' ) ) as $root ) {
+            foreach ( array( $root . $prefix, $root . 'index.php/' . $prefix ) as $base ) {
+                if ( $path === $base || 0 === strpos( (string) $path, $base . '/' ) ) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Check HTTP method
-     * 
+     *
      * Logged-in users with edit capabilities are excluded to ensure
      * Gutenberg, REST API, and page builders work correctly.
      */
@@ -1031,8 +1070,7 @@ class Vigilante_Firewall {
         // Skip for WordPress REST API requests
         // The REST API uses PUT, DELETE, PATCH for legitimate operations and has its own
         // authentication and authorization layer — no need to filter methods here
-        $rest_prefix = rest_get_url_prefix(); // Typically 'wp-json'
-        if ( false !== strpos( $this->request_data['uri'], '/' . $rest_prefix . '/' ) ) {
+        if ( $this->is_rest_api_request() ) {
             return;
         }
 
@@ -1120,15 +1158,29 @@ class Vigilante_Firewall {
             return;
         }
 
-        // Allow other modules to opt out — Under Attack mode uses this so that
-        // visitors who already passed the JS challenge don't burn the
-        // aggressive 30 req/min cap loading a normal page's assets.
+        // Allow other code to opt out. Under Attack mode used this until 2.11.8
+        // to exempt visitors who had passed the JS challenge, which exempted a
+        // bot that solved it once, too; it now raises their limit instead,
+        // through vigilante_rate_limit_requests below.
         if ( apply_filters( 'vigilante_skip_rate_limit', false ) ) {
             return;
         }
 
         $ip         = $this->get_client_ip();
         $rate_limit = $this->options['rate_limiting'];
+
+        /*
+         * What the count and the block are kept under: the address, unless a
+         * filter narrows it. Under Attack mode gives visitors who passed its
+         * challenge a count of their own, because counting them with everybody
+         * else at their address let one unverified client behind the same NAT
+         * lock them out for fifteen minutes with its own block. Found by the
+         * cross review of 2.11.8, the same shape as the challenge nonce the
+         * automated review reported on 2.11.7.
+         */
+        $key  = (string) apply_filters( 'vigilante_rate_limit_key', $ip );
+        $key  = '' !== $key ? $key : $ip;
+        $hash = md5( $key );
 
         // Check if already blocked (fast path). The active block lives in a
         // transient keyed by IP, so this path, which runs on every
@@ -1137,7 +1189,7 @@ class Vigilante_Firewall {
         // entire, an array with no upper bound that a distributed attack grew
         // by one entry per new address, so the firewall amplified the attack it
         // was blocking (S6). The transient expires with the block itself.
-        $block = get_transient( 'vigilante_rate_block_' . md5( $ip ) );
+        $block = get_transient( 'vigilante_rate_block_' . $hash );
         if ( is_array( $block ) && isset( $block['expires'] ) && time() < (int) $block['expires'] ) {
             if ( ! headers_sent() ) {
                 status_header( 429 );
@@ -1165,7 +1217,7 @@ class Vigilante_Firewall {
         // pile up 150+ requests while never exceeding 60 in any single minute,
         // and got a 429. Storing the window start makes the reset explicit
         // instead of relying on the transient expiring.
-        $transient_key = 'vigilante_rate_' . md5( $ip );
+        $transient_key = 'vigilante_rate_' . $hash;
         $window        = get_transient( $transient_key );
         $now           = time();
 
@@ -1201,7 +1253,7 @@ class Vigilante_Firewall {
 
             // Progressive blocking: double duration on each repeat offense
             if ( ! empty( $rate_limit['progressive'] ) ) {
-                $strikes_key = 'vigilante_strikes_' . md5( $ip );
+                $strikes_key = 'vigilante_strikes_' . $hash;
                 $strikes     = absint( get_transient( $strikes_key ) ) + 1;
 
                 $max_duration = absint( $rate_limit['max_block_duration'] ?? 86400 );
@@ -1220,10 +1272,11 @@ class Vigilante_Firewall {
                 'duration'   => $duration,
                 'reason'     => 'rate_limit',
                 'strikes'    => $strikes,
+                'key'        => $key,
             );
 
             // The block itself, read by the fast path above on every request.
-            set_transient( 'vigilante_rate_block_' . md5( $ip ), $block, $duration );
+            set_transient( 'vigilante_rate_block_' . $hash, $block, $duration );
 
             // The bounded index the admin screen lists.
             self::index_block( $ip, $block );
@@ -1478,14 +1531,24 @@ class Vigilante_Firewall {
             return false;
         }
 
+        // The address, and the narrower key the block was kept under, if any
+        // (a verified visitor of Under Attack mode, since 2.11.8).
+        $keys = array( $ip );
+
+        if ( is_array( $blocks[ $ip ] ) && ! empty( $blocks[ $ip ]['key'] ) && is_string( $blocks[ $ip ]['key'] ) ) {
+            $keys[] = $blocks[ $ip ]['key'];
+        }
+
         unset( $blocks[ $ip ] );
         update_option( 'vigilante_firewall_blocks', $blocks, false );
 
         // Clean related transients
-        $hash = md5( $ip );
-        delete_transient( 'vigilante_rate_block_' . $hash );
-        delete_transient( 'vigilante_rate_' . $hash );
-        delete_transient( 'vigilante_strikes_' . $hash );
+        foreach ( array_unique( $keys ) as $key ) {
+            $hash = md5( $key );
+            delete_transient( 'vigilante_rate_block_' . $hash );
+            delete_transient( 'vigilante_rate_' . $hash );
+            delete_transient( 'vigilante_strikes_' . $hash );
+        }
 
         return true;
     }

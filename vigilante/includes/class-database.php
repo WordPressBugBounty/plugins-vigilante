@@ -114,16 +114,6 @@ class Vigilante_Database {
     }
 
     /**
-     * Get escaped table name for use in SQL queries
-     *
-     * @param string $table Full table name.
-     * @return string Escaped table name with backticks.
-     */
-    private function esc_table( $table ) {
-        return '`' . esc_sql( $table ) . '`';
-    }
-
-    /**
      * Get activity log table name
      *
      * @return string
@@ -1187,8 +1177,13 @@ class Vigilante_Database {
                 'expires_at' => $expires_at,
                 'attempts'   => 0,
                 'used'       => 0,
+                // In UTC, like expires_at. Left to the column default it was the
+                // MySQL server's local time, and the resend limit compares it with
+                // time(): on servers behind UTC it never held, and ahead of UTC it
+                // refused a legitimate resend for hours (rule 19, 2.11.8).
+                'created_at' => current_time( 'mysql', true ),
             ),
-            array( '%d', '%s', '%s', '%d', '%d' )
+            array( '%d', '%s', '%s', '%d', '%d', '%s' )
         );
 
         return $result ? $this->wpdb->insert_id : false;

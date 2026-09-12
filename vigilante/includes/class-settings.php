@@ -701,7 +701,10 @@ class Vigilante_Settings {
      * @return bool
      */
     public static function owns_shared_files() {
-        return ! is_multisite() || is_main_site();
+        // One wp-config.php and one root .htaccess per installation, even with
+        // several networks in it: is_main_site() alone is true on the main site
+        // of every network. Since 2.11.8, found by the audit of the network.
+        return ! is_multisite() || ( is_main_site() && is_main_network() );
     }
 
     public static function can_write_shared_files() {
@@ -709,7 +712,9 @@ class Vigilante_Settings {
             return true;
         }
 
-        if ( ! is_main_site() ) {
+        // See owns_shared_files(): the main site of a secondary network, and
+        // its network administrator, do not own the installation's files.
+        if ( ! is_main_site() || ! is_main_network() ) {
             return false;
         }
 
@@ -832,9 +837,21 @@ class Vigilante_Settings {
      * file. These do both: blocking bad bots and bad query strings, the visitor
      * IP detection and the two whitelists run in PHP for the site that stores
      * them, and on the main site of a network they are also what the .htaccess
-     * rules of every site are generated from; the three module switches decide
-     * whether the .htaccess blocks and the wp-config.php constants exist at all.
-     * On a subsite they only act on that site, so they stay editable there.
+     * rules of every site are generated from; the three writing module switches
+     * (firewall, security_headers, wp_hardening) decide whether the .htaccess
+     * blocks and the wp-config.php constants exist at all.
+     *
+     * Since 2.11.8 it also locks what decides whether the shared files are
+     * WATCHED, not built: the File Integrity module and its scan_critical_config
+     * switch. On the main site the critical-file scan is the network's canary
+     * for a change to wp-config.php or the root .htaccess, which only a network
+     * administrator can approve, so a main-site administrator without network
+     * rights must not be able to silence it by turning either one off. Closing
+     * the ignore list and the clear-results button in 2.11.8 left these two as
+     * the remaining routes; found by the audit of the admin surface.
+     *
+     * On a subsite all of them only act on that site, so they stay editable
+     * there (get_locked_file_settings() adds this set only when owns_shared_files()).
      *
      * Until 2.11.6 an administrator of the main site without network rights
      * could change any of them, and the file-only ones too: the write to the
@@ -843,13 +860,15 @@ class Vigilante_Settings {
      * administrator, published it to the whole network.
      *
      * @since 2.11.6
+     * @since 2.11.8 The file_integrity module and scan_critical_config.
      *
      * @return array<string,string[]>
      */
     public static function get_main_site_file_settings() {
         return array(
-            'modules'  => array( 'firewall', 'security_headers', 'wp_hardening' ),
-            'firewall' => array( 'block_bad_bots', 'block_bad_query_strings', 'trusted_proxy_header', 'ip_whitelist', 'ua_whitelist' ),
+            'modules'        => array( 'firewall', 'security_headers', 'wp_hardening', 'file_integrity' ),
+            'firewall'       => array( 'block_bad_bots', 'block_bad_query_strings', 'trusted_proxy_header', 'ip_whitelist', 'ua_whitelist' ),
+            'file_integrity' => array( 'scan_critical_config' ),
         );
     }
 
@@ -901,32 +920,113 @@ class Vigilante_Settings {
     public static function keep_locked_file_settings( $options, $stored ) {
         $options = is_array( $options ) ? $options : array();
         $stored  = is_array( $stored ) ? $stored : array();
+        $locked  = self::get_locked_file_settings();
 
-        foreach ( self::get_locked_file_settings() as $section => $keys ) {
+        if ( ! $locked ) {
+            return $options;
+        }
+
+        /*
+         * A key that was never stored takes its default, which is what it was
+         * worth before. Until 2.11.8 it was dropped instead, and the sanitize
+         * callback of the option filled it in again, but validate_options()
+         * fills a missing module switch with false, not with its default.
+         */
+        $instance = new self();
+        $defaults = $instance->get_default_options();
+
+        foreach ( $locked as $section => $keys ) {
             if ( true === $keys ) {
                 if ( array_key_exists( $section, $stored ) ) {
                     $options[ $section ] = $stored[ $section ];
+                } elseif ( isset( $defaults[ $section ] ) ) {
+                    $options[ $section ] = $defaults[ $section ];
                 } else {
                     unset( $options[ $section ] );
                 }
                 continue;
             }
 
-            $stored_section = ( isset( $stored[ $section ] ) && is_array( $stored[ $section ] ) ) ? $stored[ $section ] : array();
+            $stored_section  = ( isset( $stored[ $section ] ) && is_array( $stored[ $section ] ) ) ? $stored[ $section ] : array();
+            $default_section = ( isset( $defaults[ $section ] ) && is_array( $defaults[ $section ] ) ) ? $defaults[ $section ] : array();
 
             foreach ( $keys as $key ) {
                 if ( array_key_exists( $key, $stored_section ) ) {
-                    if ( ! isset( $options[ $section ] ) || ! is_array( $options[ $section ] ) ) {
-                        $options[ $section ] = array();
+                    $value = $stored_section[ $key ];
+                } elseif ( array_key_exists( $key, $default_section ) ) {
+                    $value = $default_section[ $key ];
+                } else {
+                    if ( isset( $options[ $section ] ) && is_array( $options[ $section ] ) ) {
+                        unset( $options[ $section ][ $key ] );
                     }
-                    $options[ $section ][ $key ] = $stored_section[ $key ];
-                } elseif ( isset( $options[ $section ] ) && is_array( $options[ $section ] ) ) {
-                    unset( $options[ $section ][ $key ] );
+                    continue;
                 }
+
+                if ( ! isset( $options[ $section ] ) || ! is_array( $options[ $section ] ) ) {
+                    $options[ $section ] = array();
+                }
+                $options[ $section ][ $key ] = $value;
             }
         }
 
         return $options;
+    }
+
+    /**
+     * Take a lock kept as a row of the options table, or report that another request holds it
+     *
+     * add_option() cannot be a lock: it runs INSERT ... ON DUPLICATE KEY UPDATE
+     * (wp-includes/option.php:1142 in WP 7.1), so two requests that both find
+     * the option missing both "create" it and both believe they hold it. INSERT
+     * IGNORE creates the row for exactly one of them, which is what core does in
+     * WP_Upgrader::create_lock() (wp-admin/includes/class-wp-upgrader.php:1065).
+     * A lock older than the timeout counts as abandoned, by a fatal error between
+     * taking and releasing it, and only one request takes it over.
+     *
+     * @since 2.11.8
+     *
+     * @param string $name    Option name of the lock, in the current site's table.
+     * @param int    $timeout Seconds after which a held lock counts as abandoned.
+     * @return bool True if this request now holds the lock.
+     */
+    public static function acquire_option_lock( $name, $timeout ) {
+        global $wpdb;
+
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- an atomic lock needs INSERT IGNORE, which the options API does not offer; same query as WP_Upgrader::create_lock().
+        if ( $wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$wpdb->options} ( option_name, option_value, autoload ) VALUES ( %s, %s, 'no' )", $name, (string) time() ) ) ) {
+            wp_cache_delete( $name, 'options' );
+            return true;
+        }
+
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- the lock row as stored right now, not a cached copy.
+        $held = $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", $name ) );
+
+        if ( null === $held || ( time() - (int) $held ) < $timeout ) {
+            return false;
+        }
+
+        // Abandoned: the delete only matches the value that was read, and only one
+        // request wins the insert that follows.
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- removes an abandoned lock row.
+        $wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value = %s", $name, $held ) );
+
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- same atomic insert as above.
+        return (bool) $wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$wpdb->options} ( option_name, option_value, autoload ) VALUES ( %s, %s, 'no' )", $name, (string) time() ) );
+    }
+
+    /**
+     * Release a lock taken with acquire_option_lock()
+     *
+     * @since 2.11.8
+     *
+     * @param string $name Option name of the lock.
+     */
+    public static function release_option_lock( $name ) {
+        global $wpdb;
+
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- removes the row acquire_option_lock() inserted.
+        $wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s", $name ) );
+        wp_cache_delete( $name, 'options' );
     }
 
     /**

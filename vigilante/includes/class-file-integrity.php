@@ -166,11 +166,14 @@ class Vigilante_File_Integrity {
     const REDACTED_MARKER = '[redacted by Vigilant]';
 
     /**
-     * Constant names whose value never reaches the database.
+     * Constant names whose value is checked even where the file does not name them
      *
-     * The eight WordPress keys and salts and the database credentials, plus
-     * anything whose name reads like a credential, since a real wp-config.php
-     * collects SMTP passwords, S3 keys and API tokens over the years.
+     * The eight WordPress keys and salts and the database credentials. Until
+     * 2.11.7 this list, plus names that read like a credential, was what got
+     * redacted, and a real wp-config.php collects secrets under any name:
+     * FTP_PASS, SMTP passwords, cloud keys inside serialize( array( ... ) ),
+     * any const. Since 2.11.8 every value is redacted and this list only feeds
+     * the output check of baseline_content().
      *
      * @since 2.11.2
      *
@@ -180,6 +183,29 @@ class Vigilante_File_Integrity {
         'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_HOST',
         'AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'NONCE_KEY',
         'AUTH_SALT', 'SECURE_AUTH_SALT', 'LOGGED_IN_SALT', 'NONCE_SALT',
+    );
+
+    /**
+     * Core constants whose value stays readable in the baseline copy
+     *
+     * Where the site lives, where its folders are, how much memory it gets:
+     * none of it is a secret and all of it is what a diff of wp-config.php is
+     * read for. Every other value is redacted. A list of what is secret can
+     * never be complete, which is how 2.11.2 to 2.11.7 missed FTP_PASS; a list
+     * of what is not can be short and still be right.
+     *
+     * @since 2.11.8
+     *
+     * @var string[]
+     */
+    private static $readable_constants = array(
+        'ABSPATH', 'WPINC', 'WP_HOME', 'WP_SITEURL', 'WP_CONTENT_DIR', 'WP_CONTENT_URL',
+        'WP_PLUGIN_DIR', 'WP_PLUGIN_URL', 'WPMU_PLUGIN_DIR', 'WPMU_PLUGIN_URL', 'UPLOADS',
+        'WP_LANG_DIR', 'WP_TEMP_DIR', 'WP_DEBUG_LOG', 'WP_MEMORY_LIMIT', 'WP_MAX_MEMORY_LIMIT',
+        'WP_ENVIRONMENT_TYPE', 'WP_DEVELOPMENT_MODE', 'WP_AUTO_UPDATE_CORE', 'FS_METHOD',
+        'DB_CHARSET', 'DB_COLLATE', 'DOMAIN_CURRENT_SITE', 'PATH_CURRENT_SITE', 'NOBLOGREDIRECT',
+        'COOKIE_DOMAIN', 'COOKIEPATH', 'SITECOOKIEPATH', 'ADMIN_COOKIE_PATH', 'PLUGINS_COOKIE_PATH',
+        'WP_DEFAULT_THEME', 'WPLANG',
     );
 
     /**
@@ -351,6 +377,10 @@ class Vigilante_File_Integrity {
      * @return string Content safe to store, or '' when it cannot be made safe.
      */
     private function baseline_content( $filename, $normalized ) {
+        if ( '.htaccess' === $filename ) {
+            return $this->redact_server_secrets( $normalized );
+        }
+
         if ( 'wp-config.php' !== $filename ) {
             return $normalized;
         }
@@ -358,26 +388,45 @@ class Vigilante_File_Integrity {
         $redacted = $this->redact_secrets( $normalized );
 
         /*
-         * Belt and braces, and this is the part that matters: the regular
-         * expression above is the thing most likely to miss a shape nobody
-         * thought of, and the cost of missing one is a secret in the database.
-         * So the result is checked against the values actually in force, and
-         * if any of them survived, nothing is stored at all. The scan then
-         * reports the change without a line diff, which the interface already
-         * handles, instead of leaking.
+         * Belt and braces, and this is the part that matters: the redaction
+         * above is the thing most likely to miss a shape nobody thought of,
+         * and the cost of missing one is a secret in the database. So the
+         * result is checked against the values actually in force, and if any
+         * of them survived, nothing is stored at all. The scan then reports the
+         * change without a line diff, which the interface already handles,
+         * instead of leaking.
+         *
+         * Until 2.11.7 the check covered the twelve constants of WordPress and
+         * nothing else, so a value the regular expression missed went straight
+         * through it. It now covers every constant the file names and every
+         * environment variable it reads.
+         *
+         * It runs against the copy that is actually stored. A value in force
+         * that sits inside the value of a readable constant, such as a Redis
+         * prefix equal to the domain inside WP_HOME, is not a secret left
+         * behind, so that one alone is not looked for; without that, every such
+         * site would lose its diff. The first version of this checked a
+         * stricter copy instead, and a secret inside a kept include path went
+         * straight past it (cross review of 2.11.8).
          *
          * Only values of eight characters or more are checked: DB_NAME is
          * often something like "local" or "wp", and looking for that inside a
          * PHP file matches by accident every time.
          */
-        foreach ( self::$secret_constants as $name ) {
-            if ( ! defined( $name ) ) {
-                continue;
+        if ( '' === $redacted ) {
+            return '';
+        }
+
+        $shown = $this->readable_values_in_force();
+
+        foreach ( $this->values_in_force( $normalized ) as $value ) {
+            foreach ( $shown as $readable ) {
+                if ( false !== strpos( $readable, $value ) ) {
+                    continue 2;
+                }
             }
 
-            $value = (string) constant( $name );
-
-            if ( strlen( $value ) >= 8 && false !== strpos( $redacted, $value ) ) {
+            if ( false !== strpos( $redacted, $value ) ) {
                 return '';
             }
         }
@@ -386,38 +435,441 @@ class Vigilante_File_Integrity {
     }
 
     /**
-     * Replace the value of every credential-looking define with a marker
+     * Replace every value in wp-config.php with a marker
      *
-     * Keeps the line and the constant name, so the diff still shows that a
-     * credential line was touched, and drops only the value.
+     * Reads the file as PHP tokens and replaces every string in it: quoted,
+     * with variables inside, heredoc and nowdoc. What stays is what names a
+     * thing rather than holding it: the name passed to define(), defined(),
+     * constant() and getenv(), the name in putenv( 'NAME=value' ), array keys,
+     * an index such as $_ENV['NAME'], and strings of a single character that
+     * are not the value of a define(). Also the value of the constants in
+     * $readable_constants, the table prefix and a path passed to require or
+     * include, which are not secrets and are what a diff of this file is read
+     * for. A path is kept only while it looks like one, and only up to where
+     * its expression ends.
+     *
+     * Until 2.11.7 this was a regular expression over define() with a list of
+     * names, and it missed FTP_PASS, SMTP passwords, cloud keys inside
+     * serialize( array( ... ) ), every const and every value read with a
+     * fallback. Measured while preparing 2.11.8: 10 of 15 real shapes stored
+     * their secret.
+     *
+     * The marker always goes in single quotes, whatever the original used, so
+     * a copy redacted by an earlier version and the same file redacted today
+     * read the same line for line.
      *
      * @since 2.11.2
+     * @since 2.11.8 Reads tokens and redacts every value.
      *
      * @param string $content Normalized wp-config.php content.
-     * @return string
+     * @return string Redacted content, or '' when it cannot be read as tokens.
      */
     private function redact_secrets( $content ) {
-        $names = implode( '|', array_map( 'preg_quote', self::$secret_constants ) );
+        if ( ! function_exists( 'token_get_all' ) ) {
+            return '';
+        }
 
-        /*
-         * define( 'NAME', 'value' ), matching the quoted literal itself rather
-         * than reading up to the closing parenthesis.
-         *
-         * The first version of this stopped at the first ';', which looked
-         * reasonable and failed on the very first real file it saw: the salts
-         * WordPress generates are full of punctuation and a ';' inside one cut
-         * the match short, so nothing was redacted. Backreference 3 is the
-         * opening quote and the value runs to its unescaped twin. No /s
-         * modifier on purpose, so a file with an unterminated string breaks
-         * one line instead of swallowing the rest of the file.
-         */
-        $pattern = '/(define\s*\(\s*([\'"])(?:' . $names . '|[A-Z0-9_]*(?:KEY|SALT|SECRET|PASSWORD|PASSWD|TOKEN|API)[A-Z0-9_]*)\2\s*,\s*)([\'"])(?:\\\\.|(?!\3).)*\3/i';
+        $marker     = "'" . self::REDACTED_MARKER . "'";
+        $tokens     = self::merged_tokens( token_get_all( (string) $content ) );
+        $count      = count( $tokens );
+        $names      = defined( 'T_NAME_FULLY_QUALIFIED' ) ? array( T_STRING, T_NAME_FULLY_QUALIFIED ) : array( T_STRING );
+        $includes   = array( T_INCLUDE, T_INCLUDE_ONCE, T_REQUIRE, T_REQUIRE_ONCE );
+        $out           = '';
+        $depth         = 0;
+        $keep_until    = -1;
+        $define_at     = -1;
+        $in_include    = false;
+        $include_depth = 0;
+        $include_ends  = array( T_CLOSE_TAG, T_BOOLEAN_OR, T_BOOLEAN_AND, T_LOGICAL_OR, T_LOGICAL_AND, T_COALESCE );
 
-        $redacted = preg_replace( $pattern, '${1}\'' . self::REDACTED_MARKER . '\'', $content );
+        for ( $i = 0; $i < $count; $i++ ) {
+            list( $type, $text, $plain ) = $tokens[ $i ];
 
-        // A failed preg_replace returns null, and storing null would wipe the
-        // baseline copy silently. Falling back to the original is not an
-        // option either, so the caller's guard turns this into "no content".
+            if ( '(' === $type ) {
+                $depth++;
+            } elseif ( ')' === $type ) {
+                // The closing parenthesis of a readable define(), or of any define().
+                if ( $depth === $keep_until ) {
+                    $keep_until = -1;
+                }
+                if ( $depth === $define_at ) {
+                    $define_at = -1;
+                }
+                $depth--;
+
+                // A parenthesis that closes around the include ends its path.
+                if ( $in_include && $depth < $include_depth ) {
+                    $in_include = false;
+                }
+            } elseif ( in_array( $type, $includes, true ) ) {
+                $in_include    = true;
+                $include_depth = $depth;
+            } elseif ( $in_include && ( in_array( $type, array( ';', '{', '}', '?', ':', ',' ), true ) || in_array( $type, $include_ends, true ) ) ) {
+                /*
+                 * The path of an include ends where its expression does. The
+                 * first version of this only ended it at ';', so the value in
+                 * `( include 'db.php' ) || define( 'FTP_PASS', '...' )`, in a
+                 * ternary after require, or after a closing tag, was kept.
+                 * Found by the cross review of 2.11.8.
+                 */
+                $in_include = false;
+            }
+
+            if ( T_COMMENT === $type || T_DOC_COMMENT === $type ) {
+                $out .= $this->redact_comment( $text );
+                continue;
+            }
+
+            if ( T_INLINE_HTML === $type ) {
+                $out .= ( '' === trim( $text ) ) ? $text : $marker;
+                continue;
+            }
+
+            if ( 'string' !== $type ) {
+                $out .= $text;
+                continue;
+            }
+
+            $prev  = self::significant_token( $tokens, $i, -1 );
+            $next  = self::significant_token( $tokens, $i, 1 );
+            $ptype = ( null === $prev ) ? null : $tokens[ $prev ][0];
+            $ntype = ( null === $next ) ? null : $tokens[ $next ][0];
+            $call  = ( '(' === $ptype ) ? self::significant_token( $tokens, $prev, -1 ) : null;
+            $inner = $plain ? substr( $text, 1, -1 ) : null;
+
+            if ( $plain && null !== $call && in_array( $tokens[ $call ][0], $names, true ) ) {
+                $function = strtolower( ltrim( $tokens[ $call ][1], '\\' ) );
+
+                if ( in_array( $function, array( 'define', 'defined', 'constant', 'getenv' ), true ) ) {
+                    if ( 'define' === $function ) {
+                        $define_at = $depth;
+
+                        if ( in_array( $inner, self::$readable_constants, true ) ) {
+                            $keep_until = $depth;
+                        }
+                    }
+                    $out .= $text;
+                    continue;
+                }
+
+                if ( 'putenv' === $function && false !== strpos( $inner, '=' ) ) {
+                    $out .= "'" . substr( $inner, 0, strpos( $inner, '=' ) + 1 ) . self::REDACTED_MARKER . "'";
+                    continue;
+                }
+            }
+
+            // The token before an opening bracket or an assignment, when there is one.
+            $before = ( '[' === $ptype || '=' === $ptype ) ? self::significant_token( $tokens, $prev, -1 ) : null;
+            $btoken = ( null === $before ) ? array( null, null ) : $tokens[ $before ];
+
+            /*
+             * The value of a define() is redacted whatever its length, as it was
+             * up to 2.11.7, so an empty password reads the same in a copy stored
+             * then as in today's; the first version of this kept strings of one
+             * character there and a file awaiting review showed credential lines
+             * nobody had touched (cross review of 2.11.8).
+             */
+            $is_define_value = ( -1 !== $define_at && $depth === $define_at && ',' === $ptype );
+            $is_path         = $in_include && $plain
+                && preg_match( '#^[A-Za-z0-9_./\-]+$#', (string) $inner )
+                && ( false !== strpos( (string) $inner, '/' ) || '.php' === substr( (string) $inner, -4 ) );
+
+            $keep = ( $plain && strlen( $inner ) <= 1 && ! $is_define_value )
+                || T_DOUBLE_ARROW === $ntype
+                || ( '[' === $ptype && ']' === $ntype && in_array( $btoken[0], array( T_VARIABLE, T_STRING, ']', ')', '}' ), true ) )
+                || $keep_until >= 0
+                || $is_path
+                || ( '=' === $ptype && ';' === $ntype && T_VARIABLE === $btoken[0] && '$table_prefix' === $btoken[1] );
+
+            $out .= $keep ? $text : $marker;
+        }
+
+        return $out;
+    }
+
+    /**
+     * PHP tokens with every string folded into a single token
+     *
+     * The tokenizer splits a string with variables inside, a heredoc and a
+     * backtick command into several tokens. For the redaction each of them is
+     * one value, so they come back as a single token of type 'string'. The
+     * third field says whether it is a plain quoted literal.
+     *
+     * @since 2.11.8
+     *
+     * @param array $raw Output of token_get_all().
+     * @return array List of array( type, text, plain ).
+     */
+    private static function merged_tokens( $raw ) {
+        $tokens = array();
+        $count  = count( $raw );
+
+        for ( $i = 0; $i < $count; $i++ ) {
+            $token = $raw[ $i ];
+
+            if ( '"' === $token || '`' === $token ) {
+                $text = $token;
+                for ( $i++; $i < $count; $i++ ) {
+                    $text .= is_array( $raw[ $i ] ) ? $raw[ $i ][1] : $raw[ $i ];
+                    if ( $raw[ $i ] === $token ) {
+                        break;
+                    }
+                }
+                $tokens[] = array( 'string', $text, false );
+                continue;
+            }
+
+            if ( is_array( $token ) && T_START_HEREDOC === $token[0] ) {
+                $text = $token[1];
+                for ( $i++; $i < $count; $i++ ) {
+                    $text .= is_array( $raw[ $i ] ) ? $raw[ $i ][1] : $raw[ $i ];
+                    if ( is_array( $raw[ $i ] ) && T_END_HEREDOC === $raw[ $i ][0] ) {
+                        break;
+                    }
+                }
+                $tokens[] = array( 'string', $text, false );
+                continue;
+            }
+
+            // An unterminated string comes back as T_ENCAPSED_AND_WHITESPACE
+            // on its own, and it is a value like any other.
+            if ( is_array( $token ) && ( T_CONSTANT_ENCAPSED_STRING === $token[0] || T_ENCAPSED_AND_WHITESPACE === $token[0] ) ) {
+                $tokens[] = array( 'string', $token[1], T_CONSTANT_ENCAPSED_STRING === $token[0] );
+                continue;
+            }
+
+            $tokens[] = is_array( $token ) ? array( $token[0], $token[1], false ) : array( $token, $token, false );
+        }
+
+        return $tokens;
+    }
+
+    /**
+     * Index of the nearest token that is not whitespace or a comment
+     *
+     * @since 2.11.8
+     *
+     * @param array $tokens Output of merged_tokens().
+     * @param int   $from   Index to start from, not included.
+     * @param int   $step   -1 to look back, 1 to look ahead.
+     * @return int|null
+     */
+    private static function significant_token( $tokens, $from, $step ) {
+        $count = count( $tokens );
+
+        for ( $i = $from + $step; $i >= 0 && $i < $count; $i += $step ) {
+            if ( ! in_array( $tokens[ $i ][0], array( T_WHITESPACE, T_COMMENT, T_DOC_COMMENT ), true ) ) {
+                return $i;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Redact a comment, keeping its plain words
+     *
+     * To the tokenizer a comment is text, and wp-config.php files keep old
+     * credentials in them, commented out or in a note. The first version of
+     * this, in the same release, redacted what was between quotes: an
+     * apostrophe in prose ("Don't use 'the-old-password'") paired with the
+     * opening quote of the secret and left it out, and a secret without quotes
+     * was never touched. Found by the cross review of 2.11.8.
+     *
+     * So it works the other way round. A comment keeps its plain words
+     * (lowercase, capitalised or uppercase letters, or two capitalised parts
+     * such as WordPress, and docblock tags), constant names, and anything
+     * shorter than eight characters; every other run of characters, a URL, a
+     * key, a password with a digit in it, becomes the marker. The value of a
+     * commented-out define() goes in single quotes whatever its length, as in
+     * code and as 2.11.2 to 2.11.7 wrote it, so a copy stored by those
+     * versions reads the same line for line. What this cannot tell from prose
+     * is a password made only of plain letters; the output check still
+     * catches it when it is a value in force.
+     *
+     * @since 2.11.8
+     *
+     * @param string $comment Comment token text.
+     * @return string
+     */
+    private function redact_comment( $comment ) {
+        $marker   = self::REDACTED_MARKER;
+        $readable = self::$readable_constants;
+
+        // Only the text between the delimiters is redacted: "/**#@-*/" in
+        // wp-config-sample.php is a single run of eight characters, and
+        // replacing it whole took the comment markers with it.
+        if ( ! preg_match( '#\A(/\*\*?|//|\#)(.*?)(\*/)?\z#s', $comment, $parts ) ) {
+            $parts = array( $comment, '', $comment );
+        }
+
+        $open    = $parts[1];
+        $close   = isset( $parts[3] ) ? $parts[3] : '';
+        $comment = preg_replace_callback(
+            '/(\bdefine\s*\(\s*([\'"])((?:\\\\.|(?!\2).)*)\2\s*,\s*)([\'"])((?:\\\\.|(?!\4).)*)\4/i',
+            function ( $match ) use ( $marker, $readable ) {
+                return in_array( $match[3], $readable, true ) ? $match[0] : $match[1] . "'" . $marker . "'";
+            },
+            $parts[2]
+        );
+
+        if ( null === $comment ) {
+            return '';
+        }
+
+        $redacted = preg_replace_callback(
+            '/[^\s\'"`(),;\[\]{}<>=]+/u',
+            function ( $match ) use ( $marker ) {
+                $word = $match[0];
+                $core = rtrim( $word, '.:!?' );
+
+                // Plain words only, without hyphens: a passphrase written as
+                // lowercase words joined by hyphens reads as prose otherwise, and
+                // the PoC of this very fix caught one surviving.
+                if ( strlen( $core ) < 8
+                    || preg_match( '/^@?(?:\p{Lu}?\p{Ll}+|\p{Lu}+)$/u', $core )
+                    || preg_match( '/^\p{Lu}\p{Ll}+\p{Lu}\p{Ll}+$/u', $core )
+                    || preg_match( '/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/', $core )
+                ) {
+                    return $word;
+                }
+
+                return $marker . substr( $word, strlen( $core ) );
+            },
+            $comment
+        );
+
+        // A failed replacement, on invalid UTF-8 for one, drops the comment
+        // rather than keep it whole.
+        return ( null === $redacted ) ? '' : $open . $redacted . $close;
+    }
+
+    /**
+     * Values in force of what a wp-config.php names
+     *
+     * Every user constant whose name appears in the file, the twelve of
+     * WordPress wherever they were defined, and the environment variables the
+     * file reads or sets. Arrays are walked to their leaves, since define()
+     * takes arrays. Only strings: numbers are never redacted and are not
+     * secrets, and the first version of this counted them and wiped the diff
+     * of any file with a large number in force (cross review of 2.11.8). The
+     * readable constants are left out, and so is anything shorter than eight
+     * characters.
+     *
+     * @since 2.11.8
+     *
+     * @param string $content Normalized wp-config.php content.
+     * @return string[]
+     */
+    private function values_in_force( $content ) {
+        $defined = get_defined_constants( true );
+        $user    = isset( $defined['user'] ) ? $defined['user'] : array();
+        $names   = self::$secret_constants;
+        $values  = array();
+
+        if ( preg_match_all( '/[A-Za-z_][A-Za-z0-9_]*/', (string) $content, $words ) ) {
+            $names = array_merge( $names, $words[0] );
+        }
+
+        foreach ( array_unique( $names ) as $name ) {
+            if ( array_key_exists( $name, $user ) && ! in_array( $name, self::$readable_constants, true ) ) {
+                $values = array_merge( $values, self::string_leaves( $user[ $name ] ) );
+            }
+        }
+
+        if ( preg_match_all( '/\b(?:getenv|putenv)\s*\(\s*[\'"]([A-Za-z_][A-Za-z0-9_]*)|\$_ENV\s*\[\s*[\'"]([A-Za-z_][A-Za-z0-9_]*)/', (string) $content, $env ) ) {
+            foreach ( array_filter( array_merge( $env[1], $env[2] ) ) as $name ) {
+                $value = getenv( $name );
+
+                if ( is_string( $value ) ) {
+                    $values[] = $value;
+                }
+            }
+        }
+
+        $long = array();
+
+        foreach ( $values as $value ) {
+            if ( strlen( $value ) >= 8 ) {
+                $long[ $value ] = $value;
+            }
+        }
+
+        return array_values( $long );
+    }
+
+    /**
+     * Every string inside a constant value
+     *
+     * @since 2.11.8
+     *
+     * @param mixed $value Constant value.
+     * @return string[]
+     */
+    private static function string_leaves( $value ) {
+        if ( is_array( $value ) ) {
+            $leaves = array();
+
+            foreach ( $value as $item ) {
+                $leaves = array_merge( $leaves, self::string_leaves( $item ) );
+            }
+
+            return $leaves;
+        }
+
+        return is_string( $value ) ? array( $value ) : array();
+    }
+
+    /**
+     * Values in force of the readable constants, the ones kept in the copy
+     *
+     * @since 2.11.8
+     *
+     * @return string[]
+     */
+    private function readable_values_in_force() {
+        $values = array();
+
+        foreach ( self::$readable_constants as $name ) {
+            if ( defined( $name ) ) {
+                $values = array_merge( $values, self::string_leaves( constant( $name ) ) );
+            }
+        }
+
+        return $values;
+    }
+
+    /**
+     * Replace the values a root .htaccess can carry as credentials
+     *
+     * The .htaccess is not a secrets file, but it can hold a few: an
+     * environment variable handed to PHP with SetEnv, an Authorization header
+     * set for a backend, or a php_value with a password, a key, a licence or a
+     * session store address with its auth in it. The directive and its name
+     * stay, the value goes. Line based, which is how Apache reads it too. Since
+     * the cross review of 2.11.8 also any request or response header whose name
+     * reads like a credential (X-Api-Key, a cookie, a signature) and a
+     * RewriteCond that compares against key=, token= or the like, the way a
+     * staging site is opened with a secret in the query string. What it cannot
+     * see is a credential written in any other shape.
+     *
+     * @since 2.11.8
+     *
+     * @param string $content Normalized .htaccess content.
+     * @return string
+     */
+    private function redact_server_secrets( $content ) {
+        $redacted = preg_replace(
+            array(
+                '/^([ \t]*SetEnv[ \t]+\S+[ \t]+)\S.*$/mi',
+                '/^([ \t]*(?:RequestHeader|Header)[ \t]+(?:always[ \t]+)?\S+[ \t]+[\w-]*(?:auth|key|token|secret|pass|cookie|sig)[\w-]*[ \t]+)\S.*$/mi',
+                '/^([ \t]*php_(?:admin_)?value[ \t]+\S*(?:pass|pw|secret|key|token|licen|auth|save_path)\S*[ \t]+)\S.*$/mi',
+                '/^([ \t]*RewriteCond[ \t]+\S+[ \t]+)\S*(?:key|token|secret|pass|auth|sig)[\w-]*=\S*/mi',
+            ),
+            '${1}' . self::REDACTED_MARKER,
+            (string) $content
+        );
+
         return ( null === $redacted ) ? '' : $redacted;
     }
 
@@ -618,6 +1070,148 @@ class Vigilante_File_Integrity {
     }
 
     /**
+     * Network option recording the version whose results cleanup walked the network
+     *
+     * @since 2.11.8
+     */
+    const RESULTS_SWEEP_OPTION = 'vigilante_results_sweep';
+
+    /**
+     * Clean the stored scan results of every site of the network, once per version
+     *
+     * redact_stored_results() runs per site from admin_init and from the scan,
+     * so a subsite with the module off whose dashboard nobody opens kept the
+     * lines of wp-config.php its last scan stored, with whatever that version
+     * failed to redact. Same gap 2.11.3 and 2.11.4 closed for the baseline copy;
+     * found for the results by the cross review of 2.11.8. It runs from the
+     * network sweep, for a network administrator on the main site, and has its
+     * own marker because the baseline sweep is already done on every network
+     * that updated through 2.11.4.
+     *
+     * @since 2.11.8
+     */
+    private function maybe_sweep_network_results() {
+        if ( VIGILANTE_VERSION === get_site_option( self::RESULTS_SWEEP_OPTION ) ) {
+            return;
+        }
+
+        update_site_option( self::RESULTS_SWEEP_OPTION, VIGILANTE_VERSION );
+
+        $site_ids = get_sites(
+            array(
+                'fields'                 => 'ids',
+                'number'                 => 0,
+                'network_id'             => get_current_network_id(),
+                'update_site_meta_cache' => false,
+            )
+        );
+
+        foreach ( $site_ids as $site_id ) {
+            switch_to_blog( $site_id );
+            $this->redact_stored_results();
+            restore_current_blog();
+        }
+    }
+
+    /**
+     * The diff of a shared file as a site that does not own it gets it
+     *
+     * No lines, and a flag the screens read to say where the lines are.
+     *
+     * @since 2.11.8
+     *
+     * @return array
+     */
+    public static function network_only_diff() {
+        return array(
+            'added'       => array(),
+            'removed'     => array(),
+            'unavailable' => true,
+            'network'     => true,
+        );
+    }
+
+    /**
+     * Take out of the last stored scan what the baseline copy no longer keeps
+     *
+     * The results of the last scan are an option of each site, and the diff of
+     * a critical file travels inside them line by line, redacted the way the
+     * version that ran the scan redacted. Until 2.11.7 that let FTP_PASS and
+     * friends through, and on a network every subsite with the module on kept
+     * its own copy of the lines. This runs once per version with the rest of
+     * the cleanup:
+     *
+     * - Where the shared files do not belong to this site, no line is kept.
+     * - Lines of wp-config.php are dropped. A single line cannot be read as
+     *   PHP reliably (half a heredoc is just words), and the next scan rebuilds
+     *   them from the whole file.
+     * - Lines of .htaccess are directives, one per line, and are redacted in
+     *   place.
+     *
+     * @since 2.11.8
+     */
+    private function redact_stored_results() {
+        $results = get_option( 'vigilante_last_integrity_results' );
+
+        if ( ! is_array( $results ) || empty( $results['modified'] ) || ! is_array( $results['modified'] ) ) {
+            return;
+        }
+
+        $owns    = Vigilante_Settings::owns_shared_files();
+        $changed = false;
+
+        foreach ( $results['modified'] as $index => $item ) {
+            if ( ! is_array( $item ) || 'critical_config' !== ( $item['type'] ?? '' ) || ! isset( $item['diff'] ) || ! is_array( $item['diff'] ) ) {
+                continue;
+            }
+
+            if ( ! $owns ) {
+                if ( empty( $item['diff']['network'] ) ) {
+                    $results['modified'][ $index ]['diff'] = self::network_only_diff();
+                    $changed = true;
+                }
+                continue;
+            }
+
+            if ( 'wp-config.php' === ( $item['file'] ?? '' ) ) {
+                if ( ! empty( $item['diff']['added'] ) || ! empty( $item['diff']['removed'] ) ) {
+                    $results['modified'][ $index ]['diff'] = array(
+                        'added'       => array(),
+                        'removed'     => array(),
+                        'unavailable' => true,
+                        'rescan'      => true,
+                    );
+                    $changed = true;
+                }
+                continue;
+            }
+
+            foreach ( array( 'added', 'removed' ) as $side ) {
+                if ( empty( $item['diff'][ $side ] ) || ! is_array( $item['diff'][ $side ] ) ) {
+                    continue;
+                }
+
+                foreach ( $item['diff'][ $side ] as $line_index => $line ) {
+                    if ( ! is_array( $line ) || ! isset( $line['content'] ) || ! is_string( $line['content'] ) ) {
+                        continue;
+                    }
+
+                    $safe = $this->redact_server_secrets( $line['content'] );
+
+                    if ( $safe !== $line['content'] ) {
+                        $results['modified'][ $index ]['diff'][ $side ][ $line_index ]['content'] = $safe;
+                        $changed = true;
+                    }
+                }
+            }
+        }
+
+        if ( $changed ) {
+            update_option( 'vigilante_last_integrity_results', $results );
+        }
+    }
+
+    /**
      * Clean up what earlier versions stored, wherever they stored it
      *
      * Two jobs, and the second one only exists on a network.
@@ -696,6 +1290,8 @@ class Vigilante_File_Integrity {
             }
         }
 
+        $this->redact_stored_results();
+
         /*
          * The gate does not close while a per-site copy is still waiting to be
          * promoted. Closing it would end the retries for a whole version: the
@@ -750,6 +1346,8 @@ class Vigilante_File_Integrity {
         if ( ! current_user_can( 'manage_network_options' ) ) {
             return;
         }
+
+        $this->maybe_sweep_network_results();
 
         $marker = get_site_option( self::BASELINE_SWEEP_OPTION );
 
@@ -1798,11 +2396,31 @@ class Vigilante_File_Integrity {
              * Both sides go through the same redaction, or every credential
              * line would read as a change nobody made.
              */
-            $baseline_content = $baseline[ $filename ]['content'] ?? '';
-            $current_content  = $this->baseline_content( $filename, $normalized );
-            $diff = ( '' !== $baseline_content && '' !== $current_content )
-                ? $this->compute_simple_diff( $baseline_content, $current_content )
-                : array( 'added' => array(), 'removed' => array(), 'unavailable' => true );
+            /*
+             * Where the shared files do not belong to this site, the lines are
+             * not computed at all. The diff is shown to whoever can open this
+             * site's screen, the administrator of a subsite included, and it
+             * was stored in the options of every subsite with the module on.
+             * Found by the audit of the admin surface for 2.11.8. The change is
+             * still reported, with both sizes, and the lines are read on the
+             * main site, where the change is approved.
+             */
+            if ( ! Vigilante_Settings::owns_shared_files() ) {
+                $diff = self::network_only_diff();
+            } else {
+                $baseline_content = $baseline[ $filename ]['content'] ?? '';
+                $current_content  = $this->baseline_content( $filename, $normalized );
+                $diff = ( '' !== $baseline_content && '' !== $current_content )
+                    ? $this->compute_simple_diff( $baseline_content, $current_content )
+                    : array( 'added' => array(), 'removed' => array(), 'unavailable' => true );
+
+                // Say why there are no lines when today's copy could not be
+                // made safe, which approving does not change: the generic
+                // message talks about an old baseline. Cross review of 2.11.8.
+                if ( '' === $current_content && 'wp-config.php' === $filename ) {
+                    $diff['redaction'] = true;
+                }
+            }
 
             $modified[] = array(
                 'file'          => $filename,
@@ -3738,6 +4356,19 @@ class Vigilante_File_Integrity {
             array_filter(
                 $items,
                 function ( $item ) {
+                    /*
+                     * On a network, wp-config.php and the root .htaccess are not a
+                     * site's to silence: a change to them is closed by approving it,
+                     * and approving takes a network administrator since 2.11.3. The
+                     * ignore list is an option of each site, so until 2.11.8 the
+                     * administrator of the main site without network rights hid a
+                     * pending change from the network administrator's own screen by
+                     * posting the file name to the ignore handler.
+                     */
+                    if ( is_multisite() && is_array( $item ) && 'critical_config' === ( $item['type'] ?? '' ) ) {
+                        return true;
+                    }
+
                     $file = is_array( $item ) && isset( $item['file'] ) ? $item['file'] : '';
                     return ! in_array( $file, $this->ignored_files, true );
                 }
