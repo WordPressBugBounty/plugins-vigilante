@@ -200,6 +200,24 @@ class Vigilante_Admin {
      * Run database migrations based on stored version
      */
     public function run_migrations() {
+        /*
+         * admin-ajax.php fires admin_init before it decides who is asking
+         * (wp-admin/admin-ajax.php:45), so until 2.11.10 an anonymous POST to
+         * admin-ajax.php with any action ran every pending migration. That is
+         * not a read: the migrations rewrite wp-config.php through
+         * apply_security_constants(), rewrite the root .htaccess, move user meta
+         * of the whole network and can rebuild the file integrity baseline,
+         * taking whatever is on disk as approved. Reproduced on 12 sep 2026 with
+         * curl and no cookies, and found by the file-by-file review of 2.11.10.
+         *
+         * Migrations are maintenance for whoever administers the site, so they
+         * wait for an administrator to load a screen. Nothing is lost by
+         * waiting: every migration is idempotent and version gated.
+         */
+        if ( ! is_user_logged_in() || ! current_user_can( 'manage_options' ) ) {
+            return;
+        }
+
         $db_version = get_option( 'vigilante_db_version', '0' );
 
         // 1.2.3: Fix IP lists corrupted by sanitize_text_field stripping newlines
@@ -505,6 +523,108 @@ class Vigilante_Admin {
 
             update_option( 'vigilante_db_version', '2.11.9' );
         }
+
+        /*
+         * 2.11.10: the pending-approval flag becomes one per site on a network.
+         * Until 2.11.9 it was a single global user meta, so the queue was shared
+         * across the whole network. Moving the key is not enough: the accounts
+         * already waiting carry the old key, and reading only the new one would
+         * let them log in. So they are moved here, each to the site it belongs
+         * to, and the old key is removed only once the new one is written.
+         */
+        if ( version_compare( $db_version, '2.11.10', '<' ) ) {
+            $this->migrate_pending_approval_per_site();
+
+            update_option( 'vigilante_db_version', '2.11.10' );
+        }
+    }
+
+    /**
+     * Move the pending-approval flag of a network to a key per site
+     *
+     * Runs once for the whole network, not once per site: the data it moves is
+     * global, so the guard is a network option and any site may be the one that
+     * does it. On a single site the key does not change and there is nothing to
+     * do.
+     *
+     * Each waiting account goes to its primary site, or to the only site it
+     * belongs to; one that belongs to none goes to the main site rather than
+     * nowhere, because losing the flag would silently approve it.
+     *
+     * @since 2.11.10
+     */
+    private function migrate_pending_approval_per_site() {
+        global $wpdb;
+
+        if ( ! is_multisite() ) {
+            return;
+        }
+
+        if ( get_site_option( 'vigilante_pending_per_site_done' ) ) {
+            return;
+        }
+
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- One-off migration of the plugin's own user meta; the meta API has no "list every user with this key".
+        $user_ids = $wpdb->get_col(
+            $wpdb->prepare( "SELECT DISTINCT user_id FROM {$wpdb->usermeta} WHERE meta_key = %s", 'vigilante_pending_approval' )
+        );
+
+        foreach ( (array) $user_ids as $user_id ) {
+            $user_id = (int) $user_id;
+            if ( ! $user_id ) {
+                continue;
+            }
+
+            $pending = get_user_meta( $user_id, 'vigilante_pending_approval', true );
+            $since   = get_user_meta( $user_id, 'vigilante_pending_since', true );
+
+            /*
+             * Every site the account belongs to, not its primary one. The global
+             * flag does not say where the registration happened, and the first
+             * version of this guessed the primary blog: an account that
+             * registered on B while its primary was A came out pending on A and
+             * free to log in on B, which is the very site it had never been
+             * approved on. Found by the cross review of 2.11.10.
+             *
+             * Marking every site it belongs to fails closed instead: the account
+             * stays blocked wherever it can log in, and shows up in the queue of
+             * each of those sites so somebody can actually act on it. An account
+             * that belongs to no site goes to the main one rather than nowhere,
+             * because losing the flag would silently approve it.
+             */
+            /*
+             * With $all true, because the default leaves out archived, spam and
+             * deleted sites (wp-includes/user.php:1113-1117): a site archived on
+             * the day this runs would lose the flag, and the account would walk
+             * in unapproved the moment it was brought back. Found by the second
+             * cross review of 2.11.10.
+             */
+            $blog_ids = array();
+
+            foreach ( get_blogs_of_user( $user_id, true ) as $blog ) {
+                if ( ! empty( $blog->userblog_id ) ) {
+                    $blog_ids[] = (int) $blog->userblog_id;
+                }
+            }
+
+            if ( empty( $blog_ids ) ) {
+                $blog_ids[] = (int) get_main_site_id();
+            }
+
+            foreach ( array_unique( $blog_ids ) as $blog_id ) {
+                $prefix = $wpdb->get_blog_prefix( $blog_id );
+
+                update_user_meta( $user_id, $prefix . 'vigilante_pending_approval', $pending );
+                if ( '' !== $since && false !== $since ) {
+                    update_user_meta( $user_id, $prefix . 'vigilante_pending_since', $since );
+                }
+            }
+
+            delete_user_meta( $user_id, 'vigilante_pending_approval' );
+            delete_user_meta( $user_id, 'vigilante_pending_since' );
+        }
+
+        update_site_option( 'vigilante_pending_per_site_done', 1 );
     }
 
     /**
@@ -777,20 +897,29 @@ class Vigilante_Admin {
             return 0;
         }
         
-        $registration_approval = $this->settings->get_section( 'user_security' );
-        $approval_settings = $registration_approval['registration_approval'] ?? array();
-        
-        if ( empty( $approval_settings['enabled'] ) ) {
-            return 0;
-        }
+        /*
+         * Counted whether the feature is on or off. An account already waiting
+         * stays blocked when it is switched off (see init_enforcement_hooks()),
+         * so reporting zero there hid people who cannot log in and whom nobody
+         * could see to approve. Found by the cross review of 2.11.10.
+         */
 
         // phpcs:disable WordPress.DB.SlowDBQuery.slow_db_query_meta_key, WordPress.DB.SlowDBQuery.slow_db_query_meta_value -- Limited results in admin context.
-        $pending_users = get_users( array(
-            'meta_key'   => 'vigilante_pending_approval',
+        $args = array(
+            'meta_key'   => Vigilante_User_Security::site_user_meta_key( 'vigilante_pending_approval' ),
             'meta_value' => '1',
             'fields'     => 'ID',
-        ) );
+        );
         // phpcs:enable WordPress.DB.SlowDBQuery.slow_db_query_meta_key, WordPress.DB.SlowDBQuery.slow_db_query_meta_value
+
+        // Same query as Vigilante_User_Security::get_pending_users(), and for the
+        // same reason: the meta key already scopes this to the site, and adding
+        // core's membership filter on top hid the accounts that have no role yet.
+        if ( is_multisite() ) {
+            $args['blog_id'] = 0;
+        }
+
+        $pending_users = get_users( $args );
 
         return count( $pending_users );
     }
@@ -3441,7 +3570,7 @@ class Vigilante_Admin {
                     <tr>
                         <th scope="row"><label for="vigilante-f-firewall-trusted-proxies"><?php esc_html_e( 'Trusted proxy IPs', 'vigilante' ); ?></label></th>
                         <td>
-                            <textarea id="vigilante-f-firewall-trusted-proxies" name="firewall[trusted_proxies]" rows="3" class="large-text code" placeholder="10.0.0.0/8&#10;192.168.1.1"><?php echo esc_textarea( implode( "\n", $options['trusted_proxies'] ?? array() ) ); ?></textarea>
+                            <textarea id="vigilante-f-firewall-trusted-proxies" name="firewall[trusted_proxies]" rows="3" class="large-text code" placeholder="10.0.0.0/8&#10;192.168.1.1" <?php disabled( $vg_main_locked ); ?>><?php echo esc_textarea( implode( "\n", $options['trusted_proxies'] ?? array() ) ); ?></textarea>
                             <p class="description">
                                 <?php esc_html_e( 'Only used with a forwarded header selected above. One IP or CIDR range per line: the addresses your proxy or load balancer connects from. The forwarded header is accepted only from these. Left empty, Vigilant accepts it from your own private network, and for Cloudflare from Cloudflare\'s own ranges automatically.', 'vigilante' ); ?>
                                 <?php if ( in_array( $proxy_header, array( 'x-forwarded-for', 'x-real-ip' ), true ) && empty( $options['trusted_proxies'] ) ) : ?>
@@ -4816,6 +4945,14 @@ class Vigilante_Admin {
                 </h2>
                 <p><?php esc_html_e( 'Limit the number of simultaneous sessions per user.', 'vigilante' ); ?></p>
 
+                <?php if ( Vigilante_User_Security::session_limit_is_network_wide() ) : ?>
+                    <div class="notice notice-warning inline">
+                        <p>
+                            <?php esc_html_e( 'This limit does not apply on a network. WordPress keeps the sessions of an account for the whole network, not per site, so a limit set here would count and close the sessions that person opened on other sites, including an administrator session elsewhere. A network-wide session policy is planned; until then these settings are saved but not enforced.', 'vigilante' ); ?>
+                        </p>
+                    </div>
+                <?php endif; ?>
+
                 <table class="form-table">
                     <tr>
                         <th scope="row"><?php esc_html_e( 'Enable Session Limits', 'vigilante' ); ?></th>
@@ -5157,7 +5294,15 @@ class Vigilante_Admin {
 
             <!-- Pending Registrations -->
             <?php
-            $user_security = new Vigilante_User_Security( $this->settings, $this->activity_log );
+            // Enforcement-only: this instance exists to read the queue, and the
+            // flag keeps it from registering the module's own hooks a second
+            // time. It is not inert, and saying it was would be a false comment:
+            // init_enforcement_hooks() does add its three filters again, on top
+            // of the ones already registered. They are idempotent (the same
+            // methods of an equivalent instance, deciding on the same user meta),
+            // so running them twice in an admin request changes nothing, which is
+            // why this is accepted rather than worked around.
+            $user_security = new Vigilante_User_Security( $this->settings, $this->activity_log, true );
             $pending_users = $user_security->get_pending_users();
             ?>
             <div id="vigilante-section-users-pending" class="vigilante-tool-box vigilante-pending-users-section">
@@ -5168,7 +5313,18 @@ class Vigilante_Admin {
                     <?php endif; ?>
                 </h3>
 
-                <?php if ( empty( $registration['enabled'] ) ) : ?>
+                <?php
+                /*
+                 * The queue is shown whenever there is somebody in it, even with
+                 * the feature off. Since 2.11.10 an account already waiting stays
+                 * blocked when the feature is switched off, which is the point:
+                 * turning a setting off must not quietly let in people an
+                 * administrator decided not to approve. But hiding the table then
+                 * left them locked out with no button anywhere to approve or
+                 * reject them. Found by the cross review of 2.11.10.
+                 */
+                ?>
+                <?php if ( empty( $registration['enabled'] ) && empty( $pending_users ) ) : ?>
                     <p class="description">
                         <span class="dashicons dashicons-info" style="color: #72aee6;"></span>
                         <?php esc_html_e( 'Registration approval is disabled. Enable it in the settings above to require manual approval for new users.', 'vigilante' ); ?>
@@ -5191,7 +5347,7 @@ class Vigilante_Admin {
                         </thead>
                         <tbody>
                             <?php foreach ( $pending_users as $pending_user ) : 
-                                $pending_since = get_user_meta( $pending_user->ID, 'vigilante_pending_since', true );
+                                $pending_since = get_user_meta( $pending_user->ID, Vigilante_User_Security::site_user_meta_key( 'vigilante_pending_since' ), true );
                             ?>
                             <tr data-user-id="<?php echo esc_attr( $pending_user->ID ); ?>">
                                 <td>

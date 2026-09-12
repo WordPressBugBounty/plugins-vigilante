@@ -520,9 +520,8 @@ class Vigilante_Htaccess_Protection {
 
         // The connection address is always checked. When the site declared a
         // trusted proxy header (Firewall visitor IP detection, v2.7.0), the
-        // real visitor IP travels in that header, so it is checked too.
-        $ip_variables = array( '%{REMOTE_ADDR}' => false );
-
+        // real visitor IP travels in that header, so it is checked too, but only
+        // from a peer that is one of the declared proxies (see below).
         $proxy_variables = array(
             'cf-connecting-ip' => array( '%{HTTP:CF-Connecting-IP}', false ),
             'x-real-ip'        => array( '%{HTTP:X-Real-IP}', false ),
@@ -533,13 +532,92 @@ class Vigilante_Htaccess_Protection {
             'x-forwarded-for'  => array( '%{HTTP:X-Forwarded-For}', true ),
         );
 
-        $trusted = isset( $this->options['trusted_proxy_header'] ) ? (string) $this->options['trusted_proxy_header'] : '';
+        $trusted         = isset( $this->options['trusted_proxy_header'] ) ? (string) $this->options['trusted_proxy_header'] : '';
+        $header_variable = null;
+        $header_is_chain = false;
 
         if ( isset( $proxy_variables[ $trusted ] ) ) {
-            $ip_variables[ $proxy_variables[ $trusted ][0] ] = $proxy_variables[ $trusted ][1];
+            $header_variable = $proxy_variables[ $trusted ][0];
+            $header_is_chain = $proxy_variables[ $trusted ][1];
+        }
+
+        /*
+         * The header only counts when the connection comes from a proxy the site
+         * declared, exactly the policy Vigilante_IP_Utils::peer_is_trusted_proxy()
+         * applies in PHP. Until 2.11.10 this half emitted the header condition on
+         * its own, so anyone reaching the origin directly and sending
+         * X-Forwarded-For with a whitelisted address skipped the Apache filters
+         * for SQL injection, XSS, traversal, methods and bad bots. It is the same
+         * spoofing wp.org reported as 6.1 against 2.11.8, in the half that fix did
+         * not reach. Found by the file-by-file review of 2.11.10.
+         *
+         * Apache cannot express "trusted peer" inside a negated chain, so the
+         * peer is resolved once into an environment variable and every header
+         * condition is OR-ed with it. With no trusted proxies declared the header
+         * is not honoured here at all, which fails safe: the PHP layer still
+         * exempts the visitor, so a whitelisted address loses nothing except the
+         * exemption from filters it was never going to trip.
+         */
+        $proxy_patterns = array();
+
+        foreach ( (array) ( isset( $this->options['trusted_proxies'] ) ? $this->options['trusted_proxies'] : array() ) as $proxy_entry ) {
+            $proxy_entry = trim( (string) $proxy_entry );
+
+            /*
+             * The same filter the PHP side applies, and it has to be the same
+             * one: Vigilante_IP_Utils::in_list_ip_or_cidr() rejects wildcards and
+             * ranges too wide to name a proxy, while ip_entry_to_pattern()
+             * accepts both. Without this, an entry like 10.* that reached the
+             * option through an import (which does not pass
+             * split_list_ip_or_cidr()) made Apache trust a peer that PHP does
+             * not, which is the trust-everyone footgun this list exists to
+             * avoid. Found by the cross review of 2.11.10.
+             *
+             * "The same one" is now literally true and was not when it was
+             * written: the two sides ran different code that happened to agree
+             * on most inputs. They share proxy_prefix_is_sane() and
+             * same_address() (class-ip-utils.php), so a disagreement has to be
+             * introduced on purpose. The second cross review of 2.11.10 found
+             * the two that were left, an IPv6 written in another case and a /1.
+             */
+            if ( ! Vigilante_IP_Utils::is_valid_proxy( $proxy_entry ) ) {
+                continue;
+            }
+
+            $proxy_pattern = $this->ip_entry_to_pattern( $proxy_entry );
+
+            if ( null === $proxy_pattern ) {
+                continue;
+            }
+
+            $proxy_patterns[] = ( 'exact' === $proxy_pattern['type'] )
+                ? '^' . $proxy_pattern['regex'] . '$'
+                : '^' . $proxy_pattern['regex'];
         }
 
         $ip_list = isset( $this->options['ip_whitelist'] ) ? (array) $this->options['ip_whitelist'] : array();
+
+        // Nothing to exempt means nothing to emit: without a whitelist the
+        // SetEnvIf served no purpose and was written three times anyway, once per
+        // block that uses these exceptions.
+        if ( empty( $proxy_patterns ) || empty( $ip_list ) ) {
+            $header_variable = null;
+        }
+
+        if ( null !== $header_variable ) {
+            /*
+             * Inside its own IfModule, and not inside the mod_rewrite one this
+             * block lives in. Measured on Apache: an unknown directive inside
+             * <IfModule mod_rewrite.c> returns 500 for the whole tree, so a
+             * server without mod_setenvif would be taken down by the file
+             * Vigilant writes to the document root. Found by the cross review of
+             * 2.11.10. Without the variable set, the condition below reads it as
+             * empty and the header simply never exempts, which is the safe side.
+             */
+            $lines[] = '    <IfModule mod_setenvif.c>';
+            $lines[] = '        SetEnvIf Remote_Addr "' . implode( '|', $proxy_patterns ) . '" VIGILANTE_TRUSTED_PROXY=1';
+            $lines[] = '    </IfModule>';
+        }
 
         foreach ( $ip_list as $entry ) {
             $pattern = $this->ip_entry_to_pattern( trim( (string) $entry ) );
@@ -550,23 +628,38 @@ class Vigilante_Htaccess_Protection {
                 continue;
             }
 
-            foreach ( $ip_variables as $variable => $is_chain ) {
-                /*
-                 * In a chain, the whitelisted address has to be the LAST entry.
-                 * The PHP layer also passes over private addresses at the end,
-                 * which a regular expression here cannot do without spelling
-                 * out every private range; so behind a proxy of the site's own
-                 * network these rules exempt less than PHP does, never more.
-                 */
-                if ( 'exact' === $pattern['type'] && ! $is_chain ) {
-                    $lines[] = '    RewriteCond ' . $variable . ' "!=' . $pattern['ip'] . '" [NC]';
-                } elseif ( 'exact' === $pattern['type'] ) {
-                    $lines[] = '    RewriteCond ' . $variable . ' "!(^|, *)' . $pattern['regex'] . ' *$" [NC]';
-                } elseif ( $is_chain ) {
-                    $lines[] = '    RewriteCond ' . $variable . ' "!(^|, *)' . $pattern['regex'] . '[^,]*$" [NC]';
-                } else {
-                    $lines[] = '    RewriteCond ' . $variable . ' "!^' . $pattern['regex'] . '" [NC]';
-                }
+            // The connection address is always checked, on its own.
+            if ( 'exact' === $pattern['type'] ) {
+                $lines[] = '    RewriteCond %{REMOTE_ADDR} "!=' . $pattern['ip'] . '" [NC]';
+            } else {
+                $lines[] = '    RewriteCond %{REMOTE_ADDR} "!^' . $pattern['regex'] . '" [NC]';
+            }
+
+            if ( null === $header_variable ) {
+                continue;
+            }
+
+            /*
+             * And the header, but only when the peer is one of the declared
+             * proxies: the [OR] ties the two, so the exemption needs a trusted
+             * peer AND a matching header.
+             *
+             * In a chain the whitelisted address has to be the LAST entry. The
+             * PHP layer also passes over private addresses at the end, which a
+             * regular expression here cannot do without spelling out every
+             * private range; so behind a proxy of the site's own network these
+             * rules exempt less than PHP does, never more.
+             */
+            $lines[] = '    RewriteCond %{ENV:VIGILANTE_TRUSTED_PROXY} "!=1" [OR]';
+
+            if ( 'exact' === $pattern['type'] && ! $header_is_chain ) {
+                $lines[] = '    RewriteCond ' . $header_variable . ' "!=' . $pattern['ip'] . '" [NC]';
+            } elseif ( 'exact' === $pattern['type'] ) {
+                $lines[] = '    RewriteCond ' . $header_variable . ' "!(^|, *)' . $pattern['regex'] . ' *$" [NC]';
+            } elseif ( $header_is_chain ) {
+                $lines[] = '    RewriteCond ' . $header_variable . ' "!(^|, *)' . $pattern['regex'] . '[^,]*$" [NC]';
+            } else {
+                $lines[] = '    RewriteCond ' . $header_variable . ' "!^' . $pattern['regex'] . '" [NC]';
             }
         }
 

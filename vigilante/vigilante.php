@@ -3,7 +3,7 @@
  * Plugin Name: Vigilant - 100% Free Security Suite: Firewall, 2FA, Login, Headers, Scanner…
  * Plugin URI: https://servicios.ayudawp.com
  * Description: Complete security solution for WordPress. Firewall, 2FA, security headers, login protection, file integrity monitoring, activity logging and more.
- * Version: 2.11.9
+ * Version: 2.11.10
  * Author: Fernando Tellado
  * Author URI: https://ayudawp.com
  * Text Domain: vigilante
@@ -24,7 +24,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Plugin constants
  */
-define( 'VIGILANTE_VERSION', '2.11.9' );
+define( 'VIGILANTE_VERSION', '2.11.10' );
 define( 'VIGILANTE_PLUGIN_FILE', __FILE__ );
 define( 'VIGILANTE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'VIGILANTE_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -365,13 +365,43 @@ final class Vigilante_Main {
         // User Security
         if ( ! empty( $options['modules']['user_security'] ) ) {
             new Vigilante_User_Security( $this->settings, $this->activity_log );
+        } else {
+            /*
+             * Turning the module off must not quietly unlock the accounts it
+             * already locked. A forced password reset and a registration waiting
+             * for approval are marks written on somebody's account, with their
+             * sessions already destroyed and the activity log saying they cannot
+             * get in; until 2.11.10 both stopped being enforced the moment this
+             * toggle went off and every one of those accounts logged in again
+             * with its old password. Only the enforcing half is registered here.
+             */
+            new Vigilante_User_Security( $this->settings, $this->activity_log, true );
         }
 
         // Login Security
+        $login_security = null;
+
         if ( ! empty( $options['modules']['login_security'] ) ) {
             $login_security = new Vigilante_Login_Security( $this->settings, $this->database, $this->activity_log );
-            
-            // Two-Factor Authentication (only if login security module is active)
+        }
+
+        /*
+         * Two factor on a network is decided for the whole network, so it has to
+         * be ENFORCED on the whole network too. Gating these two on this site's
+         * module toggle left the last leg of the bypass open: the administrator
+         * of any subsite can turn Login Security off on their own site, which
+         * takes them out of the picture but not out of the network, and the
+         * session cookie WordPress issues there is valid on every host of it. So
+         * a login sent to that subsite registered no second factor check at all
+         * and the cookie it handed back opened the main site. Reproduced over
+         * HTTP by the second cross review of 2.11.10.
+         *
+         * Same reasoning, and the same shape, as the enforcement-only User
+         * Security above: on a network the enforcing half is registered whatever
+         * this site says. On a single site there is no other site to protect and
+         * the toggle means what it says.
+         */
+        if ( is_multisite() || null !== $login_security ) {
             new Vigilante_Two_Factor_Email( $this->settings, $this->database, $this->activity_log, $login_security );
             new Vigilante_Two_Factor_TOTP( $this->settings, $this->database, $this->activity_log, $login_security );
         }

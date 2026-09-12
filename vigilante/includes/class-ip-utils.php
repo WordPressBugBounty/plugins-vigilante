@@ -40,8 +40,9 @@ class Vigilante_IP_Utils {
             return false;
         }
 
-        // Exact match (also covers fully-written IPv6).
-        if ( $ip === $pattern ) {
+        // Exact match, comparing what the addresses ARE and not how they are
+        // written (see same_address()).
+        if ( self::same_address( $ip, $pattern ) ) {
             return true;
         }
 
@@ -114,12 +115,22 @@ class Vigilante_IP_Utils {
                 continue;
             }
 
-            if ( $ip === $pattern ) {
+            if ( self::same_address( $ip, $pattern ) ) {
                 return true;
             }
 
-            if ( false !== strpos( $pattern, '/' ) && self::cidr_match( $ip, $pattern ) ) {
-                return true;
+            if ( false !== strpos( $pattern, '/' ) ) {
+                // A range too wide to name anything is ignored here as well as
+                // rejected on the way in: an entry can arrive by import or from
+                // an older version, and it must not turn every peer into a
+                // trusted proxy. See proxy_prefix_is_sane().
+                if ( ! self::proxy_prefix_is_sane( $pattern ) ) {
+                    continue;
+                }
+
+                if ( self::cidr_match( $ip, $pattern ) ) {
+                    return true;
+                }
             }
         }
 
@@ -239,7 +250,112 @@ class Vigilante_IP_Utils {
     public static function is_valid_proxy( $pattern ) {
         $pattern = trim( (string) $pattern );
 
-        return false === strpos( $pattern, '*' ) && self::is_valid_pattern( $pattern );
+        if ( false !== strpos( $pattern, '*' ) || ! self::is_valid_pattern( $pattern ) ) {
+            return false;
+        }
+
+        return self::proxy_prefix_is_sane( $pattern );
+    }
+
+    /**
+     * Whether a CIDR entry is narrow enough to name a proxy
+     *
+     * A prefix length of zero matches every address, so 0.0.0.0/0 and ::/0 say
+     * exactly what the rejected '*' says, written as a CIDR. Rejecting the
+     * wildcard and accepting those was the same footgun with another spelling:
+     * with either one in the list every peer counts as a trusted proxy and any
+     * visitor picks the address the firewall sees, which is the forwarded-header
+     * spoofing (6.1) this list exists to prevent. Found by the file-by-file
+     * review of 2.11.10.
+     *
+     * Stopping at zero was not enough, and that is the second cross review of
+     * 2.11.10: 0.0.0.0/1 and 128.0.0.0/1 are two accepted entries that between
+     * them cover the whole internet, with the same effect and no warning. So the
+     * question is not "is it zero" but "can this range name a proxy". The floors
+     * are 8 for IPv4, the widest range that still names something real (the
+     * classic private network is 10.0.0.0/8), and 7 for IPv6, because fc00::/7 is
+     * how the whole IPv6 private space is written and this very class treats it
+     * as the own network in is_own_network(). A first version put the IPv6 floor
+     * at 16 and refused fc00::/7, fd00::/8 (what Docker hands out) and fe80::/10,
+     * so a list that already held one of them stopped honouring the header
+     * altogether and every visitor came out with the proxy's address: the tool
+     * contradicting itself about what a private network is. Found by the third
+     * cross review of 2.11.10. With 7, ::/0 and 2000::/3, which is all of the
+     * routable internet, are still refused.
+     *
+     * Measured against what the CDNs publish, and all of them pass: Cloudflare
+     * (/13, /15, /29), Fastly (/16, /32), Akamai (/10, /11, /13, /24), Sucuri
+     * (/22, /23), Bunny (/32), CloudFront (/15) and Google (/16, /22).
+     *
+     * Kept deliberately as a floor and not as a warning: an entry this wide is
+     * indistinguishable from the wildcard that is already refused, and the cost
+     * of being wrong is that any visitor chooses their own address.
+     *
+     * @since 2.11.10
+     *
+     * @param string $pattern Address or CIDR range.
+     * @return bool True when it is an exact address or a narrow enough range.
+     */
+    public static function proxy_prefix_is_sane( $pattern ) {
+        $pattern = trim( (string) $pattern );
+
+        if ( false === strpos( $pattern, '/' ) ) {
+            return true;
+        }
+
+        $parts = explode( '/', $pattern, 2 );
+
+        if ( 2 !== count( $parts ) ) {
+            return false;
+        }
+
+        $subnet = trim( $parts[0] );
+        $bits   = (int) trim( $parts[1] );
+        $packed = inet_pton( $subnet );
+
+        if ( false === $packed ) {
+            return false;
+        }
+
+        $minimo = ( 4 === strlen( $packed ) ) ? 8 : 7;
+
+        return ( $bits >= $minimo );
+    }
+
+    /**
+     * Whether two written addresses are the same address
+     *
+     * Comparing the strings was enough for IPv4 and wrong for IPv6, where the
+     * same address has many spellings: 2001:DB8::1, 2001:db8::1 and
+     * 2001:0db8:0000:0000:0000:0000:0000:0001 are one address written three
+     * ways, and only the last two compared equal to each other. It mattered
+     * because the .htaccess side normalises with inet_pton()/inet_ntop() before
+     * writing its rule, so Apache exempted a peer that PHP did not recognise,
+     * which is the direction that opens something: measured against a real
+     * Apache by the second cross review of 2.11.10.
+     *
+     * Falls back to the string comparison when either side is not an address, so
+     * nothing that used to match stops matching.
+     *
+     * @since 2.11.10
+     *
+     * @param string $a First address.
+     * @param string $b Second address.
+     * @return bool
+     */
+    public static function same_address( $a, $b ) {
+        if ( $a === $b ) {
+            return true;
+        }
+
+        $pa = inet_pton( $a );
+        $pb = inet_pton( $b );
+
+        if ( false === $pa || false === $pb ) {
+            return false;
+        }
+
+        return ( $pa === $pb );
     }
 
     /**

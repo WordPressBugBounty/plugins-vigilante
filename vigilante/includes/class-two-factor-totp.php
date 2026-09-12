@@ -102,10 +102,38 @@ class Vigilante_Two_Factor_TOTP {
         $this->activity_log   = $activity_log;
         $this->login_security = $login_security;
 
-        $login_options = $settings->get_section( 'login_security' );
-        $this->options = $login_options['two_factor'] ?? array();
+        // The mechanics (method, expiry, grace period) come from the main site on
+        // a network, so they are the same wherever the login arrives. Whether an
+        // account NEEDS a second factor is a separate question with its own
+        // answer, see Vigilante_Settings::two_factor_required_for().
+        $this->options = null;
 
-        if ( $this->is_active() ) {
+        /*
+         * Gating here on this site's own setting was the fourth leg of the
+         * bypass the first cross review found: with two factor on in one subsite
+         * and off in another, the login sent to the permissive one registered
+         * nothing at all, and the cookie it issued was valid across the whole
+         * network. So on a network the hooks go up wherever the login lands.
+         *
+         * Which of the two classes actually handles a given login is NOT decided
+         * here any more. The second cross review found that registering both was
+         * a downgrade (a network set to use an authenticator app also mailed
+         * codes), and the third found that picking one here by the main site's
+         * method was a hole (with the main site on totp and a subsite asking for
+         * email, the account had no enrolment and the login went through). Both
+         * come from the same mistake: the method is a property of the account, not
+         * of the site the login arrives at. So both classes register and each one
+         * asks Vigilante_Settings::two_factor_handler_for() whether this login is
+         * theirs. Registering a filter costs nothing; the election does not run
+         * until a login is known to need a second factor.
+         *
+         * Nothing is read from the options here on a network, and that is on
+         * purpose too: this constructor runs on init on EVERY request of every
+         * site, and reading the main site's policy here meant a switch_to_blog()
+         * plus the whole autoloaded option set of the main site on every front
+         * page view of every subsite (measured: 318 rows, 89 KB).
+         */
+        if ( is_multisite() || ! empty( $this->policy()['enabled'] ) ) {
             $this->init_hooks();
         }
     }
@@ -116,8 +144,8 @@ class Vigilante_Two_Factor_TOTP {
      * @return bool
      */
     public function is_active() {
-        return ! empty( $this->options['enabled'] )
-            && 'totp' === ( $this->options['method'] ?? 'email' );
+        return ! empty( $this->policy()['enabled'] )
+            && 'totp' === ( $this->policy()['method'] ?? 'email' );
     }
 
     /**
@@ -226,6 +254,12 @@ class Vigilante_Two_Factor_TOTP {
             return $user;
         }
 
+        // And whether this class is the one that must ask. Both are registered on
+        // a network; the election is per account (see two_factor_handler_for()).
+        if ( ! $this->handles_second_factor( $user, 'totp' ) ) {
+            return $user;
+        }
+
         // Check if device is trusted
         if ( $this->is_device_trusted( $user->ID ) ) {
             return $user;
@@ -240,7 +274,7 @@ class Vigilante_Two_Factor_TOTP {
 
             if ( ! $totp_data ) {
                 // First time - create grace period placeholder
-                $grace_days    = absint( $this->options['grace_period_days'] ?? 3 );
+                $grace_days    = absint( $this->policy()['grace_period_days'] ?? 3 );
                 $grace_expires = ( $grace_days > 0 )
                     ? gmdate( 'Y-m-d H:i:s', time() + ( $grace_days * DAY_IN_SECONDS ) )
                     : gmdate( 'Y-m-d H:i:s', time() );
@@ -273,20 +307,10 @@ class Vigilante_Two_Factor_TOTP {
      * @return bool
      */
     public function user_requires_2fa( $user ) {
-        $excluded_users = $this->options['excluded_users'] ?? array();
-        if ( in_array( $user->ID, array_map( 'absint', $excluded_users ), true ) ) {
-            return false;
-        }
-
-        $enforced_roles = $this->options['enforced_roles'] ?? array( 'administrator', 'editor' );
-
-        foreach ( $user->roles as $role ) {
-            if ( in_array( $role, $enforced_roles, true ) ) {
-                return true;
-            }
-        }
-
-        return false;
+        // One answer for the whole network: two factor is required if any site
+        // the account belongs to asks for it, with that site's own enforced roles
+        // and exclusions. See Vigilante_Settings::two_factor_required_for().
+        return Vigilante_Settings::two_factor_required_for( $user );
     }
 
     /**
@@ -296,7 +320,7 @@ class Vigilante_Two_Factor_TOTP {
      * @return bool
      */
     private function is_within_grace_period( $user_id ) {
-        $grace_days = absint( $this->options['grace_period_days'] ?? 3 );
+        $grace_days = absint( $this->policy()['grace_period_days'] ?? 3 );
 
         if ( 0 === $grace_days ) {
             return false;
@@ -323,6 +347,16 @@ class Vigilante_Two_Factor_TOTP {
      * Handle 2FA verification form submission
      */
     public function handle_2fa_form() {
+        /*
+         * Y solo ella la verifica. Volver aqui no deja pasar nada: la otra clase
+         * esta enganchada a la misma accion y termina la peticion por su cuenta,
+         * que es lo que evita el fallthrough a wp_signon() que avisa el comentario
+         * de abajo.
+         */
+        if ( ! $this->pending_belongs_to( 'totp' ) ) {
+            return;
+        }
+
         // The pending user is resolved first so that a failed nonce can be
         // explained on the form and recorded (S15). Both failure paths end the
         // request: a bare return would let wp-login.php fall through to its
@@ -344,7 +378,7 @@ class Vigilante_Two_Factor_TOTP {
         // form never passes through. The limit is checked before any code is
         // verified so that a session past it costs nothing, since a backup
         // code check alone is up to ten wp_check_password() calls.
-        $max_attempts = absint( $this->options['max_attempts'] ?? 3 );
+        $max_attempts = absint( $this->policy()['max_attempts'] ?? 3 );
 
         if ( $max_attempts < 1 ) {
             $max_attempts = 3;
@@ -404,6 +438,11 @@ class Vigilante_Two_Factor_TOTP {
      * Show 2FA form on login page
      */
     public function maybe_show_2fa_form() {
+        // Solo la clase que atiende esta verificacion pinta su formulario.
+        if ( ! $this->pending_belongs_to( 'totp' ) ) {
+            return;
+        }
+
         // Don't show 2FA form on logout or other non-auth actions
         // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Just checking URL params for display logic
         if ( isset( $_GET['loggedout'] ) || isset( $_GET['action'] ) ) {
@@ -433,7 +472,7 @@ class Vigilante_Two_Factor_TOTP {
         $error = get_transient( 'vigilante_2fa_error_' . $user_id );
         delete_transient( 'vigilante_2fa_error_' . $user_id );
 
-        $remember_days = absint( $this->options['remember_device_days'] ?? 30 );
+        $remember_days = absint( $this->policy()['remember_device_days'] ?? 30 );
 
         // Check remaining backup codes
         $backup_remaining = $this->count_remaining_backup_codes( $user_id );
@@ -499,7 +538,7 @@ class Vigilante_Two_Factor_TOTP {
                        required>
             </p>
 
-            <?php if ( ! empty( $this->options['allow_remember_device'] ) ) : ?>
+            <?php if ( ! empty( $this->policy()['allow_remember_device'] ) ) : ?>
             <p class="vigilante-2fa-field vigilante-2fa-remember">
                 <label>
                     <input type="checkbox" name="vigilante_2fa_remember" value="1">
@@ -924,6 +963,19 @@ class Vigilante_Two_Factor_TOTP {
 
         $totp_data  = $this->database->get_totp_data( $user->ID );
         $configured = $totp_data && ! empty( $totp_data['is_configured'] );
+
+        /*
+         * And only for accounts this class actually asks. Since 2.11.10 the hooks
+         * of both second factor classes go up whenever the feature is on, because
+         * which one asks is decided per account and not per site, so without this
+         * an install configured for a code by email would show an authenticator
+         * app section to everybody. An account already enrolled keeps seeing it
+         * whatever the site is set to, or it would have no way to manage or reset
+         * an enrolment it already has.
+         */
+        if ( ! $configured && ! $this->handles_second_factor( $user, 'totp' ) ) {
+            return;
+        }
 
         wp_nonce_field( 'vigilante_totp_profile', 'vigilante_totp_nonce' );
         ?>
@@ -1368,7 +1420,7 @@ class Vigilante_Two_Factor_TOTP {
         $this->database->reset_totp_data( $user_id );
 
         // If grace period is configured, set a new one
-        $grace_days = absint( $this->options['grace_period_days'] ?? 3 );
+        $grace_days = absint( $this->policy()['grace_period_days'] ?? 3 );
         if ( $grace_days > 0 ) {
             $grace_expires = gmdate( 'Y-m-d H:i:s', time() + ( $grace_days * DAY_IN_SECONDS ) );
             $this->database->create_totp_placeholder( $user_id, $grace_expires );
@@ -1418,7 +1470,7 @@ class Vigilante_Two_Factor_TOTP {
      */
     public function send_activation_email( $user, $site_name, $from_name ) {
         $profile_url = admin_url( 'profile.php' );
-        $grace_days  = absint( $this->options['grace_period_days'] ?? 3 );
+        $grace_days  = absint( $this->policy()['grace_period_days'] ?? 3 );
 
         $subject = sprintf(
             /* translators: %s: Site name */

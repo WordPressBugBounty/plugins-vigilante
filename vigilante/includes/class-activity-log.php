@@ -142,7 +142,7 @@ class Vigilante_Activity_Log {
      * Gate checks (in order):
      * 1. Module master switch (modules.activity_log)
      * 2. Per-type flag via $type_flag_map (types not in the map always pass)
-     * 3. Sub-check: failed logins respect log_failed_logins
+     * 3. Login: each of its two checkboxes governs its own half (see below)
      * 4. User/IP exclusions
      *
      * @param string $type     Event type.
@@ -161,16 +161,40 @@ class Vigilante_Activity_Log {
         // Gate 2: Per-type flag
         $current_options = $this->get_current_options();
 
-        if ( isset( self::$type_flag_map[ $type ] ) ) {
+        if ( isset( self::$type_flag_map[ $type ] ) && 'login' !== $type ) {
             $flag = self::$type_flag_map[ $type ];
             if ( empty( $current_options[ $flag ] ) ) {
                 return false;
             }
         }
 
-        // Gate 3: Failed logins sub-check
-        if ( 'login' === $type && in_array( $action, array( 'failed', 'lockout' ), true ) ) {
-            if ( empty( $current_options['log_failed_logins'] ) ) {
+        /*
+         * Gate 3: login is the one type with two checkboxes, offered side by
+         * side as "Successful logins" and "Failed login attempts". Until 2.11.10
+         * the per-type gate above cut first, so unchecking the first one also
+         * silenced the second and with it everything security relevant this type
+         * carries: failed attempts, lockouts, logins blocked by a forced reset
+         * and the probes of the hidden wp-admin and login. The audit alerts of
+         * the login category went quiet at the same time, because they only fire
+         * for events that get stored, so a site under attack looked calm on both
+         * screens. Found by the file-by-file review of 2.11.10.
+         *
+         * Each checkbox governs its own half now: a successful login answers to
+         * log_logins, and everything else about login, which is attack traffic,
+         * answers to log_failed_logins.
+         */
+        if ( 'login' === $type ) {
+            /*
+             * Written as the list of what is attack traffic, not as "everything
+             * that is not a success": login_url_notified is an administrative
+             * notice and answering to the failed-attempts checkbox made it
+             * disappear for anyone who had that one unchecked, which is a record
+             * 2.11.9 did keep. Found by the cross review of 2.11.10.
+             */
+            $attack = array( 'failed', 'lockout', 'lockout_blocked', 'hidden_admin_access', 'hidden_login_access', 'force_reset_login_blocked' );
+            $flag   = in_array( $action, $attack, true ) ? 'log_failed_logins' : 'log_logins';
+
+            if ( empty( $current_options[ $flag ] ) ) {
                 return false;
             }
         }

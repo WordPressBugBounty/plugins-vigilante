@@ -43,15 +43,52 @@ class Vigilante_User_Security {
     /**
      * Constructor
      *
-     * @param Vigilante_Settings     $settings     Settings instance.
-     * @param Vigilante_Activity_Log $activity_log Activity log instance.
+     * @param Vigilante_Settings     $settings         Settings instance.
+     * @param Vigilante_Activity_Log $activity_log     Activity log instance.
+     * @param bool                   $enforcement_only Register only what enforces
+     *                                                 state already written to an
+     *                                                 account. See
+     *                                                 init_enforcement_hooks().
      */
-    public function __construct( $settings, $activity_log ) {
+    public function __construct( $settings, $activity_log, $enforcement_only = false ) {
         $this->settings     = $settings;
         $this->activity_log = $activity_log;
         $this->options      = $settings->get_section( 'user_security' );
 
+        if ( $enforcement_only ) {
+            $this->init_enforcement_hooks();
+            return;
+        }
+
         $this->init_hooks();
+    }
+
+    /**
+     * The hooks that enforce state already written to an account
+     *
+     * A forced password reset and a registration waiting for approval are not
+     * settings, they are marks on somebody's account, and the action that wrote
+     * them already happened: sessions destroyed, emails sent, the activity log
+     * saying those accounts cannot get in until they reset or are approved.
+     *
+     * Until 2.11.10 both were registered inside the module gate, so turning User
+     * Security off let every one of those accounts back in with their old
+     * password, silently and with the flags still in place saying the opposite.
+     * The forced reset is deliberately not destructive on the password (see
+     * force_password_reset(), which avoids wp_set_password() so the reset link
+     * keeps working), so this filter was the only thing holding the door.
+     * Found by the file-by-file review of 2.11.10.
+     *
+     * These two are therefore registered whether the module is on or off. Both
+     * return immediately when the account carries no mark, so the cost on a site
+     * that never used either feature is one meta read at login.
+     *
+     * @since 2.11.10
+     */
+    private function init_enforcement_hooks() {
+        add_filter( 'authenticate', array( $this, 'check_force_reset_on_login' ), 30, 3 );
+        add_action( 'after_password_reset', array( $this, 'clear_force_reset_meta' ), 10, 1 );
+        add_filter( 'wp_authenticate_user', array( $this, 'block_pending_user_login' ), 15, 2 );
     }
 
     /**
@@ -105,7 +142,8 @@ class Vigilante_User_Security {
         $registration_approval = $this->options['registration_approval'] ?? array();
         if ( ! empty( $registration_approval['enabled'] ) ) {
             add_action( 'user_register', array( $this, 'set_user_pending_approval' ), 5 );
-            add_filter( 'wp_authenticate_user', array( $this, 'block_pending_user_login' ), 15, 2 );
+            // The blocking half is registered by init_enforcement_hooks(), so an
+            // account already waiting keeps waiting if the feature is turned off.
             add_action( 'admin_notices', array( $this, 'show_pending_users_notice' ) );
         }
 
@@ -166,9 +204,9 @@ class Vigilante_User_Security {
             add_action( 'login_message', array( $this, 'show_registration_pending_message' ) );
         }
 
-        // Force password reset login message (always active, independent of settings)
-        add_filter( 'authenticate', array( $this, 'check_force_reset_on_login' ), 30, 3 );
-        add_action( 'after_password_reset', array( $this, 'clear_force_reset_meta' ), 10, 1 );
+        // What enforces marks already written to an account, which stays
+        // registered even with the module off. See init_enforcement_hooks().
+        $this->init_enforcement_hooks();
     }
 
     /**
@@ -1315,9 +1353,9 @@ class Vigilante_User_Security {
             return;
         }
 
-        // Set pending status
-        update_user_meta( $user_id, 'vigilante_pending_approval', true );
-        update_user_meta( $user_id, 'vigilante_pending_since', time() );
+        // Set pending status, on this site only (see site_user_meta_key()).
+        update_user_meta( $user_id, self::site_user_meta_key( 'vigilante_pending_approval' ), true );
+        update_user_meta( $user_id, self::site_user_meta_key( 'vigilante_pending_since' ), time() );
 
         // Log
         if ( $this->activity_log ) {
@@ -1352,9 +1390,7 @@ class Vigilante_User_Security {
             return $user;
         }
 
-        $is_pending = get_user_meta( $user->ID, 'vigilante_pending_approval', true );
-
-        if ( $is_pending ) {
+        if ( self::is_pending_anywhere( $user->ID ) ) {
             // Mark this as a controlled rejection (not a brute force attempt)
             add_filter( 'vigilante_skip_failed_login_count', '__return_true' );
             
@@ -1408,19 +1444,138 @@ class Vigilante_User_Security {
     }
 
     /**
+     * A user meta key that belongs to one site, even on a network
+     *
+     * Registration approval is a per-site setting, but user meta is network
+     * wide, so a single global key made the pending queue shared: an
+     * administrator of one site saw, approved and rejected accounts waiting on
+     * another, and clearing the flag cleared it for the whole network. Reported
+     * by the wp.org automated review of 2.11.9.
+     *
+     * On a network the key carries the blog prefix, the way core does with
+     * capabilities (wp_2_capabilities), so each site keeps its own queue. On a
+     * single site the key is returned unchanged, so nothing has to be migrated
+     * there and the stored data of every existing install keeps working.
+     *
+     * @since 2.11.10
+     *
+     * Note the default is null and not 0: wpdb::get_blog_prefix() reads null as
+     * "the current blog", and 0 as the main site, so passing 0 here gave every
+     * subsite the key of the main site and kept the queue shared. Caught by
+     * matriz-red-repaso-21110.sh before this shipped.
+     *
+     * @param string   $key     Base meta key.
+     * @param int|null $blog_id Blog to build it for. Current blog when null.
+     * @return string
+     */
+    public static function site_user_meta_key( $key, $blog_id = null ) {
+        global $wpdb;
+
+        if ( ! is_multisite() ) {
+            return $key;
+        }
+
+        return $wpdb->get_blog_prefix( $blog_id ) . $key;
+    }
+
+    /**
+     * Whether this account is waiting for approval on ANY site of the network
+     *
+     * The queue is per site and stays per site, because approving somebody is a
+     * decision of the site they signed up to. Blocking them is a different
+     * question with a different answer, and giving it the same one was a hole:
+     * the session cookie WordPress issues is valid on every host of the network
+     * (COOKIE_DOMAIN and COOKIEPATH, wp-includes/ms-default-constants.php:58-59
+     * and :84-88), so an account held back on demo1 logged in through the main
+     * site, where it carried no flag, and walked straight back into demo1 with
+     * that cookie. Reproduced over HTTP by the second cross review of 2.11.10.
+     * It is the same reasoning that two_factor_required_for() already applies:
+     * network-wide cookie, network-wide enforcement.
+     *
+     * Read from the account's own meta in one pass rather than by asking site by
+     * site, so the cost does not grow with the network. The legacy key with no
+     * prefix is included because the migration that moves it runs on the first
+     * admin page load and until then a waiting account has to keep being
+     * blocked; reading both fails closed.
+     *
+     * @since 2.11.10
+     *
+     * @param int $user_id User ID.
+     * @return bool
+     */
+    public static function is_pending_anywhere( $user_id ) {
+        global $wpdb;
+
+        if ( get_user_meta( $user_id, 'vigilante_pending_approval', true ) ) {
+            return true;
+        }
+
+        if ( ! is_multisite() ) {
+            return false;
+        }
+
+        $all = get_user_meta( $user_id );
+
+        if ( ! is_array( $all ) ) {
+            return false;
+        }
+
+        $pattern = '/^' . preg_quote( $wpdb->base_prefix, '/' ) . '(\d+_)?vigilante_pending_approval$/';
+
+        foreach ( $all as $key => $values ) {
+            if ( ! preg_match( $pattern, $key, $m ) ) {
+                continue;
+            }
+
+            /*
+             * A mark left behind by a site that no longer exists asks nobody for
+             * anything: deleting a subsite does not touch this plugin's user meta,
+             * so the account stayed blocked on the whole network with no queue
+             * anywhere to clear it from, in a plugin whose users have no WP-CLI.
+             * Found by the third cross review of 2.11.10. get_site() is cached, so
+             * this costs nothing in the usual case of no leftovers.
+             */
+            if ( ! empty( $m[1] ) && ! get_site( (int) rtrim( $m[1], '_' ) ) ) {
+                continue;
+            }
+
+            foreach ( (array) $values as $value ) {
+                if ( ! empty( $value ) ) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Get pending users
+     *
+     * The meta key is what scopes this list to the current site, so on a network
+     * the query deliberately does not add the site's own membership filter on
+     * top. Core's WP_User_Query turns the default into "{$prefix}capabilities
+     * EXISTS" (wp-includes/class-wp-user-query.php:598-604), and an account that
+     * is waiting for approval can perfectly well have no role yet: it then held
+     * this site's flag, was blocked from logging in, and appeared in no queue at
+     * all, so nobody could ever approve or reject it. Found by the second cross
+     * review of 2.11.10.
      *
      * @return array Array of pending user objects.
      */
     public function get_pending_users() {
         // phpcs:disable WordPress.DB.SlowDBQuery.slow_db_query_meta_key, WordPress.DB.SlowDBQuery.slow_db_query_meta_value -- Limited results in admin context.
         $args = array(
-            'meta_key'   => 'vigilante_pending_approval',
+            'meta_key'   => self::site_user_meta_key( 'vigilante_pending_approval' ),
             'meta_value' => '1',
             'orderby'    => 'registered',
             'order'      => 'DESC',
         );
         // phpcs:enable WordPress.DB.SlowDBQuery.slow_db_query_meta_key, WordPress.DB.SlowDBQuery.slow_db_query_meta_value
+
+        if ( is_multisite() ) {
+            $args['blog_id'] = 0;
+        }
 
         return get_users( $args );
     }
@@ -1435,7 +1590,9 @@ class Vigilante_User_Security {
     public function approve_user( $user_id, $approved_by = 0 ) {
         // Same reasoning as reject_user(): approving an account that never asked
         // for approval is a no-op that reports success and writes misleading meta.
-        if ( ! get_user_meta( $user_id, 'vigilante_pending_approval', true ) ) {
+        // Only this site's flag counts, so approving never clears the queue of
+        // another site of the network (see site_user_meta_key()).
+        if ( ! get_user_meta( $user_id, self::site_user_meta_key( 'vigilante_pending_approval' ), true ) ) {
             return false;
         }
 
@@ -1444,10 +1601,13 @@ class Vigilante_User_Security {
             return false;
         }
 
-        delete_user_meta( $user_id, 'vigilante_pending_approval' );
-        delete_user_meta( $user_id, 'vigilante_pending_since' );
-        update_user_meta( $user_id, 'vigilante_approved_by', $approved_by );
-        update_user_meta( $user_id, 'vigilante_approved_date', time() );
+        delete_user_meta( $user_id, self::site_user_meta_key( 'vigilante_pending_approval' ) );
+        delete_user_meta( $user_id, self::site_user_meta_key( 'vigilante_pending_since' ) );
+        // Por sitio como las dos de arriba: quien aprueba y cuando es un hecho de
+        // la cola de ESTE sitio, y dejarlas globales hacia que una aprobacion
+        // pisara el registro de otro (cierra B4 de la revision cruzada).
+        update_user_meta( $user_id, self::site_user_meta_key( 'vigilante_approved_by' ), $approved_by );
+        update_user_meta( $user_id, self::site_user_meta_key( 'vigilante_approved_date' ), time() );
 
         // Log
         if ( $this->activity_log ) {
@@ -1490,7 +1650,7 @@ class Vigilante_User_Security {
         // this the handler deletes any user id it is given, and wp_delete_user()
         // with no reassignment takes their posts with them, skipping the dialog
         // core always shows. Deleting a member is the Users screen's job.
-        if ( ! get_user_meta( $user_id, 'vigilante_pending_approval', true ) ) {
+        if ( ! get_user_meta( $user_id, self::site_user_meta_key( 'vigilante_pending_approval' ), true ) ) {
             return false;
         }
 
@@ -1518,6 +1678,19 @@ class Vigilante_User_Security {
 
         // Send rejection email before deleting
         $this->send_rejection_email( $user, $reason );
+
+        /*
+         * The mark goes first, because on a network the account may well survive
+         * the deletion: wp_delete_user() only calls remove_user_from_blog() there
+         * (wp-admin/includes/user.php:440-442), which clears the role and nothing
+         * of this plugin's own meta. Leaving it behind made Reject a loop with no
+         * way out: the account stayed blocked on every site of the network, the
+         * row never left the queue (which since 2.11.10 no longer hides accounts
+         * without a role), and pressing Reject again sent the rejection email once
+         * more and reported success. Found by the third cross review of 2.11.10.
+         */
+        delete_user_meta( $user_id, self::site_user_meta_key( 'vigilante_pending_approval' ) );
+        delete_user_meta( $user_id, self::site_user_meta_key( 'vigilante_pending_since' ) );
 
         // Delete user
         require_once ABSPATH . 'wp-admin/includes/user.php';
@@ -1902,6 +2075,29 @@ class Vigilante_User_Security {
     }
 
     /**
+     * Whether the session store this limit would act on belongs to a whole network
+     *
+     * WP_Session_Tokens keeps session_tokens in the usermeta table, which is
+     * network wide, while this limit is configured per site. So on a network a
+     * site administrator setting a low limit would count, and with close_oldest
+     * close, the sessions the same user opened on other sites, including an
+     * administrator session elsewhere; and block_new would refuse a login over
+     * sessions that have nothing to do with this site. Reported by the wp.org
+     * automated review of 2.11.9, on the close_oldest half.
+     *
+     * Until the network-wide policy of 3.1.0, the limit simply does not apply on
+     * a network, and the settings screen says so. On a single site nothing
+     * changes: there the session store and the setting cover the same thing.
+     *
+     * @since 2.11.10
+     *
+     * @return bool
+     */
+    public static function session_limit_is_network_wide() {
+        return is_multisite();
+    }
+
+    /**
      * Check session limit before login completes (for block_new behavior)
      *
      * @param WP_User $user     User object.
@@ -1910,6 +2106,10 @@ class Vigilante_User_Security {
      */
     public function check_session_limit_before_login( $user, $password ) {
         if ( is_wp_error( $user ) ) {
+            return $user;
+        }
+
+        if ( self::session_limit_is_network_wide() ) {
             return $user;
         }
 
@@ -1967,6 +2167,10 @@ class Vigilante_User_Security {
      * @param WP_User $user       User object.
      */
     public function enforce_session_limit( $user_login, $user ) {
+        if ( self::session_limit_is_network_wide() ) {
+            return;
+        }
+
         $settings = $this->options['session_limits'] ?? array();
         $max_sessions = absint( $settings['max_sessions'] ?? 3 );
         $behavior = $settings['behavior'] ?? 'block_new';
@@ -2688,6 +2892,19 @@ class Vigilante_User_Security {
      * @param int $user_id User ID.
      */
     public function send_verification_email( $user_id ) {
+        /*
+         * Never send an account that is already verified back to pending. The
+         * resend link below reaches this, and while the pending value was
+         * unreadable (see the note on the meta write) that was harmless; with
+         * the check working, resending for a verified account would lock its
+         * owner out of their own site.
+         */
+        if ( metadata_exists( 'user', $user_id, 'vigilante_email_verified' )
+            && get_user_meta( $user_id, 'vigilante_email_verified', true )
+        ) {
+            return;
+        }
+
         $user = get_userdata( $user_id );
         if ( ! $user ) {
             return;
@@ -2704,7 +2921,19 @@ class Vigilante_User_Security {
         // Store token
         update_user_meta( $user_id, 'vigilante_verification_token', $token_hash );
         update_user_meta( $user_id, 'vigilante_verification_expires', $expires );
-        update_user_meta( $user_id, 'vigilante_email_verified', false );
+
+        /*
+         * '0' and not false. update_user_meta() stores false as an empty string
+         * (maybe_serialize() returns it unchanged and wpdb writes it with %s), and
+         * an empty string is what get_user_meta() also returns when there is no
+         * row at all. So from the moment this feature existed until 2.11.10 the
+         * value written to mean "not verified yet" was read back as "this account
+         * predates the feature, let it in", and the branch that blocks the login
+         * was unreachable. Found by the file-by-file review of 2.11.10. '0' is
+         * falsy in PHP and survives the round trip, and the readers below tell an
+         * absent row from a stored one with metadata_exists().
+         */
+        update_user_meta( $user_id, 'vigilante_email_verified', '0' );
 
         // Build verification URL
         $verify_url = add_query_arg(
@@ -2781,13 +3010,18 @@ class Vigilante_User_Security {
             return $user;
         }
 
-        // Check if email is verified
-        $verified = get_user_meta( $user->ID, 'vigilante_email_verified', true );
-
-        // If no meta exists, user was created before this feature - allow
-        if ( '' === $verified ) {
+        /*
+         * Only a row that does not exist means "created before this feature".
+         * An existing row holding an empty string is an account that older
+         * versions marked as pending, and it has to be blocked like any other:
+         * reading both the same way is what made this check let everyone in
+         * (see send_verification_email()).
+         */
+        if ( ! metadata_exists( 'user', $user->ID, 'vigilante_email_verified' ) ) {
             return $user;
         }
+
+        $verified = get_user_meta( $user->ID, 'vigilante_email_verified', true );
 
         if ( ! $verified ) {
             $settings = $this->options['email_verification'] ?? array();
@@ -2832,8 +3066,17 @@ class Vigilante_User_Security {
                 // Verify nonce to prevent CSRF and user-ID probing.
                 if ( ! isset( $_GET['_vigilante_nonce'] ) ||
                      ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_GET['_vigilante_nonce'] ) ), 'vigilante_resend_verification_' . $user_id ) ) {
-                    wp_safe_redirect( add_query_arg( 'vigilante_message', 'invalid', wp_login_url() ) );
-                    exit;
+                    /*
+                     * Nothing is redirected to the login page until the request
+                     * has proved something, and a bad nonce proves nothing. It
+                     * used to answer with a redirect to wp_login_url(), which
+                     * under a custom login URL IS the secret address, so any
+                     * visitor could read it out of the Location header of a
+                     * request carrying garbage. Found by the third cross review
+                     * of 2.11.10. Returning leaves the request to render the page
+                     * it asked for, which tells nobody anything.
+                     */
+                    return;
                 }
 
                 // Rate limiting: allow 1 resend every 5 minutes per user to prevent email spam.
@@ -2856,9 +3099,10 @@ class Vigilante_User_Security {
         // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- token-based verification below.
         $token = isset( $_GET['token'] ) ? sanitize_text_field( wp_unslash( $_GET['token'] ) ) : '';
 
+        // Same as the resend above: no proof, no redirect, so the Location
+        // header cannot be used to read the custom login URL.
         if ( ! $user_id || ! $token ) {
-            wp_safe_redirect( add_query_arg( 'vigilante_message', 'invalid', wp_login_url() ) );
-            exit;
+            return;
         }
 
         $stored_hash = (string) get_user_meta( $user_id, 'vigilante_verification_token', true );
@@ -2869,8 +3113,7 @@ class Vigilante_User_Security {
         // so a wrong link revealed which user ids were waiting (2.11.8). Only the
         // holder of the right token learns that it expired.
         if ( '' === $stored_hash || ! hash_equals( $stored_hash, wp_hash( $token ) ) ) {
-            wp_safe_redirect( add_query_arg( 'vigilante_message', 'invalid', wp_login_url() ) );
-            exit;
+            return;
         }
 
         if ( time() > $expires ) {
@@ -2900,10 +3143,9 @@ class Vigilante_User_Security {
             );
         }
 
-        // Check if user still needs approval
-        $is_pending = get_user_meta( $user_id, 'vigilante_pending_approval', true );
-
-        if ( $is_pending ) {
+        // Anywhere on the network, so the message matches what will actually
+        // happen at the login: that is what blocks (see is_pending_anywhere()).
+        if ( self::is_pending_anywhere( $user_id ) ) {
             // User verified but still pending approval
             wp_safe_redirect(
                 add_query_arg(
@@ -2966,12 +3208,14 @@ class Vigilante_User_Security {
      * @return bool
      */
     public function is_email_verified( $user_id ) {
-        $verified = get_user_meta( $user_id, 'vigilante_email_verified', true );
-        
-        // If no meta exists, consider verified (old users)
-        if ( '' === $verified ) {
+        // Same reading as block_unverified_user_login(): only an absent row means
+        // the account predates the feature. A stored empty string is an account
+        // an older version left pending.
+        if ( ! metadata_exists( 'user', $user_id, 'vigilante_email_verified' ) ) {
             return true;
         }
+
+        $verified = get_user_meta( $user_id, 'vigilante_email_verified', true );
 
         return (bool) $verified;
     }

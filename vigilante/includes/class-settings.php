@@ -870,10 +870,263 @@ class Vigilante_Settings {
      *
      * @return array<string,string[]>
      */
+    /**
+     * The two factor policy that governs this installation
+     *
+     * On a network the answer must not depend on which site the login happens to
+     * arrive at, because the cookie WordPress issues does not: COOKIEHASH comes
+     * from the network siteurl (wp-includes/default-constants.php) and
+     * COOKIE_DOMAIN covers every host of the network
+     * (wp-includes/ms-default-constants.php). Until 2.11.10 the settings, the
+     * enforced roles and the TOTP table were all read per site, so somebody
+     * holding the password of an administrator protected by 2FA on the main site
+     * posted the login to a subsite where that account has no role, was never
+     * asked for a code, and came out with a session valid across the network.
+     * Measured on the Multisite install on 12 sep 2026 (user_requires_2fa true on
+     * the main site, false on demo2 for the same account) and found by the
+     * file-by-file review of 2.11.10.
+     *
+     * So the policy of the main site governs the whole network. On a single site
+     * this is the site's own configuration and nothing changes.
+     *
+     * @since 2.11.10
+     *
+     * @return array The two_factor section that applies.
+     */
+    public static function two_factor_policy() {
+        $options = is_multisite()
+            ? get_blog_option( get_main_site_id(), self::OPTION_NAME, array() )
+            : get_option( self::OPTION_NAME, array() );
+
+        if ( ! is_array( $options ) ) {
+            return array();
+        }
+
+        $login = isset( $options['login_security'] ) && is_array( $options['login_security'] )
+            ? $options['login_security']
+            : array();
+
+        return ( isset( $login['two_factor'] ) && is_array( $login['two_factor'] ) ) ? $login['two_factor'] : array();
+    }
+
+    /**
+     * Whether two factor is required for this account, anywhere in the network
+     *
+     * Union, and deliberately so. Reading the policy only from the main site,
+     * which is what this release did at first, would have switched two factor off
+     * for every network that has it configured per subsite, which until now was
+     * the only way it could be configured at all: a silent downgrade of the very
+     * protection being fixed. Found by the cross review of 2.11.10. So the
+     * question is asked of every site the account belongs to, plus the main site,
+     * each with its own enforced roles and exclusions, and one yes is enough.
+     *
+     * That also closes the bypass: the settings, the roles and the enrolment used
+     * to be read from whichever site the login arrived at, while the cookie
+     * WordPress issues is valid across the whole network (COOKIEHASH comes from
+     * the network siteurl and COOKIE_DOMAIN covers every host of it), so an
+     * account protected on one site could log in through another and come out
+     * with a session valid everywhere.
+     *
+     * @since 2.11.10
+     *
+     * @param WP_User $user User being authenticated.
+     * @return bool
+     */
+    public static function two_factor_required_for( $user ) {
+        return array() !== self::two_factor_demands_for( $user );
+    }
+
+    /**
+     * Which second factor methods this account is asked for, across the network
+     *
+     * Empty when nothing asks. On a network there can be more than one, because
+     * each site keeps its own settings and the requirement is the union of them.
+     *
+     * @since 2.11.10
+     *
+     * @param WP_User $user User being authenticated.
+     * @return string[] Methods asked for, without repeats.
+     */
+    public static function two_factor_methods_for( $user ) {
+        $methods = array();
+
+        foreach ( self::two_factor_demands_for( $user ) as $settings ) {
+            $method = isset( $settings['method'] ) ? (string) $settings['method'] : 'email';
+
+            // A method this version does not know is read as the default rather
+            // than left to fall through. Registering nothing at all is how the
+            // second factor of a whole network went quiet in silence: a saved
+            // value of '' (which validate_section() lets through on an import,
+            // since only the tab has an allowlist) matched neither class, so no
+            // filter was registered anywhere while every screen still said two
+            // factor was on. Found by the third cross review of 2.11.10.
+            $methods[] = in_array( $method, array( 'email', 'totp' ), true ) ? $method : 'email';
+        }
+
+        return array_values( array_unique( $methods ) );
+    }
+
+    /**
+     * Which of the two second factor classes handles this login
+     *
+     * The method cannot be read from one site's settings, and reading it from the
+     * main site was the hole the third cross review of 2.11.10 found: with the
+     * main site on totp and a subsite asking for a code by email, the class that
+     * registered was TOTP, the account had no enrolment, and the "not set up yet"
+     * branch let the login through. In 2.11.9 that same login was asked for its
+     * emailed code. So the question is asked per account, not per site.
+     *
+     * The order is what keeps it closed at both ends:
+     *
+     * 1. An enrolment already made wins. It is the strongest factor the account
+     *    has and it is ready to use, wherever in the network it was set up.
+     * 2. Otherwise, if any site asking for a second factor asks for email, email
+     *    handles it. Email needs no enrolment, so it can never fall into the
+     *    branch that lets a login through for lack of one.
+     * 3. Only when every site asking wants an authenticator app does TOTP handle
+     *    it, which is the case the grace period was written for.
+     *
+     * @since 2.11.10
+     *
+     * @param WP_User $user       User being authenticated.
+     * @param bool    $enrolled   Whether the account has a TOTP enrolment anywhere.
+     * @return string 'email', 'totp', or '' when nothing asks.
+     */
+    public static function two_factor_handler_for( $user, $enrolled ) {
+        $methods = self::two_factor_methods_for( $user );
+
+        if ( ! $methods ) {
+            return '';
+        }
+
+        if ( $enrolled ) {
+            return 'totp';
+        }
+
+        return in_array( 'email', $methods, true ) ? 'email' : 'totp';
+    }
+
+    /**
+     * The two factor settings of every site that asks this account for one
+     *
+     * @since 2.11.10
+     *
+     * @param WP_User $user User being authenticated.
+     * @return array[] The two_factor section of each site that asks.
+     */
+    private static function two_factor_demands_for( $user ) {
+        if ( empty( $user->ID ) ) {
+            return array();
+        }
+
+        if ( ! is_multisite() ) {
+            $roles  = ( isset( $user->roles ) && is_array( $user->roles ) ) ? $user->roles : array();
+            $policy = self::two_factor_policy();
+
+            return self::two_factor_site_requires( $policy, $user, $roles ) ? array( $policy ) : array();
+        }
+
+        $demands  = array();
+        $blog_ids = array( (int) get_main_site_id() );
+
+        /*
+         * A super administrator is a member of almost no site (measured on the
+         * Multisite install: of three sites, the network owner belongs to one),
+         * yet can log in through any of them and the cookie is valid everywhere.
+         * Asking only the sites they belong to left the account with the most
+         * power in the network outside the policy, which is the bypass upside
+         * down. So for them every site of the network is consulted. There are
+         * few super administrators and this runs at login, not per request.
+         */
+        if ( is_super_admin( $user->ID ) ) {
+            $blog_ids = array_merge( $blog_ids, get_sites( array( 'fields' => 'ids', 'number' => 200 ) ) );
+        }
+
+        foreach ( get_blogs_of_user( $user->ID ) as $blog ) {
+            if ( ! empty( $blog->userblog_id ) ) {
+                $blog_ids[] = (int) $blog->userblog_id;
+            }
+        }
+
+        foreach ( array_unique( $blog_ids ) as $blog_id ) {
+            $options = get_blog_option( $blog_id, self::OPTION_NAME, array() );
+
+            if ( ! is_array( $options ) || empty( $options['login_security']['two_factor'] ) ) {
+                continue;
+            }
+
+            /*
+             * A site whose Login Security module is off asks for nothing, and
+             * reading only the sub-setting made it ask anyway: a subsite that had
+             * switched the whole module off, leaving an orphan two_factor.enabled
+             * behind, imposed a second factor on every account of the network,
+             * with no screen anywhere explaining why. It is the two-level toggle
+             * trap of this plugin read upside down. Found by the third cross
+             * review of 2.11.10.
+             */
+            if ( empty( $options['modules']['login_security'] ) ) {
+                continue;
+            }
+
+            $elsewhere = new WP_User( $user->ID );
+            $elsewhere->for_site( $blog_id );
+
+            // A super administrator can hold no role row anywhere, and is judged
+            // as an administrator so the strictest policy of the network reaches
+            // the account with the most power in it.
+            $roles = ( isset( $elsewhere->roles ) && is_array( $elsewhere->roles ) && $elsewhere->roles )
+                ? $elsewhere->roles
+                : ( is_super_admin( $user->ID ) ? array( 'administrator' ) : array() );
+
+            if ( self::two_factor_site_requires( $options['login_security']['two_factor'], $user, $roles ) ) {
+                $demands[] = $options['login_security']['two_factor'];
+            }
+        }
+
+        return $demands;
+    }
+
+    /**
+     * Whether one site's two factor settings cover this account
+     *
+     * @since 2.11.10
+     *
+     * @param array    $settings The two_factor section of one site.
+     * @param WP_User  $user     User being authenticated.
+     * @param string[] $roles    Roles the account holds on that site.
+     * @return bool
+     */
+    private static function two_factor_site_requires( $settings, $user, $roles ) {
+        if ( ! is_array( $settings ) || empty( $settings['enabled'] ) ) {
+            return false;
+        }
+
+        $excluded = isset( $settings['excluded_users'] ) ? array_map( 'absint', (array) $settings['excluded_users'] ) : array();
+
+        if ( in_array( (int) $user->ID, $excluded, true ) ) {
+            return false;
+        }
+
+        $enforced = isset( $settings['enforced_roles'] ) ? (array) $settings['enforced_roles'] : array( 'administrator', 'editor' );
+
+        return (bool) array_intersect( (array) $roles, $enforced );
+    }
+
+    /**
+     * Settings that only a network administrator may change on the main site
+     *
+     * @return array<string,string[]>
+     */
     public static function get_main_site_file_settings() {
         return array(
             'modules'        => array( 'firewall', 'security_headers', 'wp_hardening', 'file_integrity' ),
-            'firewall'       => array( 'block_bad_bots', 'block_bad_query_strings', 'trusted_proxy_header', 'ip_whitelist', 'ua_whitelist' ),
+            // trusted_proxies goes with trusted_proxy_header, and leaving it out
+            // was a hole: the header decides which address the firewall of the
+            // whole installation acts on, and this list decides which peers may
+            // set that header. An administrator of the main site without network
+            // rights who could edit only this half turned every visitor into a
+            // trusted proxy. Found by the file-by-file review of 2.11.10.
+            'firewall'       => array( 'block_bad_bots', 'block_bad_query_strings', 'trusted_proxy_header', 'trusted_proxies', 'ip_whitelist', 'ua_whitelist' ),
             'file_integrity' => array( 'scan_critical_config' ),
         );
     }
@@ -1400,6 +1653,26 @@ class Vigilante_Settings {
                 }
             }
         }
+
+        /*
+         * The lock on the settings the shared files are built from is NOT applied
+         * here, and that is a decision, not an oversight. The second cross review
+         * of 2.11.10 raised that register_setting( 'vigilante_options', ... )
+         * declares this as its sanitize callback with no lock in it, so anything
+         * reaching options.php with that option group would write the whole
+         * option. The chain does not close: the plugin prints no settings_fields()
+         * for that group anywhere, so the nonce it would need is not obtainable,
+         * and the five places that do save (saving a tab, importing, a preset,
+         * restoring the defaults, resetting a section) all apply
+         * keep_locked_file_settings() themselves.
+         *
+         * Putting it here instead would be worse than the door it closes. A
+         * register_setting() callback runs on EVERY update_option() of this
+         * option, so it would also lock the writes with no user behind them: the
+         * expiry of Under Attack restoring what it hardened, WP-CLI and cron.
+         * Those are already covered by matriz-red-ajustes-compartidos.sh, which
+         * is where such a change would show up as a row that stopped passing.
+         */
 
         return apply_filters( 'vigilante_validate_options', $validated, $input );
     }

@@ -77,10 +77,13 @@ class Vigilante_Two_Factor_Email {
         $this->activity_log   = $activity_log;
         $this->login_security = $login_security;
         
-        $login_options  = $settings->get_section( 'login_security' );
-        $this->options  = $login_options['two_factor'] ?? array();
+        // Resolved on demand, not here: see the note in the TOTP constructor.
+        $this->options = null;
 
-        if ( $this->is_enabled() ) {
+        // Same reasoning as in the TOTP class: on a network both classes register
+        // wherever the login lands, and which one handles a given login is decided
+        // per account inside check_2fa_requirement().
+        if ( is_multisite() || ! empty( $this->policy()['enabled'] ) ) {
             $this->init_hooks();
         }
     }
@@ -91,11 +94,11 @@ class Vigilante_Two_Factor_Email {
      * @return bool
      */
     public function is_enabled() {
-        if ( empty( $this->options['enabled'] ) ) {
+        if ( empty( $this->policy()['enabled'] ) ) {
             return false;
         }
         // Only active when method is email (or not set, for backward compatibility)
-        $method = $this->options['method'] ?? 'email';
+        $method = $this->policy()['method'] ?? 'email';
         return 'email' === $method;
     }
 
@@ -184,6 +187,12 @@ class Vigilante_Two_Factor_Email {
             return $user;
         }
 
+        // And whether this class is the one that must ask. Both are registered on
+        // a network; the election is per account (see two_factor_handler_for()).
+        if ( ! $this->handles_second_factor( $user, 'email' ) ) {
+            return $user;
+        }
+
         // Check if device is trusted
         if ( $this->is_device_trusted( $user->ID ) ) {
             return $user;
@@ -241,22 +250,9 @@ class Vigilante_Two_Factor_Email {
      * @return bool
      */
     public function user_requires_2fa( $user ) {
-        // Check if user is explicitly excluded
-        $excluded_users = $this->options['excluded_users'] ?? array();
-        if ( in_array( $user->ID, array_map( 'absint', $excluded_users ), true ) ) {
-            return false;
-        }
-
-        // Check if user has an enforced role
-        $enforced_roles = $this->options['enforced_roles'] ?? array( 'administrator', 'editor' );
-        
-        foreach ( $user->roles as $role ) {
-            if ( in_array( $role, $enforced_roles, true ) ) {
-                return true;
-            }
-        }
-
-        return false;
+        // One answer for the whole network, same as the TOTP class. See
+        // Vigilante_Settings::two_factor_required_for().
+        return Vigilante_Settings::two_factor_required_for( $user );
     }
 
     /**
@@ -270,7 +266,7 @@ class Vigilante_Two_Factor_Email {
         $code = sprintf( '%06d', wp_rand( 0, 999999 ) );
 
         // Calculate expiry
-        $expiry_minutes = absint( $this->options['code_expiry_minutes'] ?? 10 );
+        $expiry_minutes = absint( $this->policy()['code_expiry_minutes'] ?? 10 );
         $expires_at = gmdate( 'Y-m-d H:i:s', time() + ( $expiry_minutes * 60 ) );
 
         // Only the hash is stored. The code itself travels in the email and
@@ -289,13 +285,13 @@ class Vigilante_Two_Factor_Email {
      */
     private function send_verification_email( $user, $code ) {
         $site_name = get_bloginfo( 'name' );
-        $from_name = $this->options['email_from_name'] ?? '';
+        $from_name = $this->policy()['email_from_name'] ?? '';
         
         if ( empty( $from_name ) ) {
             $from_name = $site_name;
         }
 
-        $expiry_minutes = absint( $this->options['code_expiry_minutes'] ?? 10 );
+        $expiry_minutes = absint( $this->policy()['code_expiry_minutes'] ?? 10 );
 
         $subject = sprintf(
             /* translators: 1: Site name, 2: Verification code */
@@ -325,6 +321,16 @@ class Vigilante_Two_Factor_Email {
      * Handle 2FA verification form submission
      */
     public function handle_2fa_form() {
+        /*
+         * Y solo ella la verifica. Volver aqui no deja pasar nada: la otra clase
+         * esta enganchada a la misma accion y termina la peticion por su cuenta,
+         * que es lo que evita el fallthrough a wp_signon() que avisa el comentario
+         * de abajo.
+         */
+        if ( ! $this->pending_belongs_to( 'email' ) ) {
+            return;
+        }
+
         // The pending user is resolved first so that a failed nonce can be
         // explained on the form and recorded (S15). Both failure paths end the
         // request: a bare return would let wp-login.php fall through to its
@@ -408,7 +414,7 @@ class Vigilante_Two_Factor_Email {
         }
 
         // Check max attempts for this specific code
-        $max_code_attempts = absint( $this->options['max_attempts'] ?? 3 );
+        $max_code_attempts = absint( $this->policy()['max_attempts'] ?? 3 );
         
         if ( absint( $stored['attempts'] ) >= $max_code_attempts ) {
             $this->log_event( '2fa_max_attempts_exceeded', $user_id, __( 'Maximum verification attempts exceeded', 'vigilante' ), 'warning' );
@@ -469,6 +475,11 @@ class Vigilante_Two_Factor_Email {
      * Maybe show 2FA verification form on login page
      */
     public function maybe_show_2fa_form() {
+        // Solo la clase que atiende esta verificacion pinta su formulario.
+        if ( ! $this->pending_belongs_to( 'email' ) ) {
+            return;
+        }
+
         // Only the visitor presenting the pending token gets the form. There is
         // no fallback by IP address and no lookup of the token by user (S3).
         $session = $this->get_pending_session();
@@ -484,8 +495,8 @@ class Vigilante_Two_Factor_Email {
         $error = get_transient( 'vigilante_2fa_error_' . $user_id );
         delete_transient( 'vigilante_2fa_error_' . $user_id );
 
-        $expiry_minutes = absint( $this->options['code_expiry_minutes'] ?? 10 );
-        $remember_days  = absint( $this->options['remember_device_days'] ?? 30 );
+        $expiry_minutes = absint( $this->policy()['code_expiry_minutes'] ?? 10 );
+        $remember_days  = absint( $this->policy()['remember_device_days'] ?? 30 );
 
         // Hide the normal login form and disable required fields
         ?>
@@ -562,7 +573,7 @@ class Vigilante_Two_Factor_Email {
                        required>
             </p>
 
-            <?php if ( ! empty( $this->options['allow_remember_device'] ) ) : ?>
+            <?php if ( ! empty( $this->policy()['allow_remember_device'] ) ) : ?>
             <p class="vigilante-2fa-field vigilante-2fa-remember">
                 <label>
                     <input type="checkbox" name="vigilante_2fa_remember" value="1">
@@ -692,8 +703,8 @@ class Vigilante_Two_Factor_Email {
      * @return array Result with count of sent emails
      */
     public function send_activation_notifications( $only_new = false ) {
-        $enforced_roles  = $this->options['enforced_roles'] ?? array( 'administrator', 'editor' );
-        $excluded_users  = $this->options['excluded_users'] ?? array();
+        $enforced_roles  = $this->policy()['enforced_roles'] ?? array( 'administrator', 'editor' );
+        $excluded_users  = $this->policy()['excluded_users'] ?? array();
         $excluded_users  = array_map( 'absint', $excluded_users );
         
         // Get users with enforced roles
@@ -711,14 +722,14 @@ class Vigilante_Two_Factor_Email {
         }
 
         $site_name  = get_bloginfo( 'name' );
-        $from_name  = $this->options['email_from_name'] ?? '';
+        $from_name  = $this->policy()['email_from_name'] ?? '';
         $admin_email = get_option( 'admin_email' );
         
         if ( empty( $from_name ) ) {
             $from_name = $site_name;
         }
 
-        $remember_days = absint( $this->options['remember_device_days'] ?? 30 );
+        $remember_days = absint( $this->policy()['remember_device_days'] ?? 30 );
 
         $subject = sprintf(
             /* translators: %s: Site name */
@@ -734,7 +745,7 @@ class Vigilante_Two_Factor_Email {
             )
         );
         $body .= Vigilante_Email_Template::info_box(
-            ! empty( $this->options['allow_remember_device'] )
+            ! empty( $this->policy()['allow_remember_device'] )
                 ? sprintf(
                     /* translators: %d: Remember days */
                     __( 'After entering your password, you will receive a 6-digit code via email. You can check "Remember this device" to skip verification for %d days.', 'vigilante' ),

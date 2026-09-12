@@ -8,7 +8,7 @@
  * User-Agent in two places at once (S1 of the 28 Aug 2026 audit).
  *
  * The using class must provide $this->database (Vigilante_Database),
- * $this->options (the two_factor settings array) and log_event().
+ * $this->policy() (the two_factor settings array) and log_event().
  *
  * @package Vigilante
  * @since 2.11.0
@@ -23,6 +23,78 @@ if ( ! defined( 'ABSPATH' ) ) {
  * Trait Vigilante_Two_Factor_Session
  */
 trait Vigilante_Two_Factor_Session {
+
+    /**
+     * The second factor mechanics in force, resolved once per request
+     *
+     * The method, the expiry and the grace period come from the main site on a
+     * network, so they are the same wherever the login arrives. Read here and not
+     * in the constructor because the constructors run on init on EVERY request of
+     * every site: reading the main site's settings there meant a switch_to_blog()
+     * and the whole autoloaded option set of the main site on every front page
+     * view of every subsite, measured at 318 rows and 89 KB by the third cross
+     * review of 2.11.10. Nothing outside a login needs this value.
+     *
+     * Whether an account NEEDS a second factor, and which class asks for it, are
+     * separate questions with their own answers: two_factor_required_for() and
+     * two_factor_handler_for().
+     *
+     * @since 2.11.10
+     *
+     * @return array
+     */
+    protected function policy() {
+        if ( null === $this->options ) {
+            $this->options = Vigilante_Settings::two_factor_policy();
+        }
+
+        return $this->options;
+    }
+
+    /**
+     * Whether this class is the one that must ask this account for its factor
+     *
+     * @since 2.11.10
+     *
+     * @param WP_User $user   User being authenticated.
+     * @param string  $method Method this class implements, 'email' or 'totp'.
+     * @return bool
+     */
+    protected function handles_second_factor( $user, $method ) {
+        $enrolled = $this->database && method_exists( $this->database, 'has_totp_enrolment' )
+            ? $this->database->has_totp_enrolment( $user->ID )
+            : false;
+
+        return ( $method === Vigilante_Settings::two_factor_handler_for( $user, $enrolled ) );
+    }
+
+    /**
+     * Whether the verification pending in this request belongs to this class
+     *
+     * Both second factor classes hang off login_form_vigilante_2fa and login_form
+     * since 2.11.10, so without this the two of them printed a form on the same
+     * page and both tried to verify the same code. Measured as "the second factor
+     * is asked for twice" by the release matrix. The same election as the
+     * authenticate filter, so a given pending session is handled start to finish
+     * by one class.
+     *
+     * @since 2.11.10
+     *
+     * @param string $method Method this class implements, 'email' or 'totp'.
+     * @return bool True also when there is nothing pending, so each class goes on
+     *              applying its own rules.
+     */
+    protected function pending_belongs_to( $method ) {
+        $user_id = $this->get_pending_user_id();
+
+        if ( ! $user_id ) {
+            return true;
+        }
+
+        $user = get_userdata( $user_id );
+
+        return $user ? $this->handles_second_factor( $user, $method ) : true;
+    }
 
     /**
      * User ID authenticated through an application password in this request, or 0.
@@ -350,7 +422,7 @@ trait Vigilante_Two_Factor_Session {
      * @return bool
      */
     private function is_device_trusted( $user_id ) {
-        if ( empty( $this->options['allow_remember_device'] ) ) {
+        if ( empty( $this->policy()['allow_remember_device'] ) ) {
             return false;
         }
 
@@ -373,7 +445,7 @@ trait Vigilante_Two_Factor_Session {
      * @return bool True if a device row was written.
      */
     private function trust_device( $user_id ) {
-        if ( empty( $this->options['allow_remember_device'] ) ) {
+        if ( empty( $this->policy()['allow_remember_device'] ) ) {
             return false;
         }
 
@@ -384,7 +456,7 @@ trait Vigilante_Two_Factor_Session {
         }
 
         $user_agent    = isset( $_SERVER['HTTP_USER_AGENT'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) ) : '';
-        $remember_days = absint( $this->options['remember_device_days'] ?? 30 );
+        $remember_days = absint( $this->policy()['remember_device_days'] ?? 30 );
 
         if ( $remember_days < 1 ) {
             $remember_days = 30;
@@ -444,13 +516,41 @@ trait Vigilante_Two_Factor_Session {
             return;
         }
 
+        /*
+         * On a network these secrets used to travel to every site, while the rows
+         * that validate them carry the blog prefix and belong to one: a device
+         * trusted on one site handed its 64 hex secret to every other site,
+         * where a site administrator, or anything running there, could read it
+         * from the request and replay it.
+         *
+         * Both halves of the scope have to move, and the first attempt only moved
+         * one. An empty domain says "this host only", which isolates the sites of
+         * a network by subdomains; but in a network by subdirectories every site
+         * shares the host and the core leaves COOKIE_DOMAIN empty anyway
+         * (wp-includes/ms-default-constants.php sets it only for subdomain
+         * installs), so that change alone did nothing there. What separates those
+         * sites is the path. Found by the cross review of 2.11.10.
+         *
+         * So on a network the cookie is scoped to this site's own host and path,
+         * which is exactly the reach of the table that validates it. On a single
+         * site both come out as the core's own values and nothing changes.
+         */
+        $domain = COOKIE_DOMAIN;
+        $path   = COOKIEPATH;
+
+        if ( is_multisite() ) {
+            $domain    = '';
+            $site_path = wp_parse_url( home_url( '/' ), PHP_URL_PATH );
+            $path      = ( is_string( $site_path ) && '' !== $site_path ) ? $site_path : '/';
+        }
+
         setcookie(
             $name,
             $value,
             array(
                 'expires'  => $expires,
-                'path'     => COOKIEPATH,
-                'domain'   => COOKIE_DOMAIN,
+                'path'     => $path,
+                'domain'   => $domain,
                 'secure'   => is_ssl(),
                 'httponly' => true,
                 'samesite' => $samesite,

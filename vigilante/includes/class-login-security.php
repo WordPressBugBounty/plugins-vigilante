@@ -473,12 +473,47 @@ class Vigilante_Login_Security {
             return;
         }
         
-        // Allow POST requests (form submissions)
+        /*
+         * Everything from here down reaches wp-login.php WITHOUT having gone
+         * through the secret address, so nothing rendered from here may carry
+         * it. The filters this class registers rewrite the form action and
+         * every login link to the slug, and wp-login.php prints them on each
+         * page it serves, so any request let through below handed the hidden
+         * address to whoever asked for it.
+         *
+         * Measured on 12 sep 2026 with the slug configured: a plain anonymous
+         * GET of ?action=lostpassword or ?action=retrievepassword returned it
+         * three times, ?password=changed twice and ?checkemail=confirm once.
+         * The exemptions those requests use (the allowed actions and the
+         * informational query strings) have been there since hiding the login
+         * existed, so the address was never actually hidden from anyone who
+         * asked for a password reset page.
+         *
+         * The first attempt at this fix dropped the filters only for POST, and
+         * only helped the POST with no action: the cross review of 2.11.10
+         * found the four GETs and the POST to ?action=lostpassword, which still
+         * leaked through lostpassword_redirect. The rule is now one rule, not a
+         * list of shapes: came in by the slug, or the address is not emitted.
+         *
+         * A visitor with a session is the single exception, and on purpose:
+         * they already have access, and logging out has to land on the hidden
+         * address or core's redirect to ?loggedout=true would 404.
+         */
+        if ( ! is_user_logged_in() ) {
+            $this->stop_emitting_custom_login_url();
+        }
+
+        /*
+         * A POST is let through so a remote manager such as MainWP or ManageWP
+         * can authenticate, which is what this exemption has always existed for.
+         * Authentication is unaffected by the lines above, because a successful
+         * login redirects to the destination and never renders this form.
+         */
         $request_method = isset( $_SERVER['REQUEST_METHOD'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) : '';
         if ( 'POST' === $request_method ) {
             return;
         }
-        
+
         // Allow AJAX requests
         if ( defined( 'DOING_AJAX' ) && DOING_AJAX ) {
             return;
@@ -501,6 +536,28 @@ class Vigilante_Login_Security {
         // phpcs:ignore WordPress.Security.NonceVerification.Recommended
         if ( isset( $_GET['checkemail'] ) || isset( $_GET['password'] ) ) {
             return;
+        }
+
+        /*
+         * A visitor in the middle of a second factor verification. Every redirect
+         * of that flow goes to wp_login_url(), and with the address filters
+         * dropped that is the plain wp-login.php, so a wrong code, an expired
+         * nonce or running out of attempts landed on a 404 with no way back: a
+         * login started by POST straight at wp-login.php could be begun but never
+         * finished. Found by the third cross review of 2.11.10, which measured
+         * 2.11.9 returning the visitor to the login form and trunk returning 404.
+         *
+         * The proof asked for is the pending session itself, not the cookie:
+         * a made-up token finds no transient and gets the 404 like anybody else,
+         * and the real one is only issued after the right password. Same key as
+         * the trait (trait-two-factor-session.php:91 and :201).
+         */
+        if ( isset( $_COOKIE['vigilante_2fa_token'] ) ) {
+            $pending = get_transient( 'vigilante_2fa_pending_' . sanitize_text_field( wp_unslash( $_COOKIE['vigilante_2fa_token'] ) ) );
+
+            if ( is_array( $pending ) && ! empty( $pending['user_id'] ) ) {
+                return;
+            }
         }
         
         // Check if user already logged in - redirect to admin
@@ -665,7 +722,48 @@ class Vigilante_Login_Security {
      * @return string
      */
     public function filter_register_url( $register_url ) {
+        /*
+         * Not from wp-signup.php. On a single site the core answers that file
+         * with wp_redirect( wp_registration_url() ) and dies (wp-signup.php:39-41),
+         * so this filter put the secret address in the Location header of a plain
+         * anonymous request, outside wp-login.php and therefore out of reach of
+         * block_wp_login_access(), which only runs on login_init. Measured by the
+         * third cross review of 2.11.10; present since hiding the login existed.
+         *
+         * Left unfiltered, that redirect lands on wp-login.php?action=register,
+         * which the blocker answers with the same 404 as any other direct visit,
+         * which is what hiding the login is for. The registration link served on
+         * the login page itself is rendered under the slug, where this filter goes
+         * on doing its job.
+         */
+        if ( $this->request_is_signup() ) {
+            return $register_url;
+        }
+
         return add_query_arg( 'action', 'register', home_url( $this->custom_login_slug . '/' ) );
+    }
+
+    /**
+     * Whether this request is being served by wp-signup.php or wp-activate.php
+     *
+     * @since 2.11.10
+     *
+     * @return bool
+     */
+    private function request_is_signup() {
+        foreach ( array( 'SCRIPT_NAME', 'PHP_SELF', 'SCRIPT_FILENAME' ) as $key ) {
+            if ( empty( $_SERVER[ $key ] ) ) {
+                continue;
+            }
+
+            $file = basename( sanitize_text_field( wp_unslash( $_SERVER[ $key ] ) ) );
+
+            if ( 'wp-signup.php' === $file || 'wp-activate.php' === $file ) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -1507,6 +1605,34 @@ class Vigilante_Login_Security {
      *
      * @return bool
      */
+    /**
+     * Stop this request from putting the secret login address in any URL
+     *
+     * The filters that rewrite a WordPress login URL into the custom slug are
+     * what makes the feature work, and also what leaks it the moment a page is
+     * rendered on a path the visitor was not supposed to reach. Dropping them
+     * for the rest of the request keeps whatever renders afterwards free of the
+     * slug, while everything else about the request goes on as before.
+     *
+     * The two redirect filters are here because the first version of this list
+     * had only the five URL ones, and a POST to ?action=lostpassword still
+     * handed the address over in the hidden redirect_to field that
+     * lostpassword_redirect fills. Found by the cross review of 2.11.10. Any
+     * filter of this class that can put the slug in front of a visitor belongs
+     * in this list; if a new one is added, add it here too.
+     *
+     * @since 2.11.10
+     */
+    private function stop_emitting_custom_login_url() {
+        remove_filter( 'site_url', array( $this, 'filter_site_url' ), 10 );
+        remove_filter( 'login_url', array( $this, 'filter_login_url' ), 10 );
+        remove_filter( 'logout_url', array( $this, 'filter_logout_url' ), 10 );
+        remove_filter( 'lostpassword_url', array( $this, 'filter_lostpassword_url' ), 10 );
+        remove_filter( 'register_url', array( $this, 'filter_register_url' ), 10 );
+        remove_filter( 'lostpassword_redirect', array( $this, 'filter_lostpassword_redirect' ), 10 );
+        remove_filter( 'logout_redirect', array( $this, 'filter_logout_redirect' ), 10 );
+    }
+
     private function is_ip_exempt_from_hiding() {
         $whitelist = $this->settings->get_option( 'firewall', 'ip_whitelist', array() );
 

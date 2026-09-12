@@ -1047,10 +1047,23 @@ trait Vigilante_Admin_Ajax {
             wp_send_json_error( __( 'Invalid user ID.', 'vigilante' ) );
         }
 
-        // The pending flag is a user meta, shared by every site of a network, and
-        // approving opens the login everywhere. Same rule the other account tools
-        // got in 2.10.3: permission over that user, which on a network only a
-        // network administrator has (2.11.8).
+        /*
+         * Permission over that account, which on a network only a network
+         * administrator has (wp-includes/capabilities.php:75). Same rule the other
+         * account tools got in 2.10.3, kept here in 2.11.8.
+         *
+         * The reason written here until 2.11.10 was that the pending flag is one
+         * user meta shared by the whole network, and that stopped being true in
+         * this very release: the flag is per site now and approving clears only
+         * this site's. The check stays all the same, and deliberately. Approving
+         * is what lets somebody into a network whose session cookie is valid on
+         * every site of it, and the queue is shown to a site administrator so they
+         * can see who is waiting, with the button locked and explained, which is
+         * how it has behaved since 2.11.8 and what matriz-red-limpieza-2114.sh
+         * checks. Loosening it is a decision about who may let people into a
+         * network, not a tidy-up, so it belongs with the rest of the network
+         * permissions work in 3.1.0 and not in a security release.
+         */
         if ( ! current_user_can( 'edit_user', $user_id ) ) {
             wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
         }

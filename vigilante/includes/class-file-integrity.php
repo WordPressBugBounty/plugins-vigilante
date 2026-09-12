@@ -206,6 +206,11 @@ class Vigilante_File_Integrity {
         'DB_CHARSET', 'DB_COLLATE', 'DOMAIN_CURRENT_SITE', 'PATH_CURRENT_SITE', 'NOBLOGREDIRECT',
         'COOKIE_DOMAIN', 'COOKIEPATH', 'SITECOOKIEPATH', 'ADMIN_COOKIE_PATH', 'PLUGINS_COOKIE_PATH',
         'WP_DEFAULT_THEME', 'WPLANG',
+        // Numeric core settings. Since 2.11.10 a number in the value of a
+        // define() is redacted like any other value, so the ones that are known
+        // not to be credentials are listed here to keep the diff useful.
+        'AUTOSAVE_INTERVAL', 'WP_POST_REVISIONS', 'EMPTY_TRASH_DAYS', 'WP_CRON_LOCK_TIMEOUT',
+        'FS_CHMOD_DIR', 'FS_CHMOD_FILE', 'SITE_ID_CURRENT_SITE', 'BLOG_ID_CURRENT_SITE',
     );
 
     /**
@@ -385,7 +390,10 @@ class Vigilante_File_Integrity {
             return $normalized;
         }
 
-        $redacted = $this->redact_secrets( $normalized );
+        // Calculados una sola vez: los usa la redaccion (para no conservar un
+        // numero que ademas este en vigor) y el control de salida de abajo.
+        $live_values = $this->values_in_force( $normalized );
+        $redacted    = $this->redact_secrets( $normalized, $live_values );
 
         /*
          * Belt and braces, and this is the part that matters: the redaction
@@ -419,7 +427,7 @@ class Vigilante_File_Integrity {
 
         $shown = $this->readable_values_in_force();
 
-        foreach ( $this->values_in_force( $normalized ) as $value ) {
+        foreach ( $live_values as $value ) {
             foreach ( $shown as $readable ) {
                 if ( false !== strpos( $readable, $value ) ) {
                     continue 2;
@@ -464,7 +472,7 @@ class Vigilante_File_Integrity {
      * @param string $content Normalized wp-config.php content.
      * @return string Redacted content, or '' when it cannot be read as tokens.
      */
-    private function redact_secrets( $content ) {
+    private function redact_secrets( $content, $live_values = array() ) {
         if ( ! function_exists( 'token_get_all' ) ) {
             return '';
         }
@@ -522,6 +530,73 @@ class Vigilante_File_Integrity {
 
             if ( T_INLINE_HTML === $type ) {
                 $out .= ( '' === trim( $text ) ) ? $text : $marker;
+                continue;
+            }
+
+            /*
+             * A value that is not a quoted string is still a value. Until
+             * 2.11.10 only string tokens were looked at, so
+             * define( 'SERVICE_TOKEN', 12345678 ) put the live token in the copy
+             * kept in the database. Reported by the wp.org automated review of
+             * 2.11.9.
+             *
+             * The first fix here redacted a number only in the value position of
+             * a define(), which is the shape that was reported and not the shape
+             * of the problem. The second cross review of 2.11.10 measured nine
+             * more: a negative number, one in parentheses, one inside
+             * array( ... ), one in a ternary, a const, and four that are not
+             * constants at all and so the output check cannot catch either, the
+             * worst of them the documented way of configuring Redis,
+             * $redis_server = array( 'auth' => 12345678 ). So a number is now
+             * treated like a string: redacted unless the place it sits in is one
+             * of the few that cannot hold a credential, which is how the rest of
+             * this function has been written since 2.11.8 (a list of what may be
+             * shown, never a list of what is secret).
+             *
+             * Losing a number from the diff costs little and buys the same trade
+             * as everywhere else: the hash still covers the whole file, so a
+             * change is detected even where the diff can no longer show it. The
+             * numeric core settings are in $readable_constants so the diff of a
+             * normal wp-config.php keeps saying what it used to.
+             */
+            if ( T_LNUMBER === $type || T_DNUMBER === $type ) {
+                $nprev   = self::significant_token( $tokens, $i, -1 );
+                $nnext   = self::significant_token( $tokens, $i, 1 );
+                $nptype  = ( null === $nprev ) ? null : $tokens[ $nprev ][0];
+                $nntype  = ( null === $nnext ) ? null : $tokens[ $nnext ][0];
+                $nbefore = ( '[' === $nptype ) ? self::significant_token( $tokens, $nprev, -1 ) : null;
+                $nbtoken = ( null === $nbefore ) ? array( null, null ) : $tokens[ $nbefore ];
+                $nvalue  = ( -1 !== $define_at && $depth === $define_at && ',' === $nptype );
+
+                $nkeep = $keep_until >= 0
+                    || T_DOUBLE_ARROW === $nntype
+                    || ( '[' === $nptype && ']' === $nntype && in_array( $nbtoken[0], array( T_VARIABLE, T_STRING, ']', ')', '}' ), true ) )
+                    || ( strlen( $text ) <= 1 && ! $nvalue );
+
+                /*
+                 * Except when that same number is a value actually in force. The
+                 * positions kept above are kept because a credential does not live
+                 * in them, which is true, but it says nothing about the number
+                 * itself: with
+                 *   define( 'SERVICE_TOKEN', 12345678 );
+                 *   $a = $config[12345678];
+                 * the value was redacted in the define and kept in the index, so it
+                 * survived, and the output check below did what it is there for and
+                 * threw the whole copy away. No leak, but the diff of that
+                 * wp-config.php was lost for good, which is the regression 2.11.8
+                 * fixed, coming back through the numbers added in 2.11.10. Found by
+                 * the third cross review.
+                 *
+                 * Strings are deliberately NOT treated this way: there, a value in
+                 * force sitting in a kept position (an include path, an array key)
+                 * can BE the secret, and losing the diff is the right answer. It is
+                 * what poc/wpconfig-baseline-secretos.sh checks and it stays.
+                 */
+                if ( $nkeep && in_array( $text, $live_values, true ) ) {
+                    $nkeep = false;
+                }
+
+                $out .= $nkeep ? $text : $marker;
                 continue;
             }
 
@@ -750,11 +825,13 @@ class Vigilante_File_Integrity {
      * Every user constant whose name appears in the file, the twelve of
      * WordPress wherever they were defined, and the environment variables the
      * file reads or sets. Arrays are walked to their leaves, since define()
-     * takes arrays. Only strings: numbers are never redacted and are not
-     * secrets, and the first version of this counted them and wiped the diff
-     * of any file with a large number in force (cross review of 2.11.8). The
-     * readable constants are left out, and so is anything shorter than eight
-     * characters.
+     * takes arrays. Strings and numbers both: the first version of this counted
+     * numbers and wiped the diff of any file with a large number in force (cross
+     * review of 2.11.8), so they were dropped, and 2.11.10 had to bring them
+     * back because a credential written as a number, which the wp.org review of
+     * 2.11.9 reported, is exactly what this check has to be able to see. The
+     * eight character floor is what keeps the old problem away. The readable
+     * constants are left out, and so is anything shorter than that.
      *
      * @since 2.11.8
      *
@@ -817,7 +894,18 @@ class Vigilante_File_Integrity {
             return $leaves;
         }
 
-        return is_string( $value ) ? array( $value ) : array();
+        if ( is_string( $value ) ) {
+            return array( $value );
+        }
+
+        /*
+         * A number is a value too. Until 2.11.10 this returned nothing for one,
+         * so the output check had no way to see a credential written as
+         * define( 'SERVICE_TOKEN', 12345678 ) and the redaction was left without
+         * its safety net there. Booleans and null stay out on purpose: as text
+         * they are '1' and '', which would match half the file.
+         */
+        return ( is_int( $value ) || is_float( $value ) ) ? array( (string) $value ) : array();
     }
 
     /**
@@ -1611,7 +1699,7 @@ class Vigilante_File_Integrity {
     public function init_cleanup_hooks() {
         add_action( 'admin_init', array( $this, 'maybe_redact_stored_baseline' ) );
         add_action( 'admin_init', array( $this, 'maybe_sweep_network_baselines' ) );
-        add_action( 'admin_init', array( $this, 'maybe_claim_owned_blocks' ) );
+        add_action( 'admin_init', array( $this, 'maybe_claim_owned_blocks_on_admin' ) );
     }
 
     /**
@@ -2312,6 +2400,49 @@ class Vigilante_File_Integrity {
      *
      * @return array Array of modified file entries (same format as core modified).
      */
+    /**
+     * Where a critical root file actually lives
+     *
+     * WordPress supports wp-config.php one directory above ABSPATH, guarded by
+     * wp-settings.php not being there: that is literally what the installed core
+     * does in wp-load.php, and it is a common hardening layout. Until 2.11.10
+     * this module only looked inside ABSPATH, so on those installations
+     * wp-config.php was never added to the baseline, never compared and never
+     * mentioned: the module reported the site clean without having opened the
+     * one file it most needs to watch. A zero is justified, never assumed. The
+     * plugin already resolved both locations elsewhere
+     * (Vigilante_Database_Prefix::find_wpconfig_path()), just not here. Found by
+     * the file-by-file review of 2.11.10.
+     *
+     * @since 2.11.10
+     *
+     * @param string $filename Name of the file, such as wp-config.php.
+     * @return string|false Absolute path, or false when it cannot be found.
+     */
+    private function critical_file_path( $filename ) {
+        $root = untrailingslashit( ABSPATH );
+        $path = $root . '/' . $filename;
+
+        if ( file_exists( $path ) ) {
+            return $path;
+        }
+
+        if ( 'wp-config.php' === $filename ) {
+            $above = dirname( $root ) . '/wp-config.php';
+
+            // Suppressed like the core does in wp-load.php: the directory above
+            // the install is often outside open_basedir on shared hosting, and
+            // without the @ every scan emits a warning that can land in front of
+            // the JSON of an AJAX scan.
+            // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- The same @ the core uses for this same check in wp-load.php:52, where a wp-config.php one directory up is looked for: open_basedir makes file_exists() warn on a path outside it, and this must not print.
+            if ( @file_exists( $above ) && ! @file_exists( dirname( $root ) . '/wp-settings.php' ) ) {
+                return $above;
+            }
+        }
+
+        return false;
+    }
+
     private function scan_critical_root_files() {
         // Before reading anything: the scan is the only thing that reaches
         // every site of a network on its own, through wp-cron and front-end
@@ -2327,12 +2458,11 @@ class Vigilante_File_Integrity {
         $modified = array();
         $baseline = $this->get_critical_files_baseline();
         $baseline_changed = false;
-        $root_path = untrailingslashit( ABSPATH );
 
         foreach ( $this->critical_root_files as $filename ) {
-            $full_path = $root_path . '/' . $filename;
+            $full_path = $this->critical_file_path( $filename );
 
-            if ( ! file_exists( $full_path ) ) {
+            if ( false === $full_path ) {
                 continue;
             }
 
@@ -2611,6 +2741,220 @@ class Vigilante_File_Integrity {
      * @param string $line One line of wp-config.php.
      * @return bool
      */
+    /**
+     * Whether every marked line of a file can run nothing at all
+     *
+     * The question the re-base has to answer before adopting a file is whether
+     * the lines that carry the marker are only comments. Asking a stricter one
+     * was wrong in both directions: the first version of the guard used
+     * is_vigilant_original_line(), which also requires the commented define to
+     * match a known harmless shape, so it refused to re-base a perfectly inert
+     * line carrying an unusual define, which is exactly the case the re-base
+     * exists for, leaving the function unable to act at all. Found by the cross
+     * review of 2.11.10.
+     *
+     * The second version read one line at a time and reasoned that the marker
+     * begins with //, so a line with nothing but whitespace before it is wholly
+     * a comment. That is true only where PHP is already reading code, and the
+     * second cross review of 2.11.10 built three files where it is not, all of
+     * them valid PHP, all of them passing that test and all of them running or
+     * printing something:
+     *
+     *   - the marked line placed BEFORE the opening <?php, so it is inline HTML
+     *     that the server prints verbatim to the browser;
+     *   - the same after a ?> that the file already had;
+     *   - the marked line ending a block comment opened on an earlier line and
+     *     opening another one at its end, with a statement in between, which
+     *     runs like any other statement.
+     *
+     * So the file is read the way PHP reads it, not the way the line looks. A
+     * marked line is inert when every token touching it is a comment or
+     * whitespace, which answers the three at once: inline HTML is not a comment,
+     * and neither is a statement. The shape the guard was written for, code
+     * BEFORE the marker, is the same question from the other side.
+     *
+     * The three shapes are in the harness as cells X2, X3 and X4 of
+     * matriz-escondite-marcadores.sh, written out in full there. They are not
+     * written out here on purpose: a literal payload in a shipped file is
+     * signature surface for the scanners this plugin is read by, and a comment
+     * is a bad place to pay for it.
+     *
+     * @since 2.11.10
+     *
+     * @param string $content Whole file content.
+     * @return bool True when no marked line can run or print anything.
+     */
+    /**
+     * The lines of a file that carry the original-value marker
+     *
+     * @since 2.11.10
+     *
+     * @param string $content Whole file content, newlines already normalised.
+     * @return string[]
+     */
+    private function marked_lines_of( $content ) {
+        $out = array();
+
+        foreach ( explode( "\n", $content ) as $text ) {
+            if ( false !== strpos( $text, $this->wpconfig_original_marker ) ) {
+                $out[] = $text;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Whether what a marked line carries would still be harmless uncommented
+     *
+     * Only the part after the marker matters: what comes before it is answered by
+     * the token pass, which refuses anything that is not comment or whitespace.
+     * Here the question is what comes BACK when uncomment_original_constants()
+     * removes the marker, so the body has to be a single define() and nothing
+     * else, with at most a trailing line comment. Deliberately says nothing about
+     * WHICH constant it is: asking that was the first version of this guard, and
+     * it refused every define it did not recognise, which is exactly the case the
+     * re-base exists for.
+     *
+     * @since 2.11.10
+     *
+     * @param string $line One line carrying the marker.
+     * @return bool
+     */
+    private function marked_line_body_is_harmless( $line ) {
+        $at = strpos( $line, $this->wpconfig_original_marker );
+
+        if ( false === $at ) {
+            return true;
+        }
+
+        $body = trim( substr( $line, $at + strlen( $this->wpconfig_original_marker ) ) );
+
+        if ( '' === $body ) {
+            return true;
+        }
+
+        // Tokenised as PHP so the trailing comment, the strings and the nesting
+        // are read the way PHP reads them and not with a regular expression.
+        $tokens = @token_get_all( '<?php ' . $body ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A marked line can carry anything; a warning here must not be printed, and an unreadable body is refused below.
+
+        if ( empty( $tokens ) ) {
+            return false;
+        }
+
+        $statements = 0;
+        $depth      = 0;
+
+        foreach ( $tokens as $token ) {
+            $type = is_array( $token ) ? $token[0] : $token;
+
+            if ( in_array( $type, array( T_OPEN_TAG, T_WHITESPACE, T_COMMENT, T_DOC_COMMENT ), true ) ) {
+                continue;
+            }
+
+            if ( '(' === $type ) {
+                $depth++;
+                continue;
+            }
+
+            if ( ')' === $type ) {
+                $depth--;
+                continue;
+            }
+
+            // A semicolon at the top level closes a statement. More than one, or
+            // anything after the first, means the line carries something else.
+            if ( ';' === $type && 0 === $depth ) {
+                $statements++;
+                continue;
+            }
+
+            if ( $statements > 0 ) {
+                return false;
+            }
+        }
+
+        return ( $statements <= 1 );
+    }
+
+    private function marked_lines_are_inert( $content ) {
+        $content = str_replace( "\r\n", "\n", (string) $content );
+        $marker  = $this->wpconfig_original_marker;
+
+        if ( '' === $content || false === strpos( $content, $marker ) ) {
+            return true;
+        }
+
+        $marked = array();
+
+        foreach ( explode( "\n", $content ) as $index => $text ) {
+            if ( false !== strpos( $text, $marker ) ) {
+                $marked[ $index + 1 ] = true;
+            }
+        }
+
+        // Lenient on purpose (no TOKEN_PARSE): a tampered file still has to be
+        // read, and a file that cannot be tokenised is never adopted.
+        // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- The file read here may have been tampered with, which is the whole point, and PHP 8 emits a warning when it cannot tokenise: printing it would put a parse error on whatever page ran the scan. An unreadable file is refused four lines below.
+        $tokens = @token_get_all( $content );
+
+        if ( empty( $tokens ) ) {
+            return false;
+        }
+
+        /*
+         * And the other half of the question, which the first token version left
+         * out: a marked line is a COMMENTED OUT value, and uncommenting it is what
+         * the feature exists for, so "runs nothing today" is not enough. Anything
+         * sharing the line after the define comes back with it. The shape is real
+         * and needs no attacker: comment_existing_constants() takes a define and
+         * everything on its line, so
+         *   define( 'WP_DEBUG', false ); @ini_set( 'display_errors', 0 );
+         * is commented whole, and re-basing it would adopt as approved something
+         * that runs the moment the value is restored. The old rule refused this
+         * too, but along with every define whose NAME it did not recognise, which
+         * is what left the function unable to act at all. Found by the third cross
+         * review of 2.11.10.
+         */
+        foreach ( $this->marked_lines_of( $content ) as $text ) {
+            if ( ! $this->marked_line_body_is_harmless( $text ) ) {
+                return false;
+            }
+        }
+
+        $inocuos = array( T_COMMENT, T_DOC_COMMENT, T_WHITESPACE );
+        $linea   = 1;
+
+        foreach ( $tokens as $token ) {
+            $texto  = is_array( $token ) ? $token[1] : $token;
+            $tipo   = is_array( $token ) ? $token[0] : null;
+            $saltos = substr_count( $texto, "\n" );
+            $desde  = $linea;
+            $hasta  = $linea + $saltos;
+
+            /*
+             * A token whose text ends in a newline puts nothing on the line that
+             * newline opens. Counting it would make the "<?php\n" of every file
+             * touch line 2 and refuse the legitimate case, which is what the
+             * first version of this did.
+             */
+            $ultima = ( $saltos > 0 && "\n" === substr( $texto, -1 ) ) ? $hasta - 1 : $hasta;
+            $linea  = $hasta;
+
+            if ( null !== $tipo && in_array( $tipo, $inocuos, true ) ) {
+                continue;
+            }
+
+            for ( $l = $desde; $l <= $ultima; $l++ ) {
+                if ( isset( $marked[ $l ] ) ) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
     private function is_vigilant_original_line( $line ) {
         if ( false !== strpos( $line, '<?' ) || false !== strpos( $line, '?>' ) ) {
             return false;
@@ -2723,6 +3067,34 @@ class Vigilante_File_Integrity {
      *
      * @since 2.11.5
      */
+    /**
+     * The admin_init entry point of the claim, which does ask for an administrator
+     *
+     * admin-ajax.php fires admin_init before it decides who is asking
+     * (wp-admin/admin-ajax.php:45), so without this an anonymous request chose
+     * the moment the claim runs. Unlike its two neighbours in
+     * init_cleanup_hooks(), which only drop the plugin's own copy out of the
+     * database, the claim writes two network options, changes for the whole
+     * network the rule normalize_critical_file() applies, and re-bases the
+     * approved baseline.
+     *
+     * The gate lives here and not inside maybe_claim_owned_blocks() because the
+     * scan calls that one directly and the scan runs from wp-cron, with no user:
+     * putting the capability check inside left the claim unable to complete on
+     * any site whose dashboard nobody opens, and until it completes the older,
+     * permissive rule is the one in force, which is the hiding place 2.11.5 was
+     * written to close. Found by the cross review of 2.11.10.
+     *
+     * @since 2.11.10
+     */
+    public function maybe_claim_owned_blocks_on_admin() {
+        if ( ! is_user_logged_in() || ! current_user_can( 'manage_options' ) ) {
+            return;
+        }
+
+        $this->maybe_claim_owned_blocks();
+    }
+
     public function maybe_claim_owned_blocks() {
         if ( $this->owned_blocks_claimed() || ! Vigilante_Settings::owns_shared_files() ) {
             return;
@@ -2735,14 +3107,13 @@ class Vigilante_File_Integrity {
             return;
         }
 
-        $root_path = untrailingslashit( ABSPATH );
         $expected  = null;
         $unclaimed = array();
 
         foreach ( $this->critical_root_files as $filename ) {
-            $full_path = $root_path . '/' . $filename;
+            $full_path = $this->critical_file_path( $filename );
 
-            if ( ! file_exists( $full_path ) ) {
+            if ( false === $full_path ) {
                 continue;
             }
 
@@ -2835,19 +3206,43 @@ class Vigilante_File_Integrity {
      */
     private function rebase_original_line_shift() {
         $baseline = $this->get_critical_files_baseline();
-        $root     = untrailingslashit( ABSPATH );
         $changed  = false;
 
         foreach ( $this->critical_root_files as $filename ) {
-            $full_path = $root . '/' . $filename;
+            $full_path = $this->critical_file_path( $filename );
 
-            if ( ! file_exists( $full_path ) || empty( $baseline[ $filename ]['hash'] ) ) {
+            if ( false === $full_path || empty( $baseline[ $filename ]['hash'] ) ) {
                 continue;
             }
 
             $content = file_get_contents( $full_path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
 
             if ( false === $content ) {
+                continue;
+            }
+
+            /*
+             * Never re-base a file that carries a marked line which is not
+             * wholly a comment. The test below only establishes that the
+             * difference lies in lines carrying the marker, and the old rule
+             * dropped the WHOLE line, so a line with a statement in front of the
+             * marker satisfies it (cell X1 of matriz-escondite-marcadores.sh,
+             * where the shape is written out): re-basing would write that line
+             * into the approved baseline and rewrite the stored content, so the
+             * diff would stop showing it. Adopting as approved what the previous rule
+             * hid is the one thing an integrity scanner must never do, and the
+             * log entry of maybe_claim_owned_blocks() already promises the
+             * opposite ("the scan reports it as a change for you to review").
+             * Those files are left to be reported. Found by the file-by-file
+             * review of 2.11.10.
+             *
+             * What counts as "wholly a comment" is decided by reading the file
+             * as PHP reads it, not by the shape of the line: see
+             * marked_lines_are_inert(). A line that is not recognised is not the
+             * same thing as a line that can run something, and the first
+             * wording of this guard confused the two.
+             */
+            if ( ! $this->marked_lines_are_inert( $content ) ) {
                 continue;
             }
 
@@ -2943,9 +3338,9 @@ class Vigilante_File_Integrity {
      * @return bool True on success.
      */
     public function update_critical_file_baseline( $filename ) {
-        $full_path = untrailingslashit( ABSPATH ) . '/' . $filename;
+        $full_path = $this->critical_file_path( $filename );
 
-        if ( ! file_exists( $full_path ) ) {
+        if ( false === $full_path ) {
             return false;
         }
 
@@ -3004,12 +3399,11 @@ class Vigilante_File_Integrity {
      */
     public function regenerate_all_baselines() {
         $baseline  = array();
-        $root_path = untrailingslashit( ABSPATH );
 
         foreach ( $this->critical_root_files as $filename ) {
-            $full_path = $root_path . '/' . $filename;
+            $full_path = $this->critical_file_path( $filename );
 
-            if ( ! file_exists( $full_path ) ) {
+            if ( false === $full_path ) {
                 continue;
             }
 
