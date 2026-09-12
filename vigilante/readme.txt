@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.11.8
+Stable tag: 2.11.9
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -415,6 +415,14 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 2.11.9 =
+Security fixes: a trusted forwarded IP header is accepted only from a verified proxy, an expired password is enforced beyond wp-admin, the session limit closes old sessions again, and .htaccess copies no longer keep secrets in the database.
+
+* Fix: when a forwarded header is trusted (X-Forwarded-For, X-Real-IP or CF-Connecting-IP), Vigilant now accepts it only from a connection it can verify as a proxy: an address in the new Trusted proxy IPs list, one of Cloudflare's own ranges for the CF-Connecting-IP header, or, when no list is set, your own private network. Until 2.11.9 the header was honoured whoever sent it, so a visitor whose request reached the origin directly could forge the address the firewall, the IP whitelist and blacklist and the rate-limit counters act on, rotating it to dodge throttling or setting a whitelisted one to skip the checks. Reported by the wordpress.org automated security review of 2.11.8. If your load balancer connects from a public address, add it to Trusted proxy IPs in the Firewall tab, or its header is ignored and every visitor is seen as that balancer.
+* Fix: an expired password is now enforced on the REST API, admin-ajax, the front end and XML-RPC, not only on wp-admin screens. Enforcement was a wp-admin redirect that skipped AJAX and never ran on the other routes, so a session whose password had expired kept working through them; now the account can only change the password or log out until it does. The feature must be enabled for this to apply. Reported by the wordpress.org automated security review of 2.11.8.
+* Fix: .htaccess copies no longer keep secrets in the database. A .htaccess can hold secrets such as SetEnv credentials, an Authorization header or a php_value with a key, and copies of the whole file put them within reach of anyone able to read the database or a backup of it. The rollback copy now lives only for the length of the write that creates it and is cleared straight after; the unused five-version history that kept raw copies has been removed; the header-recovery snapshot now stores only Vigilant's own block instead of the whole file; and any raw copies left in the database by earlier versions are cleared when you update. Reported by the wordpress.org automated security review of 2.11.8.
+* Fix: the session limit set to close the oldest sessions now actually closes them. It called the core session API with values that never matched a stored session, so it removed nothing while counting and logging success, and a user could keep more concurrent sessions open than the limit allowed. The oldest sessions are now removed from the session store directly, keeping the current one. Reported by the wordpress.org automated security review of 2.11.8.
+
 = 2.11.8 =
 Security fixes: the Under Attack challenge and its rate limit, the visitor IP behind X-Forwarded-For, secrets left in the integrity scan copy of wp-config.php, and several permission checks on networks.
 
@@ -462,8 +470,8 @@ For older changelog entries, please check the [changelog.txt](https://plugins.sv
 
 == Upgrade Notice ==
 
-= 2.11.8 =
-Security fixes: the Under Attack challenge and its rate limit, the visitor IP behind X-Forwarded-For, secrets left in the integrity scan copy of wp-config.php, and several permission checks on networks.
+= 2.11.9 =
+Security fixes: a trusted forwarded IP header is accepted only from a verified proxy, an expired password is enforced beyond wp-admin, the session limit closes old sessions again, and .htaccess copies no longer keep secrets in the database.
 
 == Support ==
 

@@ -60,14 +60,11 @@ class Vigilante_Htaccess_Manager {
     const LOCK_TIMEOUT = 30;
 
     /**
-     * Rolling history of replaced .htaccess versions, and the one-off snapshot
-     * taken from a site the 2.9.8 migration had already wiped.
+     * The single-slot rollback buffer, cleared at the end of every operation.
      *
      * @since 2.10.0
      */
-    const HISTORY_OPTION       = 'vigilante_htaccess_history';
-    const HISTORY_ENTRIES      = 5;
-    const HISTORY_MAX_BYTES    = 262144;
+    const BACKUP_OPTION = 'vigilante_htaccess_backup';
 
     private $known_blocks = array(
         '# BEGIN Vigilante Protection'        => '# END Vigilante Protection',
@@ -222,6 +219,9 @@ class Vigilante_Htaccess_Manager {
 
             return true;
         } finally {
+            // No .htaccess content, which may hold secrets, is left in the
+            // options table after the operation. Since 2.11.9.
+            $this->clear_backup();
             $this->release_lock();
         }
     }
@@ -338,6 +338,9 @@ class Vigilante_Htaccess_Manager {
             $this->restore_backup();
             return new WP_Error( 'write_failed', __( 'Failed to write .htaccess', 'vigilante' ) );
         } finally {
+            // No .htaccess content, which may hold secrets, is left in the
+            // options table after the operation. Since 2.11.9.
+            $this->clear_backup();
             $this->release_lock();
         }
     }
@@ -612,18 +615,27 @@ class Vigilante_Htaccess_Manager {
     }
 
     /**
-     * Create backup of current .htaccess
+     * Create backup of current .htaccess, for rollback within this operation only
+     *
+     * A .htaccess can carry secrets (SetEnv credentials, an Authorization
+     * header, a php_value with a key), so this rollback buffer is a live copy of
+     * the file and is cleared at the end of every add_block/remove_block, in the
+     * finally, rather than left sitting in the options table. Until 2.11.9 it
+     * persisted between operations and a rolling five-version history kept the
+     * raw content indefinitely, so anyone who read the database or a backup of
+     * it recovered those secrets without filesystem access. Reported by the
+     * wp.org automated review of 2.11.8. The history is gone; the buffer holds
+     * the real content because restoring a redacted one would write the marker
+     * into the live file, and lives only for the length of the write.
      *
      * @param string $content Content to backup.
      * @return bool
      */
     private function create_backup( $content ) {
-        $this->push_history( (string) $content );
-
-        // Store the backup in a private database option instead of a file under
-        // the web root, so it can never be served over HTTP.
+        // A private option, never a file under the web root, and dropped again
+        // by clear_backup() in the finally of the operation that created it.
         $stored = update_option(
-            'vigilante_htaccess_backup',
+            self::BACKUP_OPTION,
             array(
                 'content' => (string) $content,
                 'time'    => time(),
@@ -636,44 +648,12 @@ class Vigilante_Htaccess_Manager {
     }
 
     /**
-     * Keep the last few .htaccess versions, newest first.
+     * Drop the rollback buffer, so no .htaccess content lingers in the options table
      *
-     * The single-slot backup above is the rollback buffer: it is overwritten by
-     * the very next write, which is right for its job and useless for anything
-     * else. Something that only becomes visible days later, such as a header
-     * that quietly stopped being sent, needs more than one step of history.
-     *
-     * Kept in the database with autoload off, never in a file under the web
-     * root. Bounded on both axes so a large .htaccess cannot inflate the
-     * options table: oversized files are not stored at all, rather than stored
-     * truncated, because half an .htaccess is worse than none.
-     *
-     * @since 2.10.0
-     * @param string $content Content being replaced.
+     * @since 2.11.9
      */
-    private function push_history( $content ) {
-        if ( '' === $content || strlen( $content ) > self::HISTORY_MAX_BYTES ) {
-            return;
-        }
-
-        $history = get_option( self::HISTORY_OPTION );
-        $history = is_array( $history ) ? $history : array();
-
-        // Nothing changed, nothing to record.
-        if ( isset( $history[0]['content'] ) && $history[0]['content'] === $content ) {
-            return;
-        }
-
-        array_unshift(
-            $history,
-            array(
-                'content' => $content,
-                'time'    => time(),
-                'version' => VIGILANTE_VERSION,
-            )
-        );
-
-        update_option( self::HISTORY_OPTION, array_slice( $history, 0, self::HISTORY_ENTRIES ), false );
+    private function clear_backup() {
+        delete_option( self::BACKUP_OPTION );
     }
 
     /**
@@ -682,7 +662,7 @@ class Vigilante_Htaccess_Manager {
      * @return string
      */
     private function get_backup_content() {
-        $backup = get_option( 'vigilante_htaccess_backup' );
+        $backup = get_option( self::BACKUP_OPTION );
         return ( is_array( $backup ) && isset( $backup['content'] ) ) ? (string) $backup['content'] : '';
     }
 

@@ -465,6 +465,46 @@ class Vigilante_Admin {
 
             update_option( 'vigilante_db_version', '2.11.0' );
         }
+
+        /*
+         * 2.11.9: clear the raw .htaccess copies that older versions left in
+         * options, on the first admin load after the update. Uninstall already
+         * removes them, but that only fires when the plugin is deleted, so a
+         * site that keeps the plugin carried them until now. Three stores, each
+         * a copy of a file that can hold secrets (a SetEnv token, an
+         * Authorization header): the same exposure the wp.org review flagged as
+         * 4.4, on the paths its fix did not reach.
+         *
+         * - vigilante_htaccess_history: up to five raw copies, by design, until
+         *   2.11.8. The writer is gone, nothing reads it, so it is deleted.
+         * - vigilante_htaccess_backup: the single rollback buffer, normally
+         *   cleared in the finally of each write; a copy only lingers if a write
+         *   crashed mid-operation. Nothing outside one write reads it, so a
+         *   leftover is deleted.
+         * - vigilante_htaccess_pre_migration: still read by the header recovery,
+         *   but older versions stored the whole file where only our own block is
+         *   ever used. Truncated to that block, so the feature keeps working and
+         *   nothing outside our markers stays in the option.
+         */
+        if ( version_compare( $db_version, '2.11.9', '<' ) ) {
+            delete_option( 'vigilante_htaccess_history' );
+            delete_option( 'vigilante_htaccess_backup' );
+
+            $snapshot = get_option( 'vigilante_htaccess_pre_migration' );
+            if ( is_array( $snapshot ) && isset( $snapshot['content'] ) && '' !== (string) $snapshot['content'] ) {
+                require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-recovery.php';
+                $block = Vigilante_Htaccess_Recovery::get_raw_block();
+
+                if ( '' === $block ) {
+                    delete_option( 'vigilante_htaccess_pre_migration' );
+                } elseif ( $block !== $snapshot['content'] ) {
+                    $snapshot['content'] = $block;
+                    update_option( 'vigilante_htaccess_pre_migration', $snapshot, false );
+                }
+            }
+
+            update_option( 'vigilante_db_version', '2.11.9' );
+        }
     }
 
     /**
@@ -3395,6 +3435,18 @@ class Vigilante_Admin {
                             </select>
                             <p class="description">
                                 <?php esc_html_e( 'Where to read the visitor IP from. Leave on "Direct connection" unless your site really sits behind that proxy or CDN. Trusting a forwarded header on a site that is not behind it lets visitors spoof their IP and bypass the IP lists and rate limiting.', 'vigilante' ); ?>
+                            </p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="vigilante-f-firewall-trusted-proxies"><?php esc_html_e( 'Trusted proxy IPs', 'vigilante' ); ?></label></th>
+                        <td>
+                            <textarea id="vigilante-f-firewall-trusted-proxies" name="firewall[trusted_proxies]" rows="3" class="large-text code" placeholder="10.0.0.0/8&#10;192.168.1.1"><?php echo esc_textarea( implode( "\n", $options['trusted_proxies'] ?? array() ) ); ?></textarea>
+                            <p class="description">
+                                <?php esc_html_e( 'Only used with a forwarded header selected above. One IP or CIDR range per line: the addresses your proxy or load balancer connects from. The forwarded header is accepted only from these. Left empty, Vigilant accepts it from your own private network, and for Cloudflare from Cloudflare\'s own ranges automatically.', 'vigilante' ); ?>
+                                <?php if ( in_array( $proxy_header, array( 'x-forwarded-for', 'x-real-ip' ), true ) && empty( $options['trusted_proxies'] ) ) : ?>
+                                    <br><strong><?php esc_html_e( 'The header above is trusted but no proxy IPs are set. If your proxy or load balancer connects from a public address, add it here, or the header is ignored for safety and every visitor is seen as that proxy.', 'vigilante' ); ?></strong>
+                                <?php endif; ?>
                             </p>
                         </td>
                     </tr>
@@ -6889,7 +6941,8 @@ class Vigilante_Admin {
             }
         }
 
-        $rejected_ips = array();
+        $rejected_ips     = array();
+        $rejected_proxies = array();
 
         // Handle modules
         if ( 'modules' === $section && isset( $data['modules'] ) ) {
@@ -6916,7 +6969,7 @@ class Vigilante_Admin {
                 // match still sits in a security list looking like protection,
                 // so the ones that cannot match are dropped and reported back
                 // instead of being stored in silence.
-                $rejected_ips = $this->filter_ip_lists( $section, $processed );
+                $rejected_ips = $this->filter_ip_lists( $section, $processed, $rejected_proxies );
 
                 // Save the processed section
                 $saved_options[ $section ] = $processed;
@@ -6994,6 +7047,19 @@ class Vigilante_Admin {
             );
         }
 
+        if ( ! empty( $rejected_proxies ) ) {
+            $message .= ' ' . sprintf(
+                /* translators: %s: comma separated list of the trusted proxy entries that were not saved. */
+                _n(
+                    'A trusted proxy must be an exact IP or a CIDR range, not a wildcard, so this entry was not saved: %s',
+                    'A trusted proxy must be an exact IP or a CIDR range, not a wildcard, so these entries were not saved: %s',
+                    count( $rejected_proxies ),
+                    'vigilante'
+                ),
+                implode( ', ', array_map( 'esc_html', $rejected_proxies ) )
+            );
+        }
+
         wp_send_json_success( $message );
     }
 
@@ -7006,7 +7072,19 @@ class Vigilante_Admin {
      * @param array  $processed Section data, edited in place.
      * @return array Entries that were dropped, for the message back to the user.
      */
-    private function filter_ip_lists( $section, &$processed ) {
+    private function filter_ip_lists( $section, &$processed, &$rejected_proxies = array() ) {
+        $rejected_proxies = array();
+
+        // Trusted proxies feed an identity decision, so only exact addresses and
+        // CIDR ranges belong there: a wildcard is stripped with its own message,
+        // never stored looking effective. The matcher ignores it anyway (see
+        // Vigilante_IP_Utils::in_list_ip_or_cidr), this stops it persisting.
+        if ( 'firewall' === $section && isset( $processed['trusted_proxies'] ) && is_array( $processed['trusted_proxies'] ) ) {
+            $split                          = Vigilante_IP_Utils::split_list_ip_or_cidr( $processed['trusted_proxies'] );
+            $processed['trusted_proxies']   = $split['valid'];
+            $rejected_proxies               = $split['rejected'];
+        }
+
         $lists = array(
             'firewall'       => array( 'ip_whitelist', 'ip_blacklist' ),
             'login_security' => array( 'ip_whitelist' ),

@@ -94,6 +94,12 @@ class Vigilante_Settings {
                 // Empty = trust only REMOTE_ADDR (the real connection, unspoofable).
                 'trusted_proxy_header'      => '',
 
+                // Proxy / CDN: IPs or CIDR ranges the forwarded header is accepted
+                // from. Empty = accept it only from your own network, and, for
+                // CF-Connecting-IP, Cloudflare's own ranges. Since 2.11.9, so a
+                // header cannot be forged by a visitor reaching the origin directly.
+                'trusted_proxies'           => array(),
+
                 // User-Agent management
                 'ua_whitelist'              => array(),
                 'ua_blacklist'              => array(),
@@ -791,7 +797,7 @@ class Vigilante_Settings {
      */
     public static function get_user_data_keys() {
         return array(
-            'firewall'       => array( 'ip_whitelist', 'ip_blacklist', 'ua_whitelist', 'ua_blacklist', 'trusted_proxy_header' ),
+            'firewall'       => array( 'ip_whitelist', 'ip_blacklist', 'ua_whitelist', 'ua_blacklist', 'trusted_proxy_header', 'trusted_proxies' ),
             'login_security' => array( 'ip_whitelist', 'custom_login_url', 'two_factor' ),
             'user_security'  => array( 'insecure_usernames' ),
             'file_integrity' => array( 'excluded_paths', 'excluded_extensions' ),

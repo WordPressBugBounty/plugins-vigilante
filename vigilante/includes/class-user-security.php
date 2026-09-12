@@ -132,6 +132,11 @@ class Vigilante_User_Security {
             add_action( 'wp_login', array( $this, 'check_password_expiration' ), 10, 2 );
             add_action( 'admin_notices', array( $this, 'show_password_expiration_notice' ) );
             add_action( 'admin_init', array( $this, 'force_password_change_redirect' ) );
+            // Enforcement beyond wp-admin: REST and the front end, so an expired
+            // password cannot keep operating outside the redirect (2.11.9).
+            add_filter( 'rest_authentication_errors', array( $this, 'block_expired_password_rest' ), 20 );
+            add_action( 'template_redirect', array( $this, 'force_password_change_frontend' ) );
+            add_filter( 'authenticate', array( $this, 'block_expired_password_xmlrpc' ), 30, 1 );
             add_action( 'profile_update', array( $this, 'update_password_change_date' ), 10, 2 );
             add_action( 'user_register', array( $this, 'set_initial_password_date' ) );
             add_action( 'user_profile_update_errors', array( $this, 'check_password_history' ), 10, 3 );
@@ -1982,23 +1987,65 @@ class Vigilante_User_Security {
         }
 
         if ( 'close_oldest' === $behavior ) {
-            // Sort by login time and destroy oldest
-            uasort( $all_sessions, function( $a, $b ) {
-                return ( $a['login'] ?? 0 ) - ( $b['login'] ?? 0 );
+            /*
+             * Remove the oldest sessions by editing the session store directly.
+             *
+             * WP_Session_Tokens::get_all() returns array_values( get_sessions() ),
+             * so its keys are 0, 1, 2, not tokens, and destroy() expects a raw
+             * token, which is not stored anywhere and cannot be recovered for a
+             * session other than the current one. Until 2.11.9 the loop passed
+             * those numeric keys to destroy(), which hashed them, matched nothing
+             * and closed no session while still counting and logging success, so
+             * the cap did nothing under close_oldest. Reported by the wp.org
+             * automated review of 2.11.8.
+             *
+             * The store keeps the sessions as the user meta 'session_tokens',
+             * keyed by the verifier hash( 'sha256', token ), which is the value
+             * is_current_session() already compares against. So the oldest are
+             * removed from that map, keeping the current session whatever its age.
+             * On a network the meta is global (one finding of the multisite audit,
+             * to be reworked in 3.1.0); here the fix is only to make the removal
+             * actually happen.
+             */
+            $stored = get_user_meta( $user->ID, 'session_tokens', true );
+
+            if ( ! is_array( $stored ) || empty( $stored ) ) {
+                return;
+            }
+
+            $now     = time();
+            $changed = false;
+
+            // Expired sessions are dead weight and count for nothing; drop them first.
+            foreach ( $stored as $verifier => $session ) {
+                if ( isset( $session['expiration'] ) && (int) $session['expiration'] < $now ) {
+                    unset( $stored[ $verifier ] );
+                    $changed = true;
+                }
+            }
+
+            // Oldest first, keeping the current session whatever its login time.
+            uasort( $stored, function ( $a, $b ) {
+                return ( $a['login'] ?? 0 ) <=> ( $b['login'] ?? 0 );
             } );
 
-            $sessions_to_remove = $session_count - $max_sessions;
-            $removed = 0;
+            $sessions_to_remove = count( $stored ) - $max_sessions;
+            $removed            = 0;
 
-            foreach ( $all_sessions as $token_hash => $session ) {
+            foreach ( $stored as $verifier => $session ) {
                 if ( $removed >= $sessions_to_remove ) {
                     break;
                 }
-                // Don't remove current session
-                if ( ! $this->is_current_session( $token_hash ) ) {
-                    $sessions->destroy( $token_hash );
-                    $removed++;
+                if ( $this->is_current_session( $verifier ) ) {
+                    continue;
                 }
+                unset( $stored[ $verifier ] );
+                $removed++;
+                $changed = true;
+            }
+
+            if ( $changed ) {
+                update_user_meta( $user->ID, 'session_tokens', $stored );
             }
 
             // Log
@@ -2123,49 +2170,156 @@ class Vigilante_User_Security {
     }
 
     /**
-     * Force redirect to password change page
+     * Whether this user must change an expired password before doing anything else
+     *
+     * The flag alone is not enough: it is re-checked against the current policy,
+     * because the admin may have taken the user's role out of affected_roles or
+     * added the user to the exclusion list after it was set, which would
+     * otherwise lock them in a redirect loop. A stale flag is cleared on a
+     * single site; on a network the meta is shared by every site and the policy
+     * checked is only this site's, so it is left alone and simply not enforced
+     * here (a network-wide rework is the 3.1.0 multisite item).
+     *
+     * @since 2.11.9
+     *
+     * @param int $user_id User ID.
+     * @return bool
+     */
+    private function must_change_password( $user_id ) {
+        if ( ! $user_id ) {
+            return false;
+        }
+
+        $flagged = (bool) get_user_meta( $user_id, 'vigilante_must_change_password', true );
+
+        if ( ! $this->is_password_expiration_applicable( $user_id ) ) {
+            if ( $flagged && ! is_multisite() ) {
+                delete_user_meta( $user_id, 'vigilante_must_change_password' );
+            }
+            return false;
+        }
+
+        if ( $flagged ) {
+            return true;
+        }
+
+        // The flag is set at interactive login (check_password_expiration on
+        // wp_login). A session that authenticates only through REST, XML-RPC or
+        // an application password never fires wp_login, so the flag can be
+        // absent while the password is in fact expired. Compute it on the fly
+        // too, so a non-interactive route is not a way around the block. The
+        // computation self-seeds the change date on first sight and never locks
+        // out a user who has no record yet (see is_password_expired()).
+        return $this->is_password_expired( $user_id );
+    }
+
+    /**
+     * Force a user with an expired password to change it, on wp-admin and AJAX
+     *
+     * Until 2.11.9 this only redirected wp-admin pages and skipped AJAX, so an
+     * expired-password session kept working through admin-ajax, and the REST API
+     * and the front end were not covered at all. The wp.org automated review of
+     * 2.11.8 flagged it: setting a flag on login is not enforcement if the flag
+     * is only read by one redirect. It is now enforced on every entry point,
+     * here for wp-admin and AJAX and in the three methods below for REST, the
+     * front end and XML-RPC. The only thing an affected user can still do is
+     * change the password on profile.php or log out.
      */
     public function force_password_change_redirect() {
-        if ( ! is_user_logged_in() ) {
+        if ( ! is_user_logged_in() || ! $this->must_change_password( get_current_user_id() ) ) {
             return;
         }
 
-        // Don't redirect on AJAX or profile page
+        // AJAX: a redirect is useless, so the request is refused. Changing the
+        // password is a profile.php form POST, not AJAX, so nothing the user
+        // needs to fix this is blocked.
         if ( wp_doing_ajax() ) {
-            return;
+            wp_send_json_error(
+                array( 'message' => __( 'Your password has expired. Change it in your profile before continuing.', 'vigilante' ) ),
+                403
+            );
         }
 
+        // profile.php is where the change happens; do not redirect it onto itself.
         global $pagenow;
         if ( 'profile.php' === $pagenow ) {
             return;
         }
 
-        $user_id = get_current_user_id();
-        $must_change = get_user_meta( $user_id, 'vigilante_must_change_password', true );
+        wp_safe_redirect( admin_url( 'profile.php#password' ) );
+        exit;
+    }
 
-        if ( ! $must_change ) {
-            return;
+    /**
+     * Refuse REST API requests from a user whose password has expired
+     *
+     * @since 2.11.9
+     *
+     * @param WP_Error|null|true $result Result of the earlier authentication checks.
+     * @return WP_Error|null|true
+     */
+    public function block_expired_password_rest( $result ) {
+        // Leave any decision another check already made, and do not act on
+        // logged-out requests to public endpoints.
+        if ( null !== $result && false !== $result ) {
+            return $result;
         }
 
-        // Re-validate against current settings: the admin may have removed
-        // this user's role from affected_roles or added the user to the
-        // excluded list after the flag was set. Without this check the flag
-        // outlives the configuration change and locks the user in a redirect
-        // loop into profile.php.
-        if ( ! $this->is_password_expiration_applicable( $user_id ) ) {
-            // On a network the flag is a user meta that every site shares, and the
-            // policy just checked is only this site's: another site may have set
-            // it, and clearing it here let a user skip that site's forced change
-            // by visiting any other dashboard. It is only cleared on a single
-            // site (2.11.8); on a network the user is just not redirected here.
-            if ( ! is_multisite() ) {
-                delete_user_meta( $user_id, 'vigilante_must_change_password' );
-            }
+        if ( is_user_logged_in() && $this->must_change_password( get_current_user_id() ) ) {
+            return new WP_Error(
+                'vigilante_password_expired',
+                __( 'Your password has expired. Change it in your profile before using the REST API.', 'vigilante' ),
+                array( 'status' => 403 )
+            );
+        }
+
+        return $result;
+    }
+
+    /**
+     * Send a user with an expired password to the change page from the front end
+     *
+     * @since 2.11.9
+     */
+    public function force_password_change_frontend() {
+        if ( is_admin() || ! is_user_logged_in() || ! $this->must_change_password( get_current_user_id() ) ) {
             return;
         }
 
         wp_safe_redirect( admin_url( 'profile.php#password' ) );
         exit;
+    }
+
+    /**
+     * Refuse XML-RPC calls from a user whose password has expired
+     *
+     * The last of the four non-wp-admin entry points. XML-RPC authenticates on
+     * every call with the account credentials (a password or an application
+     * password), so a session that never touches wp-admin could keep acting
+     * through xmlrpc.php while the password sits expired. Scoped to XML-RPC
+     * requests so an ordinary login, which the user needs to reach profile.php,
+     * is never blocked here. Runs late on authenticate, after core and the
+     * application-password handler have resolved the user.
+     *
+     * @since 2.11.9
+     *
+     * @param WP_User|WP_Error|null $user Result of the earlier authentication.
+     * @return WP_User|WP_Error|null
+     */
+    public function block_expired_password_xmlrpc( $user ) {
+        if ( ! ( defined( 'XMLRPC_REQUEST' ) && XMLRPC_REQUEST ) ) {
+            return $user;
+        }
+
+        if ( $user instanceof WP_User && $this->must_change_password( $user->ID ) ) {
+            return new WP_Error(
+                'vigilante_password_expired',
+                __( 'Your password has expired. Change it in your profile before using XML-RPC.', 'vigilante' ),
+                array( 'status' => 403 )
+            );
+        }
+
+        return $user;
     }
 
     /**

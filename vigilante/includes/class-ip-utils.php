@@ -80,6 +80,53 @@ class Vigilante_IP_Utils {
     }
 
     /**
+     * Whether an address is in a list, matching exact addresses and CIDR only.
+     *
+     * The strict cousin of in_list(), for deciding identity rather than
+     * filtering traffic. A wildcard entry (1.2.* or a bare *) is never honoured
+     * here: a proxy the site delegates its client IP to is a specific machine
+     * or a specific range, and a wildcard in that role is the trust-everyone
+     * footgun that would reopen the forwarded-header spoofing (6.1) this release
+     * closes, since matches() turns a bare * into /^.*$/ and trusts every peer.
+     * Kept apart from in_list() on purpose, so the firewall whitelist keeps its
+     * wildcards while the proxy-trust decision cannot grow one.
+     *
+     * @since 2.11.9
+     *
+     * @param string $ip   Address to test.
+     * @param array  $list List of exact addresses or CIDR ranges.
+     * @return bool
+     */
+    public static function in_list_ip_or_cidr( $ip, $list ) {
+        if ( empty( $list ) || ! is_array( $list ) ) {
+            return false;
+        }
+
+        $ip = trim( (string) $ip );
+        if ( '' === $ip ) {
+            return false;
+        }
+
+        foreach ( $list as $pattern ) {
+            $pattern = trim( (string) $pattern );
+
+            if ( '' === $pattern || false !== strpos( $pattern, '*' ) ) {
+                continue;
+            }
+
+            if ( $ip === $pattern ) {
+                return true;
+            }
+
+            if ( false !== strpos( $pattern, '/' ) && self::cidr_match( $ip, $pattern ) ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Whether a string is a pattern this class can actually match.
      *
      * The counterpart of matches(): everything this returns true for is
@@ -164,6 +211,64 @@ class Vigilante_IP_Utils {
             }
 
             if ( self::is_valid_pattern( $entry ) ) {
+                $valid[] = $entry;
+            } else {
+                $rejected[] = $entry;
+            }
+        }
+
+        return array(
+            'valid'    => array_values( array_unique( $valid ) ),
+            'rejected' => array_values( array_unique( $rejected ) ),
+        );
+    }
+
+    /**
+     * Whether a string is a proxy address this class trusts to set a header.
+     *
+     * A valid pattern that is not a wildcard: an exact address or a CIDR range.
+     * The counterpart of in_list_ip_or_cidr() for the save path, so a wildcard
+     * typed into the trusted proxies field is rejected with feedback instead of
+     * sitting there matching nothing (or, before the strict matcher, everything).
+     *
+     * @since 2.11.9
+     *
+     * @param string $pattern Candidate pattern.
+     * @return bool
+     */
+    public static function is_valid_proxy( $pattern ) {
+        $pattern = trim( (string) $pattern );
+
+        return false === strpos( $pattern, '*' ) && self::is_valid_pattern( $pattern );
+    }
+
+    /**
+     * Split a list into the proxy addresses that are valid and the ones that are not.
+     *
+     * Like split_list(), but rejecting wildcards: the trusted proxies list feeds
+     * an identity decision, and only exact addresses and CIDR ranges belong there.
+     *
+     * @since 2.11.9
+     *
+     * @param array|string $list List of patterns, or a newline separated string.
+     * @return array{valid: string[], rejected: string[]}
+     */
+    public static function split_list_ip_or_cidr( $list ) {
+        if ( is_string( $list ) ) {
+            $list = preg_split( '/[\r\n]+/', $list );
+        }
+
+        $valid    = array();
+        $rejected = array();
+
+        foreach ( (array) $list as $entry ) {
+            $entry = trim( (string) $entry );
+
+            if ( '' === $entry ) {
+                continue;
+            }
+
+            if ( self::is_valid_proxy( $entry ) ) {
                 $valid[] = $entry;
             } else {
                 $rejected[] = $entry;
@@ -357,40 +462,125 @@ class Vigilante_IP_Utils {
     }
 
     /**
+     * The proxy IPs/CIDRs the admin declared their forwarded header comes from.
+     *
+     * @since 2.11.9
+     *
+     * @return string[]
+     */
+    public static function trusted_proxies() {
+        $options = get_option( 'vigilante_options' );
+        $list    = ( is_array( $options ) && isset( $options['firewall']['trusted_proxies'] ) ) ? $options['firewall']['trusted_proxies'] : array();
+        return is_array( $list ) ? $list : array();
+    }
+
+    /**
+     * Cloudflare's published edge ranges, so CF-Connecting-IP verifies itself.
+     *
+     * From https://www.cloudflare.com/ips/ (stable, changes rarely). Bundled so
+     * a site behind Cloudflare does not have to list them by hand; if they ever
+     * change, the admin can add the new ones to the trusted proxies list.
+     *
+     * @since 2.11.9
+     *
+     * @return string[]
+     */
+    public static function cloudflare_ranges() {
+        return array(
+            '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
+            '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
+            '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+            '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22',
+            '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32',
+            '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32',
+        );
+    }
+
+    /**
+     * Whether the TCP peer may be trusted to have set the forwarded header
+     *
+     * The reviewer of 2.11.8 was right: honouring CF-Connecting-IP,
+     * X-Forwarded-For or X-Real-IP without checking who sent them lets any
+     * visitor whose request reaches PHP directly forge the address the firewall,
+     * the whitelist and the rate limiter act on. So the header is honoured only
+     * when the real connection, REMOTE_ADDR, is a proxy we have reason to trust:
+     *
+     * - an exact address or CIDR range in the admin's trusted proxies list
+     *   (wins for any header); a wildcard there is ignored, see
+     *   in_list_ip_or_cidr();
+     * - for CF-Connecting-IP, one of Cloudflare's published ranges, since only
+     *   Cloudflare sends that header;
+     * - with no list configured, an address of your own network (a reverse proxy
+     *   in front of PHP, a load balancer in a private subnet), which a visitor
+     *   hitting a public origin directly is not.
+     *
+     * A public load balancer that connects from a public address needs its IPs
+     * in the trusted proxies list; until then its header is not honoured and the
+     * connection address is used, which is safe.
+     *
+     * @since 2.11.9
+     *
+     * @param string   $remote          Validated REMOTE_ADDR.
+     * @param string   $header          Trusted header key.
+     * @param string[] $trusted_proxies Configured proxy IPs/CIDRs.
+     * @return bool
+     */
+    private static function peer_is_trusted_proxy( $remote, $header, $trusted_proxies ) {
+        // A dual-stack proxy connects as ::ffff:10.0.0.5; read it as the IPv4 it
+        // is, so a private reverse proxy is recognised as own network and a peer
+        // listed by its IPv4 matches. client_from_chain() already unmaps, this
+        // keeps the two sides symmetric (found by the cross review of 2.11.9).
+        $remote = self::unmap_ipv4( $remote );
+
+        if ( ! empty( $trusted_proxies ) && self::in_list_ip_or_cidr( $remote, $trusted_proxies ) ) {
+            return true;
+        }
+
+        if ( 'cf-connecting-ip' === $header && self::in_list_ip_or_cidr( $remote, self::cloudflare_ranges() ) ) {
+            return true;
+        }
+
+        return empty( $trusted_proxies ) && self::is_own_network( $remote );
+    }
+
+    /**
      * Resolve the client IP from a $_SERVER-like array.
      *
      * Only the real TCP peer (REMOTE_ADDR) is trusted by default, because it
-     * cannot be spoofed. A forwarded-for / connecting-ip header is honoured
-     * ONLY when the admin has explicitly declared their site sits behind that
-     * proxy; otherwise any visitor could forge the header and impersonate any
-     * IP (bypassing the whitelist, evading the blacklist, poisoning the rate
-     * limiter, etc.).
+     * cannot be spoofed. A forwarded-for / connecting-ip header is honoured only
+     * when the admin has declared their site sits behind that proxy AND the
+     * connection actually comes from a proxy we trust (see
+     * peer_is_trusted_proxy()); otherwise any visitor could forge the header and
+     * impersonate any IP, bypassing the whitelist, evading the blacklist and
+     * poisoning the rate limiter. Reported by the wp.org review of 2.11.8.
      *
-     * @param array  $server         A $_SERVER-like array.
-     * @param string $trusted_header One of the keys in trusted_header_map(), or '' for none.
+     * @param array    $server          A $_SERVER-like array.
+     * @param string   $trusted_header  One of the keys in trusted_header_map(), or '' for none.
+     * @param string[] $trusted_proxies Configured proxy IPs/CIDRs.
      * @return string Validated IP, or '0.0.0.0' when none could be determined.
      */
-    public static function resolve_client_ip( $server, $trusted_header = '' ) {
-        $map = self::trusted_header_map();
-
-        if ( '' !== $trusted_header && isset( $map[ $trusted_header ] ) ) {
-            $key = $map[ $trusted_header ];
-            if ( ! empty( $server[ $key ] ) ) {
-                $value = self::client_from_chain( (string) $server[ $key ] );
-                if ( '' !== $value ) {
-                    return $value;
-                }
-            }
-        }
+    public static function resolve_client_ip( $server, $trusted_header = '', $trusted_proxies = array() ) {
+        $map    = self::trusted_header_map();
+        $remote = '';
 
         if ( ! empty( $server['REMOTE_ADDR'] ) ) {
-            $remote = trim( (string) $server['REMOTE_ADDR'] );
-            if ( filter_var( $remote, FILTER_VALIDATE_IP ) ) {
-                return $remote;
+            $candidate = trim( (string) $server['REMOTE_ADDR'] );
+            if ( filter_var( $candidate, FILTER_VALIDATE_IP ) ) {
+                $remote = $candidate;
             }
         }
 
-        return '0.0.0.0';
+        if ( '' !== $trusted_header && isset( $map[ $trusted_header ] ) && '' !== $remote
+            && ! empty( $server[ $map[ $trusted_header ] ] )
+            && self::peer_is_trusted_proxy( $remote, $trusted_header, $trusted_proxies )
+        ) {
+            $value = self::client_from_chain( (string) $server[ $map[ $trusted_header ] ] );
+            if ( '' !== $value ) {
+                return $value;
+            }
+        }
+
+        return '' !== $remote ? $remote : '0.0.0.0';
     }
 
     /**
@@ -560,6 +750,6 @@ class Vigilante_IP_Utils {
             }
         }
 
-        return self::resolve_client_ip( $server, $trusted );
+        return self::resolve_client_ip( $server, $trusted, self::trusted_proxies() );
     }
 }

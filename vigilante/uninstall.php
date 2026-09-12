@@ -187,6 +187,13 @@ function vigilante_uninstall_site() {
         // authentication salts, so leaving it behind would keep them readable in
         // the options table long after the plugin is gone.
         'vigilante_htaccess_backup',
+        'vigilante_htaccess_history',
+        // The pre-migration snapshot keeps our own header block so the owner can
+        // restore it; it is still ours to remove on uninstall, along with the
+        // recovery undo copy and the dismissed flag.
+        'vigilante_htaccess_pre_migration',
+        'vigilante_htaccess_recovery_undo',
+        'vigilante_htaccess_recovery_done',
         'vigilante_wpconfig_backup',
         'vigilante_config_copies_purged',
         'vigilante_config_copies_sweep_lock',

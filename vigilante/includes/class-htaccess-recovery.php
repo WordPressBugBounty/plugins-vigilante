@@ -139,7 +139,16 @@ class Vigilante_Htaccess_Recovery {
             return;
         }
 
-        if ( '' === self::extract_block( $content ) ) {
+        // Only ever our own block is kept, never the whole file. Everything the
+        // recovery reads later goes through extract_block() anyway, so nothing
+        // outside our markers is used; and an .htaccess can carry secrets (a
+        // SetEnv token, an Authorization line), which have no business sitting
+        // in an option. Our block is response-header directives, public by
+        // definition. Closes the raw-.htaccess-in-options report (4.4) for this
+        // path too, without a redaction regex that could miss one.
+        $block = self::extract_block( (string) $content );
+
+        if ( '' === $block ) {
             return;
         }
 
@@ -161,7 +170,7 @@ class Vigilante_Htaccess_Recovery {
         // directivas del bloque de Protección (unset X-Powered-By, unset Server),
         // que el generador de cabeceras no produce y que harían diferir a
         // cualquier sitio sano que tenga el cortafuegos activo.
-        $on_disk = self::directives( self::extract_block( $content ) );
+        $on_disk = self::directives( $block );
         $would   = self::directives( ( new Vigilante_Security_Headers( $settings ) )->generate_rules_content() );
 
         if ( empty( $on_disk ) || $on_disk === $would ) {
@@ -171,7 +180,7 @@ class Vigilante_Htaccess_Recovery {
         update_option(
             self::SNAPSHOT_OPTION,
             array(
-                'content' => (string) $content,
+                'content' => $block,
                 'time'    => time(),
                 'version' => VIGILANTE_VERSION,
             ),
