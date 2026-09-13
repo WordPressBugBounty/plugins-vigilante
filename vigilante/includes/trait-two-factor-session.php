@@ -55,15 +55,22 @@ trait Vigilante_Two_Factor_Session {
      * Whether this class is the one that must ask this account for its factor
      *
      * @since 2.11.10
+     * @since 2.11.11 The enrolment can be passed in by a caller that has just read it.
      *
-     * @param WP_User $user   User being authenticated.
-     * @param string  $method Method this class implements, 'email' or 'totp'.
+     * @param WP_User   $user     User being authenticated.
+     * @param string    $method   Method this class implements, 'email' or 'totp'.
+     * @param bool|null $enrolled Whether the account has a TOTP enrolment, when the
+     *                            caller already read its row. On a network that read
+     *                            can search every site the account belongs to, and
+     *                            the dashboard hooks run on every screen.
      * @return bool
      */
-    protected function handles_second_factor( $user, $method ) {
-        $enrolled = $this->database && method_exists( $this->database, 'has_totp_enrolment' )
-            ? $this->database->has_totp_enrolment( $user->ID )
-            : false;
+    protected function handles_second_factor( $user, $method, $enrolled = null ) {
+        if ( null === $enrolled ) {
+            $enrolled = $this->database && method_exists( $this->database, 'has_totp_enrolment' )
+                ? $this->database->has_totp_enrolment( $user->ID )
+                : false;
+        }
 
         return ( $method === Vigilante_Settings::two_factor_handler_for( $user, $enrolled ) );
     }

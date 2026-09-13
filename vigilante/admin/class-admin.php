@@ -3531,8 +3531,8 @@ class Vigilante_Admin {
                     <p style="margin:0;">
                         <?php
                         printf(
-                            /* translators: 1: address Vigilant reads now, 2: address earlier versions read */
-                            esc_html__( 'Your own request reaches the site with more than one public address in X-Forwarded-For. Vigilant reads the last one, %1$s, which is the one your proxy added; up to version 2.11.7 it read the first one, %2$s, which a visitor can write. If %1$s belongs to a CDN or a load balancer rather than to you, every visitor shares it for rate limiting, login lockouts and the IP lists: choose the header of that CDN in Visitor IP detection, such as CF-Connecting-IP for Cloudflare.', 'vigilante' ),
+                            /* translators: 1: last address in the header, the one Vigilant reads, 2: first address in the header, which a visitor can write */
+                            esc_html__( 'Your own request reaches the site with more than one public address in X-Forwarded-For. Vigilant reads the last one, %1$s, which is the one your proxy added, and not the first one, %2$s, which a visitor can write. If %1$s belongs to a CDN or a load balancer rather than to you, every visitor shares it for rate limiting, login lockouts and the IP lists: choose the header of that CDN in Visitor IP detection, such as CF-Connecting-IP for Cloudflare.', 'vigilante' ),
                             esc_html( $xff_readings['now'] ),
                             esc_html( $xff_readings['before'] )
                         );
@@ -4334,7 +4334,7 @@ class Vigilante_Admin {
         <div class="vigilante-settings-section" id="vigilante-headers-recovery">
             <h2><?php esc_html_e( 'Recover your previous header settings', 'vigilante' ); ?></h2>
             <p>
-                <?php esc_html_e( 'Updating to 2.9.8 reset this tab to factory values: the migration replaced the whole section instead of merging into it. Your server kept sending the right headers, because the .htaccess had not been rewritten yet, so Vigilant saved a copy of that file before touching it. These are the settings it found in that copy.', 'vigilante' ); ?>
+                <?php esc_html_e( 'An earlier update reset this tab to factory values: the migration replaced the whole section instead of merging into it. Your server kept sending the right headers, because the .htaccess had not been rewritten yet, so Vigilant saved a copy of that file before touching it. These are the settings it found in that copy.', 'vigilante' ); ?>
             </p>
             <?php if ( $taken ) : ?>
                 <p class="description">

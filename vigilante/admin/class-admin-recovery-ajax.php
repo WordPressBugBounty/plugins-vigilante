@@ -54,7 +54,7 @@ trait Vigilante_Admin_Recovery_Ajax {
             $this->activity_log->log(
                 'system',
                 'headers_settings_restored',
-                __( 'The Security Headers settings were restored from the .htaccess snapshot taken before the 2.9.8 migration reset them.', 'vigilante' ),
+                __( 'The Security Headers settings were restored from the .htaccess snapshot taken before an update reset them.', 'vigilante' ),
                 array(),
                 'info'
             );

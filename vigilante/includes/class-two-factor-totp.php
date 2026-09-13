@@ -970,10 +970,21 @@ class Vigilante_Two_Factor_TOTP {
          * which one asks is decided per account and not per site, so without this
          * an install configured for a code by email would show an authenticator
          * app section to everybody. An account already enrolled keeps seeing it
-         * whatever the site is set to, or it would have no way to manage or reset
-         * an enrolment it already has.
+         * while a second factor is required of it, whatever method the site asks
+         * for, or it would have no way to manage or remove an enrolment it
+         * already has.
+         *
+         * Since 2.11.11 an enrolment is not used while no site asks that account
+         * for an app (see Vigilante_Settings::two_factor_handler_for()), and the
+         * section says so instead of "Configured and active": the enrolment is
+         * kept, comes back into use as soon as an app is asked for, and its owner
+         * can still remove it or renew the backup codes from here. Removing it
+         * there does not lead to a new QR code, because nothing asks for one, so
+         * that button says what it does instead of "Set up new authenticator".
          */
-        if ( ! $configured && ! $this->handles_second_factor( $user, 'totp' ) ) {
+        $in_use = $this->handles_second_factor( $user, 'totp', $configured );
+
+        if ( ! $configured && ! $in_use ) {
             return;
         }
 
@@ -986,10 +997,18 @@ class Vigilante_Two_Factor_TOTP {
                 <tr>
                     <th scope="row"><?php esc_html_e( 'Status', 'vigilante' ); ?></th>
                     <td>
-                        <span class="vigilante-totp-status vigilante-totp-active">
-                            <span class="dashicons dashicons-yes-alt"></span>
-                            <?php esc_html_e( 'Configured and active', 'vigilante' ); ?>
-                        </span>
+                        <?php if ( $in_use ) : ?>
+                            <span class="vigilante-totp-status vigilante-totp-active">
+                                <span class="dashicons dashicons-yes-alt"></span>
+                                <?php esc_html_e( 'Configured and active', 'vigilante' ); ?>
+                            </span>
+                        <?php else : ?>
+                            <span class="vigilante-totp-status vigilante-totp-inactive">
+                                <span class="dashicons dashicons-info-outline"></span>
+                                <?php esc_html_e( 'Configured, not in use', 'vigilante' ); ?>
+                            </span>
+                            <p class="description"><?php esc_html_e( 'Login for this account is verified with a code sent by email for now. This authenticator setup is kept and will be asked for again if an authenticator app becomes required for this account.', 'vigilante' ); ?></p>
+                        <?php endif; ?>
                         <?php if ( ! empty( $totp_data['configured_at'] ) ) : ?>
                             <p class="description">
                                 <?php
@@ -1029,6 +1048,7 @@ class Vigilante_Two_Factor_TOTP {
                     </td>
                 </tr>
                 <?php if ( current_user_can( 'manage_options' ) || get_current_user_id() === $user->ID ) : ?>
+                    <?php if ( $in_use ) : ?>
                 <tr>
                     <th scope="row"><?php esc_html_e( 'Reconfigure', 'vigilante' ); ?></th>
                     <td>
@@ -1038,6 +1058,17 @@ class Vigilante_Two_Factor_TOTP {
                         <p class="description"><?php esc_html_e( 'This will reset your current TOTP setup and require scanning a new QR code.', 'vigilante' ); ?></p>
                     </td>
                 </tr>
+                    <?php else : ?>
+                <tr>
+                    <th scope="row"><?php esc_html_e( 'Remove', 'vigilante' ); ?></th>
+                    <td>
+                        <button type="button" class="button vigilante-totp-reconfigure vigilante-totp-remove" data-user="<?php echo esc_attr( $user->ID ); ?>" data-confirm="<?php esc_attr_e( 'This will remove the authenticator setup of this account and forget its trusted devices. Login keeps using the code sent by email. Continue?', 'vigilante' ); ?>">
+                            <?php esc_html_e( 'Remove authenticator setup', 'vigilante' ); ?>
+                        </button>
+                        <p class="description"><?php esc_html_e( 'Removes this authenticator setup and forgets the trusted devices of this account. If an authenticator app becomes required later, a new one can be set up then.', 'vigilante' ); ?></p>
+                    </td>
+                </tr>
+                    <?php endif; ?>
                 <?php endif; ?>
             <?php else : ?>
                 <tr>
@@ -1325,7 +1356,25 @@ class Vigilante_Two_Factor_TOTP {
 
         $user = wp_get_current_user();
 
-        if ( ! $user->ID || ! $this->user_requires_2fa( $user ) ) {
+        /*
+         * Only an account this class asks for its app: the same election as the
+         * login and the profile section. Asking only whether some second factor
+         * is required was enough while this class registered only on sites set to
+         * an app; since 2.11.10 it registers wherever two factor is on, and an
+         * account verified by email with a leftover row from a grace period was
+         * sent to profile.php from every screen of the dashboard, where the setup
+         * section is not shown to it, so nothing let it out.
+         *
+         * Asked first, and as if the account had no enrolment, because the row
+         * read below is the expensive part: on a network, for an account with no
+         * enrolment, it searches the table of every site the account can reach,
+         * and most accounts verified by email have none. Assuming no enrolment
+         * changes nothing here: with one, the answer can only move to the app,
+         * and an enrolled account leaves at "already configured" anyway. This
+         * also answers no when nothing is required, so it replaces
+         * user_requires_2fa().
+         */
+        if ( ! $user->ID || ! $this->handles_second_factor( $user, 'totp', false ) ) {
             return;
         }
 
@@ -1363,7 +1412,10 @@ class Vigilante_Two_Factor_TOTP {
     public function show_grace_period_notice() {
         $user = wp_get_current_user();
 
-        if ( ! $this->user_requires_2fa( $user ) ) {
+        // Same election, in the same order and for the same reasons, as
+        // force_totp_setup_redirect(): since 2.11.10 an account verified by email
+        // was told on every screen to set up an app.
+        if ( ! $user->ID || ! $this->handles_second_factor( $user, 'totp', false ) ) {
             return;
         }
 

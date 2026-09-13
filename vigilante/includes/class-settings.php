@@ -978,15 +978,25 @@ class Vigilante_Settings {
      *
      * The order is what keeps it closed at both ends:
      *
-     * 1. An enrolment already made wins. It is the strongest factor the account
-     *    has and it is ready to use, wherever in the network it was set up.
+     * 1. An enrolment already made wins while some site asking for a second
+     *    factor asks for an authenticator app. It is the strongest factor the
+     *    account has and it is ready to use, wherever in the network it was set
+     *    up.
      * 2. Otherwise, if any site asking for a second factor asks for email, email
      *    handles it. Email needs no enrolment, so it can never fall into the
      *    branch that lets a login through for lack of one.
      * 3. Only when every site asking wants an authenticator app does TOTP handle
      *    it, which is the case the grace period was written for.
      *
+     * The condition on the first step came in 2.11.11. Without it an enrolment
+     * left from a time when the site asked for an app outranked the method the
+     * site asks for now: a single site set to email asked those accounts for an
+     * authenticator code, which 2.11.9 never did and which locks out whoever
+     * removed the app after the switch. Dropping that enrolment opens nothing,
+     * because the account then goes to email, which needs no enrolment.
+     *
      * @since 2.11.10
+     * @since 2.11.11 An enrolment only wins while an authenticator app is asked for.
      *
      * @param WP_User $user       User being authenticated.
      * @param bool    $enrolled   Whether the account has a TOTP enrolment anywhere.
@@ -999,7 +1009,7 @@ class Vigilante_Settings {
             return '';
         }
 
-        if ( $enrolled ) {
+        if ( $enrolled && in_array( 'totp', $methods, true ) ) {
             return 'totp';
         }
 
@@ -1036,7 +1046,10 @@ class Vigilante_Settings {
          * Asking only the sites they belong to left the account with the most
          * power in the network outside the policy, which is the bypass upside
          * down. So for them every site of the network is consulted. There are
-         * few super administrators and this runs at login, not per request.
+         * few super administrators. It does not only run at login, though, which
+         * this note claimed until 2.11.11: the dashboard hooks of the TOTP class
+         * ask it on every admin screen of every site of a network, at least once
+         * per hook.
          */
         if ( is_super_admin( $user->ID ) ) {
             $blog_ids = array_merge( $blog_ids, get_sites( array( 'fields' => 'ids', 'number' => 200 ) ) );

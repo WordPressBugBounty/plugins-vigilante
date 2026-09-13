@@ -1709,10 +1709,14 @@ class Vigilante_Database {
     /**
      * Whether this account has an enrolment anywhere in the network
      *
-     * One or two queries, not a search: the local table, and the one the account's
-     * vigilante_totp_site marker points at. Used to decide which of the two second
-     * factor classes handles the login, and it only runs once a login has already
-     * been found to need a second factor.
+     * With the account's vigilante_totp_site marker in place this is one or two
+     * queries: the local table, and the one the marker points at. Without it,
+     * which is every account with no enrolment at all, totp_table_for_user() goes
+     * on to search the main site, the account's own sites and, for a super
+     * administrator, up to 200 more, and it does so every time, because the
+     * marker is only written once an enrolment is found. It runs at login and,
+     * since 2.11.10, from the dashboard hooks of the TOTP class too; that is why
+     * those ask for the election before reading the row (2.11.11).
      *
      * @since 2.11.10
      *

@@ -415,7 +415,8 @@
         reconfigure: function($btn) {
             var c = this.cfg();
 
-            if (!confirm(c.strings.confirmReconfig || 'This will reset your current TOTP setup. Continue?')) return;
+            // The button carries its own question when it removes a setup nothing asks for (2.11.11).
+            if (!confirm($btn.data('confirm') || c.strings.confirmReconfig || 'This will reset your current TOTP setup. Continue?')) return;
 
             $btn.prop('disabled', true).text('Resetting...');
 
