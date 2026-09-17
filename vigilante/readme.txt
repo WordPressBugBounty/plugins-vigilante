@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.11.11
+Stable tag: 2.11.12
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -415,6 +415,17 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 2.11.12 =
+Fixes two factor logins. A correct password no longer counts as a failed login attempt, so an account with two factor is no longer locked out after two real tries, and codes pasted with a space are accepted. It also closes a brute force hole on accounts with a forced password reset pending.
+
+* Improved: the authenticator setup screen now shows the time the server reads, in UTC, and a code that is right but arrives with the wrong time on it is told apart from a typo. Codes are tied to the clock, so a server whose time is more than half a minute away from the device running the app accepts no code at all, ever, and until now that was answered with the same message as a mistyped digit. The window a code is accepted in has not changed.
+* Fix: a correct password for an account protected by two factor authentication is no longer recorded as a failed login attempt. WordPress treats every refusal at that point as a failed login, and the request for the second factor is one, so each correct password counted against the brute force lockout: with the default settings, one password plus two wrong codes plus one more password locked the address out for thirty minutes, and doubled that on the next round. Wrong passwords and wrong verification codes are still counted, so brute force protection is unchanged, but a login held at the second factor no longer is, and it no longer fills the activity log with failed logins that never happened or sends lockout emails for them. Reported by @artprojectgroup, who read the code of 2.11.11 and found every two factor problem in this release.
+* Fix: verification codes are accepted with the spaces or dashes a password manager pastes in. Codes were compared exactly as they arrived, so a code shown as two groups of three and pasted that way was answered with an invalid format message that gave no hint of the cause. It affected codes from an authenticator app, codes sent by email and backup codes. On the authenticator setup screen the field also cut a pasted code short, which left the setup impossible to complete however many times the QR code was generated again.
+* Fix: running out of verification attempts now says so on the login screen. The verification session was closed and the visitor sent back to the password form with no message at all, where the natural move, typing the password again, used to count as one more failed attempt.
+* Fix: after the second factor is verified, the login now goes where it was headed instead of always landing on the dashboard. The address a login was sent to travels with the verification session and is checked against the site before it is used.
+* Fix: an account with a forced password reset pending is no longer exempt from the brute force lockout. A wrong password for one of those accounts was answered with the notice about the pending reset instead of the usual error, and that notice is one of Vigilant's own refusals, which are never counted, so passwords could be tried against that account without limit and without the address ever being locked out. Measured before and after: six wrong passwords in a row, none of them counted, and now each one counted like any other. The notice still appears to whoever types the right password, which is what it is for, and a wrong password is now reported as a wrong password. The forced reset feature has behaved this way since it shipped in 1.8.0.
+* Fix: an unused file that drew QR codes on the server has been removed from the plugin. The QR code of the authenticator setup is drawn in the browser and always was.
+
 = 2.11.11 =
 Fixes two regressions of 2.11.10 in two factor authentication. Accounts verified by email were told on every admin screen to set up an authenticator app, or kept on their profile page with no way out, and an old app enrolment replaced the emailed code the site asks for.
 
@@ -425,8 +436,8 @@ For older changelog entries, please check the [changelog.txt](https://plugins.sv
 
 == Upgrade Notice ==
 
-= 2.11.11 =
-Fixes two regressions of 2.11.10 in two factor authentication. Accounts verified by email were told on every admin screen to set up an authenticator app, or kept on their profile page with no way out, and an old app enrolment replaced the emailed code the site asks for.
+= 2.11.12 =
+Fixes two factor logins. A correct password no longer counts as a failed login attempt, so an account with two factor is no longer locked out after two real tries, and codes pasted with a space are accepted. It also closes a brute force hole on accounts with a forced password reset pending.
 
 == Support ==
 

@@ -1250,20 +1250,25 @@ class Vigilante_User_Security {
      * @return WP_User|WP_Error|null
      */
     public function check_force_reset_on_login( $user, $username, $password ) {
-        // Resolve the target user. The flag must be evaluated whether the
-        // credentials matched (WP_User) or not (WP_Error).
-        if ( $user instanceof WP_User ) {
-            $login_user = $user;
-        } else {
-            $login_user = get_user_by( 'login', $username );
-            if ( ! $login_user ) {
-                $login_user = get_user_by( 'email', $username );
-            }
-        }
-
-        if ( ! $login_user ) {
+        /*
+         * Only a login that would otherwise have succeeded is turned into this
+         * rejection. Wrong credentials are left exactly as WordPress reported
+         * them, and they are counted like any other failed login.
+         *
+         * Until 2.11.12 this ran for a WP_Error too, resolving the account from
+         * the username, and replaced an incorrect_password with the rejection
+         * below. A rejection of Vigilant's own is not counted towards the brute
+         * force lockout, so any account with a pending forced reset could be
+         * guessed at without limit: measured on 17 Sep 2026 against 2.11.11 and
+         * against the first build of 2.11.12, six wrong passwords in a row, none
+         * of them counted and no lockout at the end. The message this function
+         * exists to show belongs to whoever typed the right password.
+         */
+        if ( ! ( $user instanceof WP_User ) ) {
             return $user;
         }
+
+        $login_user = $user;
 
         // Check if this user has a pending forced reset.
         $force_reset = get_user_meta( $login_user->ID, 'vigilante_force_reset_pending', true );
@@ -1271,14 +1276,8 @@ class Vigilante_User_Security {
             return $user;
         }
 
-        // If credentials were wrong with an error other than incorrect_password
-        // (e.g. a Vigilant lockout, pending approval), don't shadow it.
-        if ( is_wp_error( $user ) && ! in_array( 'incorrect_password', $user->get_error_codes(), true ) ) {
-            return $user;
-        }
-
-        // Skip brute force counter for this controlled rejection.
-        add_filter( 'vigilante_skip_failed_login_count', '__return_true' );
+        // Not counted towards the brute force lockout: the rejection is
+        // recognised by its error code (Vigilante_Login_Security::CONTROLLED_REJECTIONS).
 
         // Surface the controlled rejection in the activity log so the admin
         // can tell apart "user fails login because they typed wrong password"
@@ -1391,9 +1390,6 @@ class Vigilante_User_Security {
         }
 
         if ( self::is_pending_anywhere( $user->ID ) ) {
-            // Mark this as a controlled rejection (not a brute force attempt)
-            add_filter( 'vigilante_skip_failed_login_count', '__return_true' );
-            
             return new WP_Error(
                 'pending_approval',
                 __( '<strong>Account pending:</strong> Your account is awaiting administrator approval. You will receive an email once approved.', 'vigilante' )
@@ -2143,9 +2139,6 @@ class Vigilante_User_Security {
                     'warning'
                 );
             }
-
-            // Mark this as a controlled rejection (not a brute force attempt)
-            add_filter( 'vigilante_skip_failed_login_count', '__return_true' );
 
             return new WP_Error(
                 'session_limit_exceeded',

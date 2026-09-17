@@ -358,7 +358,11 @@
         confirmSetup: function() {
             var self = this;
             var c = this.cfg();
-            var code = $('#vigilante_totp_verify_code').val().trim();
+            // Separators are presentation: a password manager shows the code
+            // as "123 456" and pastes it that way. The server drops everything
+            // that is not a digit too; this is only so the length check below
+            // measures the code and not the spaces.
+            var code = $('#vigilante_totp_verify_code').val().replace(/\D/g, '');
             var secret = $('.vigilante-totp-setup-qr').data('secret');
             var $status = $('.vigilante-totp-setup-status');
             var $btn = $('.vigilante-totp-confirm-setup');

@@ -350,10 +350,22 @@ class Vigilante_Two_Factor_Email {
         $code = isset( $_POST['vigilante_2fa_code'] ) ? sanitize_text_field( wp_unslash( $_POST['vigilante_2fa_code'] ) ) : '';
         $remember_device = ! empty( $_POST['vigilante_2fa_remember'] );
 
+        // Read before verifying: running out of attempts clears the pending
+        // session inside verify_code(), and the redirect_to of the original
+        // login lives there.
+        $redirect_to = $this->pending_login_redirect();
+
         // Verify code
         $result = $this->verify_code( $user_id, $code );
 
         if ( is_wp_error( $result ) ) {
+            // Out of attempts: the session is gone, so the form that would show
+            // this message is not painted any more. Say it on the login screen
+            // instead of bouncing the visitor there with no explanation.
+            if ( 'max_attempts' === $result->get_error_code() ) {
+                $this->redirect_to_login_with_notice( 'attempts' );
+            }
+
             // Store error for display
             set_transient( 'vigilante_2fa_error_' . $user_id, $result->get_error_message(), 60 );
 
@@ -381,9 +393,9 @@ class Vigilante_Two_Factor_Email {
         // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- wp_login is a WordPress core hook that must be fired on login.
         do_action( 'wp_login', $user->user_login, $user );
 
-        // Redirect to admin dashboard (always use admin_url to avoid issues with popups,
-        // malformed URLs, or query parameters that could cause problems)
-        wp_safe_redirect( admin_url() );
+        // Where the login was headed, or the dashboard. wp_validate_redirect()
+        // has already dropped anything off this site (pending_login_redirect()).
+        wp_safe_redirect( $redirect_to );
         exit;
     }
 
@@ -395,6 +407,11 @@ class Vigilante_Two_Factor_Email {
      * @return true|WP_Error
      */
     private function verify_code( $user_id, $code ) {
+        // Mail clients and password managers show the code in groups and paste
+        // it with the separator. Until 2.11.12 that reached wp_hash() as typed
+        // and every correct code pasted that way came back "invalid".
+        $code = preg_replace( '/\D/', '', (string) $code );
+
         $stored = $this->database->get_2fa_code( $user_id );
         $user   = get_user_by( 'ID', $user_id );
 
@@ -565,8 +582,8 @@ class Vigilante_Two_Factor_Email {
                        id="vigilante_2fa_code" 
                        class="input" 
                        size="6" 
-                       maxlength="6" 
-                       pattern="[0-9]{6}" 
+                       maxlength="20" 
+                       pattern="[0-9 -]{6,20}" 
                        inputmode="numeric"
                        autocomplete="one-time-code"
                        autofocus

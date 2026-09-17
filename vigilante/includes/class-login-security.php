@@ -102,7 +102,7 @@ class Vigilante_Login_Security {
         add_filter( 'authenticate', array( $this, 'check_lockout' ), 30, 3 );
 
         // Track login attempts
-        add_action( 'wp_login_failed', array( $this, 'handle_failed_login' ) );
+        add_action( 'wp_login_failed', array( $this, 'handle_failed_login' ), 10, 2 );
         add_action( 'wp_login', array( $this, 'handle_successful_login' ), 10, 2 );
 
         // Hide login errors
@@ -965,9 +965,8 @@ class Vigilante_Login_Security {
             // still fires wp_login_failed for it, and until 2.11.0 that counted
             // the blocked attempt as one more failure, which rewrote the row's
             // status and produced a fresh lockout, with its critical entry and
-            // its email, on every POST made during the lockout (S8).
-            add_filter( 'vigilante_skip_failed_login_count', '__return_true' );
-
+            // its email, on every POST made during the lockout (S8). The error
+            // code below is what handle_failed_login() reads to leave it alone.
             return new WP_Error(
                 'vigilante_lockout',
                 sprintf(
@@ -982,13 +981,54 @@ class Vigilante_Login_Security {
     }
 
     /**
+     * Error codes of the refusals Vigilant issues itself
+     *
+     * WordPress treats every WP_Error out of the authenticate chain as a failed
+     * login and fires wp_login_failed for it (wp-includes/pluggable.php,
+     * wp_authenticate()). These seven are not wrong passwords: the credentials
+     * were right and Vigilant stopped the login for a reason of its own, so none
+     * of them counts towards the brute force lockout.
+     *
+     * The rejection identifies itself by the error code it carries. Until
+     * 2.11.12 each one instead added a filter that stayed registered for the
+     * rest of the request, which meant that one controlled rejection stopped
+     * every later failed login of the same request from being counted: measured
+     * on 17 Sep 2026, three wrong passwords for a different account, sent in the
+     * same request, none of them recorded. A single XML-RPC system.multicall is
+     * enough to make that one request.
+     *
+     * @since 2.11.12
+     *
+     * @var string[]
+     */
+    const CONTROLLED_REJECTIONS = array(
+        'vigilante_2fa_required',      // Two factor asked for, by app or by email.
+        'vigilante_lockout',           // This address is already locked out.
+        'vigilante_force_reset',       // An administrator forced a password reset.
+        'vigilante_password_expired',  // Password expiry policy, over XML-RPC.
+        'pending_approval',            // Registration awaiting approval.
+        'session_limit_exceeded',      // Too many sessions already open.
+        'email_not_verified',          // Email address not verified yet.
+    );
+
+    /**
      * Handle failed login attempt
      *
-     * @param string $username Username that failed.
+     * @since 2.11.12 Receives the WP_Error, so a refusal of Vigilant's own is told
+     *                apart from a wrong password by what it is and not by a flag
+     *                left behind for the rest of the request.
+     *
+     * @param string        $username Username that failed.
+     * @param WP_Error|null $error    The error WordPress is reporting, if any.
      */
-    public function handle_failed_login( $username ) {
-        // Skip counting if this is a Vigilante-controlled rejection
-        // (pending approval, session limit, email verification, etc.)
+    public function handle_failed_login( $username, $error = null ) {
+        // A refusal of ours, not a wrong password.
+        if ( $error instanceof WP_Error && array_intersect( $error->get_error_codes(), self::CONTROLLED_REJECTIONS ) ) {
+            return;
+        }
+
+        // Kept for anything outside the plugin that marks its own controlled
+        // rejection. Nothing inside Vigilant sets it any more.
         if ( apply_filters( 'vigilante_skip_failed_login_count', false ) ) {
             return;
         }

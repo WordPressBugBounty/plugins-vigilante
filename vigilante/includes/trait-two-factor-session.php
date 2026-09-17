@@ -147,6 +147,71 @@ trait Vigilante_Two_Factor_Session {
      */
     protected function init_session_hooks() {
         add_action( 'application_password_did_authenticate', array( $this, 'remember_app_password_user' ) );
+
+        // Why the verification session ended, explained on the login screen it
+        // sends the visitor back to. Both classes use the trait, so both
+        // register this; the notice itself prints once (see the method).
+        add_filter( 'login_message', array( $this, 'show_2fa_session_notice' ) );
+    }
+
+    /**
+     * Explain on the login screen why a verification session ended
+     *
+     * Until 2.11.12 running out of verification attempts cleared the pending
+     * session and redirected to wp-login.php with no message at all: the visitor
+     * was back at the password form with no idea why, typed the password again,
+     * and that correct password was counted as one more failed login.
+     *
+     * The query argument only picks one of the literal strings below. It decides
+     * nothing and it is not trusted for anything (rule 21): anyone can add it to
+     * a URL, and all it can produce is one of these notices on a login screen.
+     *
+     * @since 2.11.12
+     *
+     * @param string $message Login screen message so far.
+     * @return string
+     */
+    public function show_2fa_session_notice( $message ) {
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Read-only display of a static notice on the login screen; nothing is decided or written.
+        $notice = isset( $_GET['vigilante_2fa_notice'] ) ? sanitize_key( wp_unslash( $_GET['vigilante_2fa_notice'] ) ) : '';
+
+        if ( '' === $notice ) {
+            return $message;
+        }
+
+        // Both two-factor classes use this trait and both register the filter,
+        // so without this the notice would print twice on a site that has them
+        // both loaded. A trait gives each using class its own statics, hence the
+        // prefixed global rather than a static property.
+        if ( ! empty( $GLOBALS['vigilante_2fa_notice_printed'] ) ) {
+            return $message;
+        }
+
+        $texts = array(
+            'attempts' => __( 'Too many incorrect verification codes. The verification session was closed for security. Log in again to start a new one.', 'vigilante' ),
+            'expired'  => __( 'The verification session expired. Log in again to start a new one.', 'vigilante' ),
+        );
+
+        if ( ! isset( $texts[ $notice ] ) ) {
+            return $message;
+        }
+
+        $GLOBALS['vigilante_2fa_notice_printed'] = true;
+
+        return $message . '<div id="login_error" class="notice notice-error"><p>' . esc_html( $texts[ $notice ] ) . '</p></div>';
+    }
+
+    /**
+     * Send the visitor back to the login screen with an explanation
+     *
+     * @since 2.11.12
+     *
+     * @param string $notice One of the keys of show_2fa_session_notice().
+     * @return void
+     */
+    private function redirect_to_login_with_notice( $notice ) {
+        wp_safe_redirect( add_query_arg( 'vigilante_2fa_notice', rawurlencode( $notice ), wp_login_url() ) );
+        exit;
     }
 
     /**
@@ -198,6 +263,10 @@ trait Vigilante_Two_Factor_Session {
      * @return WP_Error
      */
     private function api_requires_2fa_error() {
+        // A controlled rejection, not a wrong password: the credentials were
+        // right and the account simply needs its second factor. The error code
+        // is what keeps it out of the brute force count; see
+        // Vigilante_Login_Security::CONTROLLED_REJECTIONS.
         return new WP_Error(
             'vigilante_2fa_required',
             __( 'This account requires two-factor authentication. Log in from a browser, or use an application password for API access.', 'vigilante' )
@@ -232,12 +301,24 @@ trait Vigilante_Two_Factor_Session {
         // so re-authenticating does not reset it (S2).
         $attempts = ( is_array( $data ) && isset( $data['attempts'] ) ) ? absint( $data['attempts'] ) : 0;
 
+        // Where the login was headed. The verification form is a second request
+        // with its own POST, so redirect_to has to travel in the session or it
+        // is lost and every login lands on the dashboard (2.11.12). Kept from a
+        // previous pending session when this request does not carry one.
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Not a decision: stored as-is and validated against the site by wp_validate_redirect() before use, in pending_login_redirect().
+        $redirect_to = isset( $_REQUEST['redirect_to'] ) ? esc_url_raw( wp_unslash( $_REQUEST['redirect_to'] ) ) : '';
+
+        if ( '' === $redirect_to && is_array( $data ) && ! empty( $data['redirect_to'] ) ) {
+            $redirect_to = (string) $data['redirect_to'];
+        }
+
         set_transient(
             'vigilante_2fa_pending_' . $token,
             array(
-                'user_id'    => $user_id,
-                'created_at' => time(),
-                'attempts'   => $attempts,
+                'user_id'     => $user_id,
+                'created_at'  => time(),
+                'attempts'    => $attempts,
+                'redirect_to' => $redirect_to,
             ),
             HOUR_IN_SECONDS
         );
@@ -329,6 +410,26 @@ trait Vigilante_Two_Factor_Session {
         $session = $this->get_pending_session();
 
         return $session ? $session['user_id'] : false;
+    }
+
+    /**
+     * Where to send the visitor once the second factor is verified
+     *
+     * @since 2.11.12
+     *
+     * @return string URL on this site.
+     */
+    private function pending_login_redirect() {
+        $session = $this->get_pending_session();
+        $stored  = ( is_array( $session ) && ! empty( $session['redirect_to'] ) ) ? (string) $session['redirect_to'] : '';
+
+        if ( '' === $stored ) {
+            return admin_url();
+        }
+
+        // Same gate core uses: anything off this site falls back to the
+        // dashboard, so a stored value cannot send anyone off-site.
+        return wp_validate_redirect( $stored, admin_url() );
     }
 
     /**

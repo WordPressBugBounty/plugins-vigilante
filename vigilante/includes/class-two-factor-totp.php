@@ -89,6 +89,17 @@ class Vigilante_Two_Factor_TOTP {
     const TIME_WINDOW = 1;
 
     /**
+     * Time steps scanned, on a failure only, to recognise a clock that drifted
+     *
+     * Ten minutes either way. Nothing outside TIME_WINDOW is ever accepted:
+     * these steps only tell a wrong code apart from a right one that arrived
+     * with the wrong time on it.
+     *
+     * @var int
+     */
+    const SKEW_SCAN_STEPS = 20;
+
+    /**
      * Constructor
      *
      * @param Vigilante_Settings           $settings       Settings instance.
@@ -294,6 +305,20 @@ class Vigilante_Two_Factor_TOTP {
 
         $this->log_event( 'totp_verification_requested', $user->ID, __( 'TOTP verification requested at login', 'vigilante' ) );
 
+        /*
+         * This rejection is ours, not a wrong password: the credentials were
+         * right and the account is being asked for its second factor. Until
+         * 2.11.12 nothing marked it, and wp_authenticate() fires wp_login_failed
+         * for every WP_Error that is not empty_username or empty_password
+         * (wp-includes/pluggable.php, wp_authenticate()), so Login Security
+         * counted one failed attempt for every correct password. With the
+         * defaults (5 per address and hour, 3 codes per verification session)
+         * two real tries were enough to lock the address out for 30 minutes,
+         * and the activity log filled with failed logins that never happened.
+         * The rejection is recognised by its error code, which
+         * Vigilante_Login_Security::CONTROLLED_REJECTIONS lists along with the
+         * six other refusals the plugin issues itself.
+         */
         return new WP_Error(
             'vigilante_2fa_required',
             __( 'Please enter the verification code from your authenticator app.', 'vigilante' )
@@ -387,8 +412,12 @@ class Vigilante_Two_Factor_TOTP {
         if ( $this->get_pending_attempts() >= $max_attempts ) {
             $this->log_event( 'totp_max_attempts_exceeded', $user_id, __( 'Maximum verification attempts exceeded', 'vigilante' ), 'warning' );
             $this->clear_pending_verification();
-            wp_safe_redirect( wp_login_url() );
-            exit;
+
+            // Until 2.11.12 this redirect carried no message: the visitor landed
+            // on the password form with no idea the verification session had
+            // been closed, typed the password again, and that correct password
+            // counted as one more failed login.
+            $this->redirect_to_login_with_notice( 'attempts' );
         }
 
         $code            = isset( $_POST['vigilante_2fa_code'] ) ? sanitize_text_field( wp_unslash( $_POST['vigilante_2fa_code'] ) ) : '';
@@ -413,7 +442,10 @@ class Vigilante_Two_Factor_TOTP {
             $this->log_event( 'totp_backup_code_used', $user_id, __( 'Backup code used for authentication', 'vigilante' ), 'warning' );
         }
 
-        // Verification successful
+        // Verification successful. Read before the session is cleared: that is
+        // where the redirect_to of the original login is kept.
+        $redirect_to = $this->pending_login_redirect();
+
         $this->clear_pending_verification();
 
         // Trust device if requested (and if the option allows it, see trust_device)
@@ -430,7 +462,7 @@ class Vigilante_Two_Factor_TOTP {
         // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- wp_login is a WordPress core hook
         do_action( 'wp_login', $user->user_login, $user );
 
-        wp_safe_redirect( admin_url() );
+        wp_safe_redirect( $redirect_to );
         exit;
     }
 
@@ -529,8 +561,8 @@ class Vigilante_Two_Factor_TOTP {
                        id="vigilante_2fa_code"
                        class="input"
                        size="8"
-                       maxlength="8"
-                       pattern="[a-zA-Z0-9]{6,8}"
+                       maxlength="20"
+                       pattern="[a-zA-Z0-9 -]{6,20}"
                        inputmode="numeric"
                        autocomplete="one-time-code"
                        placeholder="000000"
@@ -573,8 +605,7 @@ class Vigilante_Two_Factor_TOTP {
      * @return string Base32-encoded secret.
      */
     public function generate_secret() {
-        $random = wp_generate_password( self::SECRET_LENGTH, false, false );
-        // Use truly random bytes
+        // Truly random bytes, Base32 encoded.
         $bytes = '';
         for ( $i = 0; $i < self::SECRET_LENGTH; $i++ ) {
             $bytes .= chr( wp_rand( 0, 255 ) );
@@ -625,6 +656,14 @@ class Vigilante_Two_Factor_TOTP {
      * @return true|WP_Error
      */
     public function verify_totp_code( $user_id, $code ) {
+        // Password managers show the code in two groups of three and paste it
+        // that way ("123 456"). sanitize_text_field() does not touch inner
+        // spaces, so until 2.11.12 a correct code pasted from 1Password was
+        // answered "Invalid code format" with no hint of why. Separators are
+        // presentation, never part of the code: drop everything that is not a
+        // digit before validating.
+        $code = preg_replace( '/\D/', '', (string) $code );
+
         // Validate code format (6 digits for TOTP)
         if ( ! preg_match( '/^[0-9]{6}$/', $code ) ) {
             return new WP_Error( 'invalid_format', __( 'Invalid code format. Enter the 6-digit code from your authenticator app.', 'vigilante' ) );
@@ -661,6 +700,24 @@ class Vigilante_Two_Factor_TOTP {
             }
         }
 
+        // A correct code from a device whose clock disagrees with the server's
+        // matches a time step outside the window. It is never accepted here: the
+        // window stays at what the RFC recommends. It is only recognised, so the
+        // answer says "the clocks disagree" instead of the same "invalid code"
+        // someone gets for a typo, which is what turns this into a support
+        // thread. A random guess matching any of these steps is 1 in 24.000.
+        $skew_seconds = 0;
+        for ( $i = -self::SKEW_SCAN_STEPS; $i <= self::SKEW_SCAN_STEPS; $i++ ) {
+            if ( abs( $i ) <= self::TIME_WINDOW ) {
+                continue;
+            }
+
+            if ( hash_equals( $this->generate_code( $secret, $now + ( $i * self::TIME_STEP ) ), $code ) ) {
+                $skew_seconds = $i * self::TIME_STEP;
+                break;
+            }
+        }
+
         // Track failed attempts
         $remaining = -1;
         if ( $this->login_security ) {
@@ -669,6 +726,30 @@ class Vigilante_Two_Factor_TOTP {
                 $this->login_security->record_failed_attempt( $user->user_login, '2fa' );
                 $remaining = $this->login_security->get_remaining_attempts();
             }
+        }
+
+        if ( 0 !== $skew_seconds ) {
+            $minutes = max( 1, (int) round( abs( $skew_seconds ) / MINUTE_IN_SECONDS ) );
+
+            $this->log_event(
+                'totp_clock_skew',
+                $user_id,
+                sprintf(
+                    /* translators: %d: Minutes of difference between the server clock and the authenticator app. */
+                    __( 'A valid TOTP code was rejected: the server clock and the authenticator app differ by about %d minutes', 'vigilante' ),
+                    $minutes
+                ),
+                'warning'
+            );
+
+            return new WP_Error(
+                'clock_skew',
+                sprintf(
+                    /* translators: %d: Minutes of difference between the server clock and the authenticator app. */
+                    __( 'That code is correct, but the server clock and your authenticator app differ by about %d minutes, so it cannot be accepted. Ask your host to fix the server time, or check the time settings of your app.', 'vigilante' ),
+                    $minutes
+                )
+            );
         }
 
         $this->log_event( 'totp_verification_failed', $user_id, __( 'Invalid TOTP code entered', 'vigilante' ), 'warning' );
@@ -730,8 +811,10 @@ class Vigilante_Two_Factor_TOTP {
      * @return true|WP_Error
      */
     private function verify_backup_code( $user_id, $code ) {
-        // Backup codes are 8 chars, lowercase alphanumeric
-        $code = strtolower( trim( $code ) );
+        // Backup codes are 8 chars, lowercase alphanumeric. Whatever separators
+        // the holder pasted in (spaces, dashes) are presentation, same as in a
+        // TOTP code, and go before the length is measured.
+        $code = strtolower( preg_replace( '/[^A-Za-z0-9]/', '', (string) $code ) );
 
         if ( strlen( $code ) !== self::BACKUP_CODE_LENGTH ) {
             return new WP_Error( 'invalid_backup', __( 'Invalid backup code.', 'vigilante' ) );
@@ -1120,11 +1203,20 @@ class Vigilante_Two_Factor_TOTP {
                                 </div>
                                 <div class="vigilante-totp-verify-setup">
                                     <label for="vigilante_totp_verify_code"><?php esc_html_e( 'Enter code to verify:', 'vigilante' ); ?></label>
-                                    <input type="text" id="vigilante_totp_verify_code" maxlength="6" pattern="[0-9]{6}" inputmode="numeric" autocomplete="off">
+                                    <input type="text" id="vigilante_totp_verify_code" maxlength="20" pattern="[0-9 -]{6,20}" inputmode="numeric" autocomplete="off">
                                     <button type="button" class="button button-primary vigilante-totp-confirm-setup">
                                         <?php esc_html_e( 'Verify and activate', 'vigilante' ); ?>
                                     </button>
                                     <span class="vigilante-totp-setup-status"></span>
+                                    <p class="description vigilante-totp-server-time">
+                                        <?php
+                                        printf(
+                                            /* translators: %s: Server time in UTC, as YYYY-MM-DD HH:MM:SS. */
+                                            esc_html__( 'Codes are tied to the clock. This server reads %s UTC right now; if that is more than half a minute away from the clock of the device running your app, no code will ever be accepted.', 'vigilante' ),
+                                            esc_html( gmdate( 'Y-m-d H:i:s' ) )
+                                        );
+                                        ?>
+                                    </p>
                                 </div>
                             </div>
                             <div class="vigilante-totp-setup-success" style="display:none;">
@@ -1232,6 +1324,9 @@ class Vigilante_Two_Factor_TOTP {
         if ( get_current_user_id() !== $user_id && ! current_user_can( 'edit_user', $user_id ) ) {
             wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
         }
+
+        // Same normalisation as verify_totp_code(): separators are presentation.
+        $code = preg_replace( '/\D/', '', (string) $code );
 
         if ( empty( $code ) || ! preg_match( '/^[0-9]{6}$/', $code ) ) {
             wp_send_json_error( __( 'Enter a valid 6-digit code.', 'vigilante' ) );
