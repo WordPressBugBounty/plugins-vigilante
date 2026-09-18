@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.11.12
+Stable tag: 3.0.0
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -16,7 +16,7 @@ Premium WordPress Security - 100% FREE: Firewall, 2FA, Security Headers, Login a
 
 Vigilant provides enterprise-level WordPress security features completely free. No premium version, no upsells, no hidden features behind paywalls.
 
-Protect your site with a complete security suite: firewall, two-factor authentication, brute force protection, security headers, file integrity monitoring, closed plugin detection, malware detection, user management, security audit logging, under attack mode and much more.
+Protect your site with a complete security suite: firewall, two-factor authentication, brute force protection, security headers, file integrity monitoring, closed plugin detection, malware detection, user management, security audit logging, under attack mode, verification of its own files and much more.
 
 Once activated, Vigilant immediately applies firewall rules against common attacks (SQL injection, XSS, file inclusion), security headers, login attempt monitoring, XML-RPC blocking, WordPress version hiding and sensitive file protection (.htaccess, wp-config.php).
 
@@ -148,6 +148,18 @@ Detect unauthorized changes to your files and compromised plugins:
 * Scheduled automatic scans (daily, weekly)
 * HTML formatted email alerts with severity sections, including a dedicated section for closed plugins
 
+== Self-Protection ==
+
+A tampered security plugin is worse than none, because it keeps reporting that everything is fine. Vigilant verifies its own files against the checksums WordPress.org publishes, a SHA-256 manifest shipped with the plugin and a fingerprint of that manifest stored in the database:
+
+* At the start of every integrity scan, right after every update, and when the version on disk changes outside the WordPress updater
+* Modified, missing and added files, symbolic links and a replaced or deleted manifest are reported, by email with the default settings
+* Its own scheduled tasks are watched and scheduled again if something removes them
+* Its own block in File Integrity and a check in Security Check, with what each finding means and how to fix it, and no way to switch it off
+* One click repair that reinstalls Vigilant from WordPress.org, keeping your settings, tables and log
+
+It detects tampering, not vulnerabilities in Vigilant itself. SECURITY.md explains what it covers, what it does not, and how to verify your installation from outside the server.
+
 == Security Audit ==
 
 Track everything happening on your site:
@@ -178,7 +190,7 @@ On-demand security audit built into the Dashboard. No external services, no acco
 
 * 40+ checks across 6 categories: SSL/TLS, HTTP Headers, WP Exposure, Access & Auth, Sensitive Files and Internal Checks
 * Single 0-100 score with A-E grade, plus per-category breakdown and explanatory details for every check
-* 15 exclusive internal checks impossible from the outside: PHP end-of-life status, pending updates, inactive plugins, closed or removed plugins, file permissions, default salts detection, `wp_` table prefix, `admin` username, administrators without 2FA enrolled, module status, recent audit errors, last File Integrity scan result and whether audit alerts are configured
+* 16 exclusive internal checks impossible from the outside: PHP end-of-life status, pending updates, inactive plugins, closed or removed plugins, Vigilant self-protection, file permissions, default salts detection, `wp_` table prefix, `admin` username, administrators without 2FA enrolled, module status, recent audit errors, last File Integrity scan result and whether audit alerts are configured
 * DNS-only reputation lookup against Spamhaus ZEN, Barracuda BRBL and SpamCop SCBL (informational - listings are flagged but don't deduct from the score)
 * Two-phase scan: fast local checks appear in under a second, remote checks stream in as they complete
 * Weekly automatic scan with opt-in email alert if the score drops by 10+ points or a new critical check starts failing
@@ -224,6 +236,8 @@ Utilities included:
 Your existing .htaccess, wp-config.php and robots.txt are automatically backed up before any modifications. Backups are stored in the WordPress database, never as files under the web root, and verified with MD5 checksums.
 
 When you deactivate Vigilant, all security rules are automatically removed and your original configuration files are restored. No leftover code, no broken sites.
+
+Vigilant checks its own files too, and tells you how to check them yourself: every release ships a MANIFEST.sha256 that sha256sum can verify, and WordPress.org publishes the same checksums for comparison.
 
 == Why Vigilant? ==
 
@@ -307,7 +321,7 @@ Use the built-in header testing tool in the Security Headers tab, or visit secur
 
 = What is Security Check? =
 
-Security Check is an on-demand audit built into the Dashboard. It runs 40+ checks across 6 categories (SSL/TLS, HTTP headers, WordPress exposure, access and authentication, sensitive files, and internal checks) and returns a 0–100 score with an A–E grade. Unlike external online scanners, it runs entirely on your server and has access to 14 exclusive internal checks: PHP end-of-life status, pending updates, closed/removed plugins, file permissions, default salts detection, administrators without 2FA enrolled, and more.
+Security Check is an on-demand audit built into the Dashboard. It runs 40+ checks across 6 categories (SSL/TLS, HTTP headers, WordPress exposure, access and authentication, sensitive files, and internal checks) and returns a 0–100 score with an A–E grade. Unlike external online scanners, it runs entirely on your server and has access to 16 exclusive internal checks: PHP end-of-life status, pending updates, closed/removed plugins, Vigilant self-protection, file permissions, default salts detection, administrators without 2FA enrolled, and more.
 
 = Does Security Check send my data to an external service? =
 
@@ -348,6 +362,18 @@ Previous versions kept a copy of wp-config.php in an option so the integrity sca
 = How often does the file integrity scan run? =
 
 You can configure automatic scans to run daily or weekly. You can also run manual scans at any time. Email notifications support three levels: all issues, suspicious files only, or disabled.
+
+= How do I know Vigilant itself has not been tampered with? =
+
+Vigilant verifies its own files against the checksums WordPress.org publishes for your version, the MANIFEST.sha256 file shipped with the plugin and a fingerprint of that manifest stored in your database. The result appears in File Integrity, with the results of the last scan, and in Security Check. To check from outside WordPress, run `wp plugin verify-checksums vigilante`, or `php bin/verify-manifest.php` inside the plugin folder, which also reports added files and accepts line endings rewritten by the host. SECURITY.md lists every option.
+
+= What is the MANIFEST.sha256 file? =
+
+A list of the SHA-256 checksum of every file in the plugin, in the standard format of the sha256sum tool, generated as the last step of each release. It is what lets Vigilant, and you, notice a changed file even when WordPress.org cannot be reached. readme.txt and changelog.txt are not in it, because WordPress.org allows updating them without a new version.
+
+= Does self-protection detect vulnerabilities in Vigilant? =
+
+No. It detects that Vigilant's files were changed, deleted or added to, not bugs in its code. Vulnerabilities are fixed in new releases, so keep Vigilant updated, and report any you find as SECURITY.md explains.
 
 = What is the difference between Standard and Maximum presets? =
 
@@ -415,29 +441,27 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
-= 2.11.12 =
-Fixes two factor logins. A correct password no longer counts as a failed login attempt, so an account with two factor is no longer locked out after two real tries, and codes pasted with a space are accepted. It also closes a brute force hole on accounts with a forced password reset pending.
+= 3.0.0 =
+Vigilant now verifies its own files against WordPress.org, a shipped SHA-256 manifest and a database fingerprint, checks itself after every update and restores its own scheduled tasks. The Security Check score may change slightly: a new check was added.
 
-* Improved: the authenticator setup screen now shows the time the server reads, in UTC, and a code that is right but arrives with the wrong time on it is told apart from a typo. Codes are tied to the clock, so a server whose time is more than half a minute away from the device running the app accepts no code at all, ever, and until now that was answered with the same message as a mistyped digit. The window a code is accepted in has not changed.
-* Fix: a correct password for an account protected by two factor authentication is no longer recorded as a failed login attempt. WordPress treats every refusal at that point as a failed login, and the request for the second factor is one, so each correct password counted against the brute force lockout: with the default settings, one password plus two wrong codes plus one more password locked the address out for thirty minutes, and doubled that on the next round. Wrong passwords and wrong verification codes are still counted, so brute force protection is unchanged, but a login held at the second factor no longer is, and it no longer fills the activity log with failed logins that never happened or sends lockout emails for them. Reported by @artprojectgroup, who read the code of 2.11.11 and found every two factor problem in this release.
-* Fix: verification codes are accepted with the spaces or dashes a password manager pastes in. Codes were compared exactly as they arrived, so a code shown as two groups of three and pasted that way was answered with an invalid format message that gave no hint of the cause. It affected codes from an authenticator app, codes sent by email and backup codes. On the authenticator setup screen the field also cut a pasted code short, which left the setup impossible to complete however many times the QR code was generated again.
-* Fix: running out of verification attempts now says so on the login screen. The verification session was closed and the visitor sent back to the password form with no message at all, where the natural move, typing the password again, used to count as one more failed attempt.
-* Fix: after the second factor is verified, the login now goes where it was headed instead of always landing on the dashboard. The address a login was sent to travels with the verification session and is checked against the site before it is used.
-* Fix: an account with a forced password reset pending is no longer exempt from the brute force lockout. A wrong password for one of those accounts was answered with the notice about the pending reset instead of the usual error, and that notice is one of Vigilant's own refusals, which are never counted, so passwords could be tried against that account without limit and without the address ever being locked out. Measured before and after: six wrong passwords in a row, none of them counted, and now each one counted like any other. The notice still appears to whoever types the right password, which is what it is for, and a wrong password is now reported as a wrong password. The forced reset feature has behaved this way since it shipped in 1.8.0.
-* Fix: an unused file that drew QR codes on the server has been removed from the plugin. The QR code of the authenticator setup is drawn in the browser and always was.
-
-= 2.11.11 =
-Fixes two regressions of 2.11.10 in two factor authentication. Accounts verified by email were told on every admin screen to set up an authenticator app, or kept on their profile page with no way out, and an old app enrolment replaced the emailed code the site asks for.
-
-* Fix: accounts that verify their second factor by email are no longer told on every admin screen to set up an authenticator app, and no longer sent to their profile page from every screen. Since 2.11.10 the authenticator app checks run wherever two factor is on, and those two did not ask which method applies to the account. An account with a leftover row from an earlier grace period, which is what remains on a site that once asked for an app, or after that setup was reset by an administrator or from the account's own profile, was kept on its profile page, where no setup section is shown to it, so it could not reach the rest of the dashboard. It affected single sites and networks alike.
-* Fix: on a site set to a code by email, an account that set up an authenticator app while the site asked for one is asked for the emailed code again, as it was before 2.11.10. The enrolment had started to take precedence over the method the site asks for, so those accounts were asked for a code from an app they may no longer have. The enrolment is kept: the authenticator section of the profile now shows it as configured but not in use, where it can be removed or its backup codes renewed, and it is used again as soon as a site asks that account for an app. On a network an enrolment still takes precedence, on every site, as long as any site that asks that account for a second factor asks for an app.
+* New: self-protection. Vigilant verifies its own files against three references: the SHA-256 checksums WordPress.org publishes for the installed version, a MANIFEST.sha256 file shipped inside the plugin, and a fingerprint of that manifest kept in the database. The check runs first in every File Integrity scan, outside the scan time budget and without the excluded paths and extensions of the scan, and once a day when nothing else checked in the last 24 hours. It reports modified, missing, unreadable and added files, folders that cannot be listed, symbolic links, files the manifest lists but WordPress.org does not distribute, and a replaced, deleted or invalid manifest. A modified PHP or JavaScript file, or a data file the plugin loads, is critical, and so is an added file a web server can run, whatever extension of its name says so; a modified stylesheet or image is a warning, because optimisation plugins and hosts often rewrite them, and text files whose line endings the host rewrote are not reported, nor is the manifest when it was rewritten that way. File Integrity shows the result as the first block of the scan results, with what each finding means and how to fix it. There is no setting to switch it off: a security plugin that can be told not to check itself has a switch whose only real user is whoever just changed its files.
+* New: Vigilant checks itself at the end of every update WordPress makes to it, including an update made by uploading a zip file, once a failed update has had its previous copy restored, and notices a version change made outside the updater, such as a manual or FTP upload, on the next admin page opened by an administrator or on the daily maintenance task. A new version that WordPress.org cannot confirm raises a warning instead of being trusted, the fingerprint is not taken again when the plugin is reactivated, and a downgrade is reported by email wherever it is detected.
+* New: self-protection has its own alert, and no setting switches it off. A critical finding about Vigilant own files always sends an email, wherever it is detected, deduplicated by set of findings and sent once on a network, from the site that owns the shared files and always to the network administration email as well. It no longer travels in the File Integrity scan email, which follows a notification setting: switching off the report about changed files was also switching off the alarm about the plugin itself. Warnings stay on screen, where they do not train anyone to ignore an email, except a downgrade and a version change that cannot be verified against WordPress.org, which are always sent. There are no reminders either: each distinct set of findings is reported once.
+* New: switching self-protection off cannot be done quietly. There is no setting for it, so the only way is the vigilante_self_integrity_enabled filter, and Vigilant reports that as critical on every admin screen, names the files that hook it and writes it to the Security Audit. Code that removes the hooks of the check is detected at the end of each admin page and reported the same way, with the plugins that were loaded in that request. And a result older than three days stops counting as verified, whatever stopped the check, so an old green is never shown as if it were current.
+* New: scheduled task watchdog. If something removes the daily maintenance, the hourly checks, the weekly Security Check, the closed plugins check or the scheduled integrity scan, Vigilant schedules it again and logs it, and the same task removed again within 30 days is reported as critical by email. Tasks you switched off are left alone. On sites activated before one of those tasks existed, the first pass schedules it once, without reporting it. On a multisite network it watches the main site.
+* New: Security Check includes a Vigilant self-protection check in the Internal category, the heaviest single check of the analyzer, which now scores out of 40 instead of 30. While Vigilant own files are reported as changed, both scores of the plugin are held at the bottom of the scale and say why: every other result is produced by that same code. The stored report is cleared on update, so the score may move after the next check.
+* New: self-protection has its own block in File Integrity, the first one of the results, coloured by severity, with the files it found, what each finding means and what to do about it. The same wording appears in the Security Check detail, in the details of each Security Audit entry and in the alert email, so the five never say different things. A change to Vigilant own files is also counted in red on the Vigilant menu, summarised at the top of its dashboard and shown on every admin screen until it is fixed; a warning is shown on the Vigilant screens. Findings about Vigilant own files are no longer listed with the rest of the scan, and they cannot be ignored.
+* New: one click repair. When Vigilant finds its own files changed, it can download a clean copy from WordPress.org and replace only the plugin files, keeping your settings, your tables and your log, after a screen that says exactly what it is going to do. It installs the version WordPress.org distributes, never the version the files claim, and never an older one than the version this site had verified. On a network it takes a super administrator, and where WordPress cannot change plugin files the screen gives the steps by hand instead.
+* New: SECURITY.md, with how to report a vulnerability, what self-protection covers and what it does not, and how to verify an installation yourself, and bin/verify-manifest.php, a command line tool that checks the plugin folder against the manifest and the manifest against WordPress.org.
+* Improved: File Integrity no longer scans Vigilant as a regular plugin, so its files are not reported twice, and updating removes Vigilant own files from the ignore list, where they would silence the new check.
+* Improved: on a multisite network a finding about Vigilant own files cannot be ignored on any site, by anyone, clearing the scan results without network rights keeps it, and its alert also reaches the network administration email.
 
 For older changelog entries, please check the [changelog.txt](https://plugins.svn.wordpress.org/vigilante/trunk/changelog.txt) file
 
 == Upgrade Notice ==
 
-= 2.11.12 =
-Fixes two factor logins. A correct password no longer counts as a failed login attempt, so an account with two factor is no longer locked out after two real tries, and codes pasted with a space are accepted. It also closes a brute force hole on accounts with a forced password reset pending.
+= 3.0.0 =
+Vigilant now verifies its own files against WordPress.org, a shipped SHA-256 manifest and a database fingerprint, checks itself after every update and restores its own scheduled tasks. The Security Check score may change slightly: a new check was added.
 
 == Support ==
 

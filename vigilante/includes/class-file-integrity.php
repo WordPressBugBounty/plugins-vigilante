@@ -1772,6 +1772,14 @@ class Vigilante_File_Integrity {
             }
             foreach ( $files as $file ) {
                 $slug = dirname( (string) $file );
+                // Vigilant itself is verified immediately (not after 90 s) by
+                // Vigilante_Self_Integrity::handle_upgrader() when the
+                // self-check is on; do not also open a grace window for it.
+                // Compared with the folder it really lives in, not the literal
+                // slug, so a renamed folder is skipped the same way.
+                if ( dirname( VIGILANTE_PLUGIN_BASENAME ) === $slug && Vigilante_Self_Integrity::is_on() ) {
+                    continue;
+                }
                 if ( '.' !== $slug && '' !== $slug ) {
                     $targets['plugin'][] = $slug;
                 }
@@ -1841,6 +1849,15 @@ class Vigilante_File_Integrity {
      */
     private function verify_updated_slug( $type, $slug ) {
         $grace_key = 'vigilante_fi_grace_' . $type . '_' . md5( $slug );
+
+        // Defensive skip for the first 2.11.x -> 3.0.x update: the OLD code in
+        // memory scheduled this event including Vigilant's own slug, and by the
+        // time it fires the NEW code (this one) is running with the self-check
+        // handling Vigilant on its own.
+        if ( 'plugin' === $type && dirname( VIGILANTE_PLUGIN_BASENAME ) === $slug && Vigilante_Self_Integrity::is_on() ) {
+            delete_transient( $grace_key );
+            return;
+        }
 
         if ( 'plugin' === $type ) {
             if ( ! function_exists( 'get_plugins' ) ) {
@@ -1993,6 +2010,39 @@ class Vigilante_File_Integrity {
 
         // Use settings from options page
         $options = is_array( $this->options ) ? $this->options : array();
+
+        // Vigilant self-check runs FIRST and exempt from the time budget:
+        // ~60 small-file hashes cost < 50 ms and the guardian must never be
+        // dropped by the budget on plugin-heavy sites. User exclusions do not
+        // apply to it (see Vigilante_Self_Integrity::run_check()).
+        if ( ! class_exists( 'Vigilante_Self_Integrity' ) ) {
+            require_once VIGILANTE_INCLUDES_DIR . 'class-self-integrity.php';
+        }
+        if ( Vigilante_Self_Integrity::is_on() ) {
+            if ( ! class_exists( 'Vigilante_Self_Integrity' ) ) {
+                require_once VIGILANTE_INCLUDES_DIR . 'class-self-integrity.php';
+            }
+            $self        = new Vigilante_Self_Integrity( $this->settings, $this->activity_log );
+            $self_result = $self->run_check( 'scan' );
+            // run_check() above updates this site's own state (status line and
+            // the analyzer check keep working everywhere). The plugin files are
+            // shared by the whole installation, so the self findings are folded
+            // Self-protection has its own alert, and it does not travel in the
+            // scan digest any more. That digest is governed by a notification
+            // setting that can be switched off, and switching off "tell me about
+            // changed files" was also switching off the alarm of the plugin
+            // itself. So the findings stay out of the scan results (they have
+            // their own block in File Integrity, with what each one means and how
+            // to repair it) and a critical one sends its own email from here,
+            // wherever the scan runs. maybe_send_self_alert() keeps it to the
+            // site that owns the shared files and dedupes by set of findings.
+            foreach ( (array) $self_result['findings'] as $self_finding ) {
+                if ( 'critical' === ( $self_finding['severity'] ?? '' ) ) {
+                    $self->maybe_send_self_alert( $self_result['findings'], 'scan' );
+                    break;
+                }
+            }
+        }
 
         // Scan uploads for suspicious files FIRST (highest security priority)
         // PHP files in uploads are almost always malware
@@ -3515,6 +3565,15 @@ class Vigilante_File_Integrity {
                 continue;
             }
 
+            // With the self-check on, Vigilant itself is verified by the
+            // sha256 triple-anchor block at the start of run_scan(): scanning
+            // it here again would duplicate findings and the md5 fetch. With
+            // the check off by filter, Vigilant is a regular plugin (legacy
+            // behaviour).
+            if ( dirname( VIGILANTE_PLUGIN_BASENAME ) === $plugin_slug && Vigilante_Self_Integrity::is_on() ) {
+                continue;
+            }
+
             // Skip slugs in their post-update grace window: wp.org may still be
             // publishing the new version's checksums, so a scheduled scan here
             // would raise benign "modified/extra" noise. The dedicated post-update
@@ -4763,6 +4822,24 @@ class Vigilante_File_Integrity {
                         return true;
                     }
 
+                    // Findings about the manifest and the version of Vigilant
+                    // itself are not about one file, so no entry of the list may
+                    // hide them, on a single site either: ignoring the row of
+                    // MANIFEST.sha256 took a replaced manifest out of the email.
+                    // Vigilante_Self_Integrity::filter_ignored_findings() keeps
+                    // them the same way.
+                    if ( is_array( $item ) && 'vigilante_self' === ( $item['type'] ?? '' ) && in_array( $item['self_finding'] ?? '', array( 'manifest_replaced', 'manifest_unverified', 'manifest_missing', 'manifest_invalid', 'self_downgraded' ), true ) ) {
+                        return true;
+                    }
+                    // Nor the findings of the walk of Vigilant's folder (a folder
+                    // that cannot be listed, the folder that could not be walked):
+                    // their path ends in a slash, and ignoring that row left the
+                    // scan with no row and no email while the self-protection
+                    // status stayed critical.
+                    if ( is_array( $item ) && 'vigilante_self' === ( $item['type'] ?? '' ) && '/' === substr( (string) ( $item['file'] ?? '' ), -1 ) ) {
+                        return true;
+                    }
+
                     $file = is_array( $item ) && isset( $item['file'] ) ? $item['file'] : '';
                     return ! in_array( $file, $this->ignored_files, true );
                 }
@@ -4801,7 +4878,15 @@ class Vigilante_File_Integrity {
         $closed_plugins = $this->collect_closed_plugins_for_email();
         $has_closed     = ! empty( $closed_plugins );
 
+        /*
+         * Self-protection is not part of this decision any more. Its alert is
+         * its own and no setting switches it off, so this email is again about
+         * the files of the site: core, plugins, themes, uploads and the two
+         * shared configuration files.
+         */
         $has_suspicious = ! empty( $results['suspicious'] ) || ! empty( $results['extra'] ) || $has_critical_config || $has_closed;
+        // Missing files of core, plugins or themes still do not send the email on
+        // their own: it has no section to list them in, so it would arrive empty.
         $has_modified   = ! empty( $results['modified'] );
 
         // Instant alert: send for suspicious, extra, critical_config, modified
@@ -4922,14 +5007,43 @@ class Vigilante_File_Integrity {
             }
         }
 
+        /*
+         * Self-protection does not travel in this email any more: it has its own
+         * alert, which no setting switches off (Vigilante_Self_Integrity::
+         * maybe_send_self_alert()). Older stored results can still carry its
+         * rows, so they are dropped here instead of being listed as ordinary
+         * files.
+         */
+        foreach ( array( 'suspicious', 'extra', 'missing' ) as $self_bucket ) {
+            if ( empty( $results[ $self_bucket ] ) || ! is_array( $results[ $self_bucket ] ) ) {
+                continue;
+            }
+            $results[ $self_bucket ] = array_values(
+                array_filter(
+                    $results[ $self_bucket ],
+                    function ( $item ) {
+                        return ! ( is_array( $item ) && 'vigilante_self' === ( $item['type'] ?? '' ) );
+                    }
+                )
+            );
+        }
+        $regular_modified = array_values(
+            array_filter(
+                $regular_modified,
+                function ( $item ) {
+                    return ! ( is_array( $item ) && 'vigilante_self' === ( $item['type'] ?? '' ) );
+                }
+            )
+        );
+
         $suspicious_count      = count( $results['suspicious'] ?? array() );
         $extra_count           = count( $results['extra'] ?? array() );
         $critical_config_count = count( $critical_config );
         $modified_count        = count( $regular_modified );
         $closed_count          = count( $closed_plugins );
 
-        // Use more urgent subject when suspicious files, critical config changes
-        // or closed plugins are found (all three are security-critical).
+        // Use more urgent subject when suspicious files, critical config changes,
+        // closed plugins or self-integrity findings are found (all security-critical).
         if ( $suspicious_count > 0 || $critical_config_count > 0 || $closed_count > 0 ) {
             $subject = sprintf(
                 /* translators: %s: Site name */

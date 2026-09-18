@@ -32,6 +32,13 @@ class Vigilante_Security_Analyzer {
     // in get_categories(). Bump this only when manually verifying the sum.
     const TOTAL_MAX_POINTS    = 106;
     const REGRESSION_THRESHOLD = 10; // Points dropped before sending the alert email.
+    /*
+     * Highest score a site can show while the self-protection check reports
+     * tampering: every other result of this report was computed by the same
+     * code whose files were reported as changed, so a high number next to it
+     * would be a lie. 29 is the top of grade E in compute_grade().
+     */
+    const SCORE_CAP_ON_TAMPER = 29;
 
     /**
      * Sum of the declared "max" of every category. This is the canonical
@@ -97,7 +104,9 @@ class Vigilante_Security_Analyzer {
                 // Sum of the max values of every check in
                 // Vigilante_SA_Category_Internal. Update when adding/removing
                 // checks or changing their max value.
-                'max'   => 30,
+                // 3.0.0: 30 -> 40 (self_integrity check added, worth 10: the
+                // integrity of the plugin that runs every other check).
+                'max'   => 40,
             ),
             'reputation'  => array(
                 'slug'     => 'reputation',
@@ -262,6 +271,22 @@ class Vigilante_Security_Analyzer {
         $declared_max = self::total_max_points();
         $grade        = Vigilante_SA_Helpers::compute_grade( $total_earned, $declared_max );
 
+        // Self-protection caps the score (see SCORE_CAP_ON_TAMPER). The same
+        // cap is applied when phases are merged, in rebuild_from_categories().
+        $capped_by = '';
+        foreach ( $results as $r ) {
+            if ( $r instanceof Vigilante_SA_Check_Result
+                && 'self_integrity' === $r->id
+                && Vigilante_SA_Check_Result::STATE_FAIL === $r->state ) {
+                $capped_by = 'self_integrity';
+                break;
+            }
+        }
+        if ( 'self_integrity' === $capped_by && $grade['score'] > self::SCORE_CAP_ON_TAMPER ) {
+            $grade['score'] = self::SCORE_CAP_ON_TAMPER;
+            $grade['grade'] = 'E';
+        }
+
         return array(
             'ran_at'         => $started,
             'phase'          => $phase,
@@ -270,6 +295,7 @@ class Vigilante_Security_Analyzer {
             'total_evaluated'=> $total_max, // Actual evaluated max (excluding skipped).
             'score'          => $grade['score'],
             'grade'          => $grade['grade'],
+            'capped_by'      => $capped_by,
             'counts'         => $counts,
             'categories'     => $categories,
         );
@@ -393,6 +419,22 @@ class Vigilante_Security_Analyzer {
         $total_max = self::total_max_points();
         $grade     = Vigilante_SA_Helpers::compute_grade( $total_earned, $total_max );
 
+        // Self-protection caps the score (see SCORE_CAP_ON_TAMPER).
+        $capped_by = '';
+        foreach ( $categories as $cat ) {
+            foreach ( (array) $cat['checks'] as $c ) {
+                if ( 'self_integrity' === ( isset( $c['id'] ) ? $c['id'] : '' )
+                    && Vigilante_SA_Check_Result::STATE_FAIL === ( isset( $c['state'] ) ? $c['state'] : '' ) ) {
+                    $capped_by = 'self_integrity';
+                    break 2;
+                }
+            }
+        }
+        if ( 'self_integrity' === $capped_by && $grade['score'] > self::SCORE_CAP_ON_TAMPER ) {
+            $grade['score'] = self::SCORE_CAP_ON_TAMPER;
+            $grade['grade'] = 'E';
+        }
+
         return array(
             'categories'     => $categories,
             'total_earned'   => $total_earned,
@@ -400,6 +442,7 @@ class Vigilante_Security_Analyzer {
             'total_evaluated'=> $total_evaluated,
             'score'          => $grade['score'],
             'grade'          => $grade['grade'],
+            'capped_by'      => $capped_by,
             'counts'         => $counts,
         );
     }

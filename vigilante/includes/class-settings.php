@@ -791,6 +791,13 @@ class Vigilante_Settings {
      * called "restore defaults" expecting that. Both the Standard preset and the
      * two reset buttons leave these alone.
      *
+     * Read from outside the plugin: the third-party network plugin Vigilante
+     * Network Sync calls this from its 2.0.3 to decide what NOT to copy between
+     * the sites of a network, so a key it does not know about is preserved per
+     * site instead of overwritten. Adding keys here is safe and helps it;
+     * renaming or removing the method, or changing the shape of what it returns,
+     * silently changes what that plugin replicates across a whole network.
+     *
      * @since 2.9.8
      *
      * @return array<string,string[]>
@@ -855,6 +862,10 @@ class Vigilante_Settings {
      * rights must not be able to silence it by turning either one off. Closing
      * the ignore list and the clear-results button in 2.11.8 left these two as
      * the remaining routes; found by the audit of the admin surface.
+     *
+     * Since 3.0.0 the self-check has no setting at all, so there is nothing to lock: Vigilant's own
+     * files are shared by every site, and on the main site the self-check is
+     * the one that reports a change to them for the whole network.
      *
      * On a subsite all of them only act on that site, so they stay editable
      * there (get_locked_file_settings() adds this set only when owns_shared_files()).

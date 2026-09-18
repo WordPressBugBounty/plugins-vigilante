@@ -201,6 +201,7 @@ function vigilante_uninstall_site() {
         'vigilante_plugin_status_state',
         'vigilante_plugin_status_last_check',
         'vigilante_ignored_closed_plugins',
+        'vigilante_self_integrity_state',
     );
 
     foreach ( $options_to_delete as $option ) {
@@ -271,6 +272,7 @@ function vigilante_uninstall_final_sweep() {
             'vigilante_owned_blocks',
             'vigilante_owned_blocks_claim',
             'vigilante_ignored_closed_plugins',
+            'vigilante_self_integrity_state',
             'vigilante_ignored_files',
             'vigilante_dismissed_notices',
             'vigilante_under_attack_mode',

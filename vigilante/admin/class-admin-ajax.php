@@ -182,6 +182,14 @@ trait Vigilante_Admin_Ajax {
             $log->is_ua_whitelisted = ( '' !== $ua_val && in_array( $ua_val, $ua_whitelist, true ) );
             $log->is_ua_blacklisted = ( '' !== $ua_val && in_array( $ua_val, $ua_blacklist, true ) );
             $log->request_uri       = Vigilante_Activity_Log::extract_request_uri( $log->extra_data ?? '' );
+            // Same explanation as the first page load: without this, an entry
+            // reached by filtering or paginating would open a popup with less
+            // in it than the same entry opened from the first page.
+            $log->self_guidance     = Vigilante_Self_Integrity_Guidance::for_log_event(
+                (string) ( $log->event_action ?? '' ),
+                $log->extra_data ?? '',
+                (string) ( $log->severity ?? 'info' )
+            );
         }
 
         wp_send_json_success( array(

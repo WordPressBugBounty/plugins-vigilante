@@ -1300,7 +1300,7 @@
                     html += '<th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" value="' + esc(file.file) + '"></th>';
                     html += '<td><code style="color: #d63638;">' + esc(file.file) + '</code></td>';
                     html += '<td>' + esc(file.reason || strings.unknown) + '</td>';
-                    html += '<td>' + esc(file.type || strings.unknown) + '</td>';
+                    html += '<td>' + esc(file.type === 'vigilante_self' ? (strings.selfType || 'Vigilant (self)') : (file.type || strings.unknown)) + '</td>';
                     html += '<td><button type="button" class="button button-small vigilante-ignore-file" data-file="' + esc(file.file) + '">' + (strings.ignore || 'Ignore') + '</button></td>';
                     html += '</tr>';
                 });
@@ -1323,7 +1323,7 @@
                     html += '<th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" value="' + esc(file.file) + '"></th>';
                     html += '<td><code style="color: #b32d2e;">' + esc(file.file) + '</code></td>';
                     html += '<td>' + esc(file.reason || strings.unknown) + '</td>';
-                    html += '<td>' + esc(file.type || strings.unknown) + '</td>';
+                    html += '<td>' + esc(file.type === 'vigilante_self' ? (strings.selfType || 'Vigilant (self)') : (file.type || strings.unknown)) + '</td>';
                     html += '<td><button type="button" class="button button-small vigilante-ignore-file" data-file="' + esc(file.file) + '">' + (strings.ignore || 'Ignore') + '</button></td>';
                     html += '</tr>';
                 });
@@ -1338,6 +1338,14 @@
                 if (file.type === 'critical_config') {
                     criticalModified.push(file);
                 } else {
+                    regularModified.push(file);
+                }
+            });
+            // A missing file of Vigilant is critical and the generic missing
+            // files have no table: list it with the modified files, or the
+            // screen said "All clear" with a module deleted.
+            results.missing.forEach(function(file) {
+                if (file && file.type === 'vigilante_self') {
                     regularModified.push(file);
                 }
             });
@@ -1441,7 +1449,7 @@
                     html += '<tr>';
                     html += '<th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" value="' + esc(file.file) + '"></th>';
                     html += '<td><code>' + esc(file.file) + '</code></td>';
-                    html += '<td>' + esc(file.type || strings.unknown) + '</td>';
+                    html += '<td>' + esc(file.type === 'vigilante_self' ? (strings.selfType || 'Vigilant (self)') : (file.type || strings.unknown)) + '</td>';
                     html += '<td><button type="button" class="button button-small vigilante-ignore-file" data-file="' + esc(file.file) + '">' + (strings.ignore || 'Ignore') + '</button></td>';
                     html += '</tr>';
                 });
@@ -1449,7 +1457,7 @@
                 html += '</div>';
             }
 
-            if (results.modified.length === 0 && results.suspicious.length === 0 && results.extra.length === 0) {
+            if (criticalModified.length === 0 && regularModified.length === 0 && results.suspicious.length === 0 && results.extra.length === 0) {
                 html += '<div class="vigilante-all-clear"><span class="dashicons dashicons-yes-alt"></span> ' + strings.allClear + '</div>';
             }
 
@@ -2000,7 +2008,8 @@
                     is_ip_whitelisted: !!log.is_ip_whitelisted,
                     is_ip_blacklisted: !!log.is_ip_blacklisted,
                     is_ua_whitelisted: !!log.is_ua_whitelisted,
-                    is_ua_blacklisted: !!log.is_ua_blacklisted
+                    is_ua_blacklisted: !!log.is_ua_blacklisted,
+                    self: log.self_guidance || null
                 };
 
                 var displayType = typeLabels[log.event_type] || log.event_type;
@@ -2639,6 +2648,40 @@
             var html = '';
 
             var s = vigilanteAdmin.strings;
+            var esc = Vigilante_Admin.escapeHtml;
+
+            // -- Section: what happened (self-protection entries) --
+            // Text only: every value below is printed as text, never as an
+            // attribute, and the link is a fixed URL built with esc_url().
+            if (details.self && details.self.title) {
+                html += '<div class="vigilante-popup-section">';
+                html += '<h4 class="vigilante-popup-section-title">' + esc(s.logWhatHappened || 'What happened') + '</h4>';
+                html += '<p><strong>' + esc(details.self.title) + '</strong></p>';
+                if (details.self.files && details.self.files.length) {
+                    html += '<ul class="vigilante-popup-files">';
+                    details.self.files.slice(0, 20).forEach(function(file) {
+                        html += '<li><code>' + esc(file) + '</code></li>';
+                    });
+                    if (details.self.files.length > 20) {
+                        html += '<li>' + esc('+' + (details.self.files.length - 20)) + '</li>';
+                    }
+                    html += '</ul>';
+                }
+                if (details.self.meaning) {
+                    html += '<p><strong>' + esc(s.logWhatItMeans || 'What it means') + ':</strong> ' + esc(details.self.meaning) + '</p>';
+                }
+                if (details.self.steps && details.self.steps.length) {
+                    html += '<p><strong>' + esc(s.logWhatToDo || 'What to do') + ':</strong></p><ol>';
+                    details.self.steps.forEach(function(step) {
+                        html += '<li>' + esc(step) + '</li>';
+                    });
+                    html += '</ol>';
+                }
+                if (vigilanteAdmin.selfBoxUrl) {
+                    html += '<p><a href="' + esc(vigilanteAdmin.selfBoxUrl) + '">' + esc(s.logSelfSeeDetails || 'Open File Integrity for the full detail') + '</a></p>';
+                }
+                html += '</div>';
+            }
 
             // -- Section: Request --
             html += '<div class="vigilante-popup-section">';
@@ -4261,6 +4304,16 @@
                 setTimeout(function() {
                     $target.removeClass('vigilante-focus-flash');
                 }, 1800);
+
+                // And once more when everything has loaded: anything that
+                // changes height above the target (images, notices, the admin
+                // bar on a narrow screen) moves it after the first scroll, and
+                // then the link looks like it only opened the tab.
+                $(window).one('load', function() {
+                    if ($target[0] && 'scrollIntoView' in $target[0]) {
+                        $target[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }
+                });
             }, 150);
         },
 

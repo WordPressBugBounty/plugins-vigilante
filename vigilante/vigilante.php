@@ -3,7 +3,7 @@
  * Plugin Name: Vigilant - 100% Free Security Suite: Firewall, 2FA, Login, Headers, Scanner…
  * Plugin URI: https://servicios.ayudawp.com
  * Description: Complete security solution for WordPress. Firewall, 2FA, security headers, login protection, file integrity monitoring, activity logging and more.
- * Version: 2.11.12
+ * Version: 3.0.0
  * Author: Fernando Tellado
  * Author URI: https://ayudawp.com
  * Text Domain: vigilante
@@ -24,7 +24,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Plugin constants
  */
-define( 'VIGILANTE_VERSION', '2.11.12' );
+define( 'VIGILANTE_VERSION', '3.0.0' );
 define( 'VIGILANTE_PLUGIN_FILE', __FILE__ );
 define( 'VIGILANTE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'VIGILANTE_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -137,6 +137,9 @@ function vigilante_load_plugin() {
     require_once VIGILANTE_INCLUDES_DIR . 'class-audit-alerts.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-file-integrity.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-plugin-status.php';
+    require_once VIGILANTE_INCLUDES_DIR . 'class-self-integrity-guidance.php';
+    require_once VIGILANTE_INCLUDES_DIR . 'class-self-integrity.php';
+    require_once VIGILANTE_INCLUDES_DIR . 'class-self-repair.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-under-attack.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-database-backup.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-database-prefix.php';
@@ -158,6 +161,16 @@ function vigilante_load_plugin() {
 
     // Post-Under Attack scan (one-shot, scheduled by Vigilante_Under_Attack::deactivate).
     add_action( 'vigilante_under_attack_post_scan', 'vigilante_run_post_under_attack_scan' );
+
+    // Self-protection: verify Vigilant's own files right after the WordPress
+    // updater replaced them. Priority 10, ahead of the File Integrity handler
+    // at 20, which skips Vigilant while the self-check is on. Registered outside
+    // is_admin() because automatic updates run from cron and WP-CLI.
+    add_action( 'upgrader_process_complete', 'vigilante_on_upgrader_process_complete', 10, 2 );
+
+    // One click repair of Vigilant's own files (admin-post action).
+    Vigilante_Self_Repair::init();
+    add_filter( 'upgrader_post_install', 'vigilante_mark_upgrader_wrote', 10, 3 );
 
     // Initialize core components only - modules will be initialized at init
     add_action( 'init', 'vigilante_init_plugin', 1 );
@@ -202,6 +215,13 @@ final class Vigilante_Main {
      * @var Vigilante_Activity_Log
      */
     public $activity_log;
+
+    /**
+     * Self-protection instance, the only one that registers hooks
+     *
+     * @var Vigilante_Self_Integrity|null
+     */
+    public $self_integrity;
 
     /**
      * Get single instance of the class
@@ -463,6 +483,14 @@ final class Vigilante_Main {
 
         // Under Attack mode - always loaded (independent of modules)
         new Vigilante_Under_Attack( $this->settings, $this->activity_log );
+
+        // Self-protection - always loaded, NOT gated by modules.file_integrity:
+        // the version change and watchdog paths must stay alive with the File
+        // Integrity module off. There is no setting to gate it: see
+        // Vigilante_Self_Integrity::is_on(). Hooks are registered here and only here;
+        // every other new of the class is a plain object.
+        $this->self_integrity = new Vigilante_Self_Integrity( $this->settings, $this->activity_log );
+        $this->self_integrity->init_hooks();
 
         // Admin interface
         if ( is_admin() ) {
@@ -782,6 +810,24 @@ final class Vigilante_Main {
             }
         }
 
+        // Self-protection from cron, for sites nobody opens the admin of: the
+        // watchdog of Vigilant's own scheduled events, and the check for a
+        // version change made outside the WordPress updater (FTP, manual).
+        // The version change goes first: it is the path that reports a downgrade
+        // by email, and the watchdog's own daily check would otherwise get there
+        // before it.
+        if ( $this->self_integrity ) {
+            if ( $this->self_integrity->is_enabled() ) {
+                $this->self_integrity->detect_version_change();
+                $this->self_integrity->run_watchdog();
+            } else {
+                // Switched off by code: the one line that still has to be
+                // written, or an installation that stopped checking itself
+                // would do it in silence.
+                $this->self_integrity->audit_off_state();
+            }
+        }
+
         // Log maintenance
         $this->activity_log->log( 'system', 'maintenance', __( 'Daily maintenance completed', 'vigilante' ) );
     }
@@ -890,6 +936,155 @@ function vigilante_run_post_under_attack_scan() {
 
     $under_attack = new Vigilante_Under_Attack( $settings, $activity_log );
     $under_attack->run_analyzer_scan( 'all' );
+}
+
+/**
+ * Verify Vigilant's own files right after the WordPress updater replaced them
+ *
+ * Runs as the OLD code with the NEW files already on disk, so the class reads
+ * everything from disk (the Version header, the manifest) and nothing from
+ * constants in memory. The first update to 3.0.0 is not seen here, because the
+ * code that receives the hook is 2.x: that one is covered by the 3.0.0
+ * migration block of Vigilante_Admin::run_migrations().
+ *
+ * Plugin_Upgrader::upgrade() passes the updated plugin in 'plugin', and
+ * bulk_upgrade() passes the list in 'plugins'; both are read. Replacing the
+ * plugin by uploading its zip, from the screen or with `wp plugin install
+ * --force`, goes through Plugin_Upgrader::install() instead, whose context
+ * names no plugin (wp-admin/includes/class-plugin-upgrader.php, install()):
+ * plugin_info() reads it from the folder that was written.
+ *
+ * The check itself waits for the end of the request (see
+ * vigilante_verify_after_upgrade()): WP_Upgrader::run() fires this hook also
+ * when the install failed, and restores the previous copy of the plugin on
+ * shutdown, so checking here reported the half-moved folder of a failed update
+ * as tampering, by email.
+ *
+ * @since 3.0.0
+ *
+ * @param WP_Upgrader|mixed $upgrader   Upgrader instance.
+ * @param array             $hook_extra Update context.
+ */
+function vigilante_on_upgrader_process_complete( $upgrader, $hook_extra ) {
+    if ( ! is_array( $hook_extra ) || 'plugin' !== ( isset( $hook_extra['type'] ) ? $hook_extra['type'] : '' ) ) {
+        return;
+    }
+
+    $action = isset( $hook_extra['action'] ) ? $hook_extra['action'] : '';
+    $files  = array();
+    if ( 'update' === $action ) {
+        $files = ( ! empty( $hook_extra['plugins'] ) && is_array( $hook_extra['plugins'] ) ) ? $hook_extra['plugins'] : array();
+        if ( ! empty( $hook_extra['plugin'] ) ) {
+            $files[] = $hook_extra['plugin'];
+        }
+    } elseif ( 'install' === $action && is_object( $upgrader ) && method_exists( $upgrader, 'plugin_info' ) ) {
+        $installed = $upgrader->plugin_info();
+        if ( is_string( $installed ) && '' !== $installed ) {
+            $files[] = $installed;
+        }
+    } else {
+        return;
+    }
+    if ( ! in_array( VIGILANTE_PLUGIN_BASENAME, array_map( 'strval', $files ), true ) ) {
+        return;
+    }
+
+    // After WP_Upgrader::restore_temp_backup() (shutdown, priority 10) and
+    // before WP_Upgrader::delete_temp_backup() (priority 100).
+    if ( false === has_action( 'shutdown', 'vigilante_verify_after_upgrade' ) ) {
+        add_action( 'shutdown', 'vigilante_verify_after_upgrade', 50 );
+    }
+}
+
+/**
+ * The check after an update, at the end of the request
+ *
+ * By now a failed update has had its previous copy restored, so the files
+ * on disk are the ones the site will run. Hooked by
+ * vigilante_on_upgrader_process_complete(); a bulk update with Vigilant in
+ * the list hooks it once.
+ *
+ * @since 3.0.0
+ */
+function vigilante_verify_after_upgrade() {
+    if ( ! class_exists( 'Vigilante_Settings' ) ) {
+        require_once VIGILANTE_INCLUDES_DIR . 'class-settings.php';
+    }
+    if ( ! class_exists( 'Vigilante_Self_Integrity' ) ) {
+        require_once VIGILANTE_INCLUDES_DIR . 'class-self-integrity-guidance.php';
+        require_once VIGILANTE_INCLUDES_DIR . 'class-self-integrity.php';
+    }
+
+    $settings     = new Vigilante_Settings();
+    $activity_log = null;
+    if ( class_exists( 'Vigilante_Activity_Log' ) && class_exists( 'Vigilante_Database' ) ) {
+        $database     = new Vigilante_Database();
+        $activity_log = new Vigilante_Activity_Log( $settings, $database );
+    }
+
+    $self_integrity = new Vigilante_Self_Integrity( $settings, $activity_log );
+    $self_integrity->handle_upgrader( vigilante_upgrader_wrote_files_on_disk() );
+}
+
+/**
+ * Whether the files on disk are the ones the WordPress updater wrote in this request
+ *
+ * The marker of vigilante_mark_upgrader_wrote() says WordPress wrote the
+ * folder, not that the folder is still that copy at the end of the request:
+ * the automatic updater puts the previous copy back when the updated plugin
+ * breaks its loopback request, and a failed install is restored on shutdown.
+ * The manifest identifies the copy, so the updater is trusted only when the
+ * manifest on disk is the one it wrote.
+ *
+ * @since 3.0.0
+ *
+ * @return bool
+ */
+function vigilante_upgrader_wrote_files_on_disk() {
+    $mark = isset( $GLOBALS['vigilante_upgrader_wrote'] ) ? $GLOBALS['vigilante_upgrader_wrote'] : null;
+    if ( ! is_array( $mark ) || ! array_key_exists( 'manifest', $mark ) ) {
+        return false;
+    }
+    return $mark['manifest'] === Vigilante_Self_Integrity::manifest_fingerprint_of( VIGILANTE_PLUGIN_DIR );
+}
+
+/**
+ * Remember that the WordPress updater wrote Vigilant's folder in this request
+ *
+ * upgrader_post_install runs once per package, after the files are in place
+ * and before upgrader_process_complete. The hook that follows names every
+ * plugin of a bulk update, including the ones that were skipped, so the check
+ * after the update only trusts the updater when this marker says it really
+ * replaced the folder. Only a folder of that name in the plugins directory
+ * counts (a theme can have the same name), and the marker keeps the
+ * fingerprint of the manifest that was written, which
+ * vigilante_upgrader_wrote_files_on_disk() compares with the disk at the end.
+ *
+ * @since 3.0.0
+ *
+ * @param bool|WP_Error $response   Installation response.
+ * @param array         $hook_extra Extra arguments passed to hooked filters.
+ * @param array         $result     Installation result data.
+ * @return bool|WP_Error The response, unchanged.
+ */
+function vigilante_mark_upgrader_wrote( $response, $hook_extra, $result ) {
+    if ( is_wp_error( $response ) || ! is_array( $result ) || ! isset( $result['destination_name'], $result['destination'], $result['local_destination'] ) ) {
+        return $response;
+    }
+    if ( dirname( VIGILANTE_PLUGIN_BASENAME ) !== $result['destination_name'] ) {
+        return $response;
+    }
+    if ( untrailingslashit( wp_normalize_path( (string) $result['local_destination'] ) ) !== untrailingslashit( wp_normalize_path( WP_PLUGIN_DIR ) ) ) {
+        return $response;
+    }
+    if ( ! class_exists( 'Vigilante_Self_Integrity' ) ) {
+        require_once VIGILANTE_INCLUDES_DIR . 'class-self-integrity-guidance.php';
+        require_once VIGILANTE_INCLUDES_DIR . 'class-self-integrity.php';
+    }
+    $GLOBALS['vigilante_upgrader_wrote'] = array(
+        'manifest' => Vigilante_Self_Integrity::manifest_fingerprint_of( (string) $result['destination'] ),
+    );
+    return $response;
 }
 
 /**

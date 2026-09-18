@@ -108,6 +108,9 @@ class Vigilante_Admin {
         add_action( 'admin_init', array( $this, 'register_settings' ) );
         add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_assets' ) );
         add_action( 'admin_notices', array( $this, 'show_admin_notices' ) );
+        // Self-protection speaks in the network admin too: on a network its
+        // files are shared, and the super administrator is who can repair them.
+        add_action( 'network_admin_notices', array( $this, 'maybe_show_self_protection_notice' ) );
 
         // Highlight correct submenu based on active tab
         add_filter( 'submenu_file', array( $this, 'highlight_submenu_tab' ) );
@@ -537,6 +540,66 @@ class Vigilante_Admin {
 
             update_option( 'vigilante_db_version', '2.11.10' );
         }
+
+        /*
+         * 3.0.0: self-protection package. This block must stay the LAST one of
+         * run_migrations(): every block compares against the same $db_version
+         * captured at the top, so the last update_option() that runs is the
+         * one that sticks, and on a jump from any older version it has to be
+         * this one.
+         *
+         * 1. Capture the self-integrity anchor (the manifest fingerprint) and
+         *    run an inline self-check. It covers every update the old code never
+         *    saw through the upgrader hook: from any 2.x, and manual or FTP
+         *    uploads. A plain new is enough, the constructor registers no hooks.
+         * 2. Drop the cached Security Check report: the Internal category grows
+         *    from 30 to 33 points (the self_integrity check), and the cached
+         *    report would keep the old denominator until the next full scan.
+         *    Same reason and same background refresh as the 2.6.1 block above.
+         * 3. Remove Vigilant's own files from the ignore list before that check.
+         *    Until 2.11.11 the generic scan listed them like any plugin, and any
+         *    administrator could ignore one (after a false alarm while
+         *    WordPress.org published new checksums, for example). Kept, those
+         *    entries would silence the self-check of those files for good,
+         *    PHP included.
+         */
+        if ( version_compare( $db_version, '3.0.0', '<' ) ) {
+            if ( ! class_exists( 'Vigilante_Self_Integrity' ) ) {
+                require_once VIGILANTE_INCLUDES_DIR . 'class-self-integrity.php';
+            }
+            $ignored_files = get_option( 'vigilante_ignored_files', array() );
+            if ( is_array( $ignored_files ) && $ignored_files ) {
+                $kept_files = array_values(
+                    array_filter(
+                        $ignored_files,
+                        function ( $ignored_file ) {
+                            return ! Vigilante_Self_Integrity::is_own_file_path( (string) $ignored_file );
+                        }
+                    )
+                );
+                if ( count( $kept_files ) !== count( $ignored_files ) ) {
+                    update_option( 'vigilante_ignored_files', $kept_files );
+                    if ( $this->activity_log ) {
+                        $this->activity_log->log(
+                            'system',
+                            'self_ignored_files_removed',
+                            __( 'Vigilant files were removed from the File Integrity ignore list: self-protection checks them now.', 'vigilante' ),
+                            array( 'removed' => count( $ignored_files ) - count( $kept_files ) ),
+                            'info'
+                        );
+                    }
+                }
+            }
+            $self_integrity = new Vigilante_Self_Integrity( $this->settings, $this->activity_log );
+            $self_integrity->run_check( 'migration' );
+
+            delete_option( 'vigilante_analyzer_last_scan' );
+            if ( ! wp_next_scheduled( 'vigilante_under_attack_post_scan' ) ) {
+                wp_schedule_single_event( time() + 5, 'vigilante_under_attack_post_scan' );
+            }
+
+            update_option( 'vigilante_db_version', '3.0.0' );
+        }
     }
 
     /**
@@ -725,15 +788,28 @@ class Vigilante_Admin {
         
         // Get security issues with severity
         $security_status = $this->get_security_status_for_badge();
-        
+
+        /*
+         * Self-protection: a change to Vigilant own files is the one finding
+         * that has to be visible from any screen of WordPress, so it adds to
+         * the counter and paints it red. A verified state, a state with fewer
+         * references than usual and the check turned off add nothing: a counter
+         * that is always on is a counter nobody reads.
+         */
+        $self_tone = Vigilante_Self_Integrity::tone(
+            Vigilante_Self_Integrity::display_state(),
+            Vigilante_Self_Integrity::is_on()
+        );
+        $self_badge      = in_array( $self_tone, array( 'critical', 'off', 'warning' ), true ) ? 1 : 0;
+
         // Total count for badge
-        $total_badge = $pending_count + $security_status['count'];
-        
+        $total_badge = $pending_count + $security_status['count'] + $self_badge;
+
         if ( $total_badge > 0 ) {
             // Determine badge color:
             // - Red (awaiting-mod): pending approvals OR critical modules disabled
             // - Orange (update-plugins): only non-critical modules disabled
-            if ( $pending_count > 0 || $security_status['has_critical'] ) {
+            if ( $pending_count > 0 || $security_status['has_critical'] || in_array( $self_tone, array( 'critical', 'off' ), true ) ) {
                 $badge_class = 'awaiting-mod';
             } else {
                 $badge_class = 'update-plugins vigilante-badge-warning';
@@ -777,11 +853,19 @@ class Vigilante_Admin {
             array( $this, 'redirect_to_tab' )
         );
 
-        // File Integrity shortcut
+        // File Integrity shortcut, with its own counter when the self-check has
+        // something to say: that is the screen that explains it.
+        $fi_menu_title = __( 'File Integrity', 'vigilante' );
+        if ( $self_badge > 0 ) {
+            $fi_menu_title .= sprintf(
+                ' <span class="%s count-1"><span class="pending-count">1</span></span>',
+                in_array( $self_tone, array( 'critical', 'off' ), true ) ? 'awaiting-mod' : 'update-plugins vigilante-badge-warning'
+            );
+        }
         add_submenu_page(
             'vigilante',
             __( 'File Integrity', 'vigilante' ),
-            __( 'File Integrity', 'vigilante' ),
+            $fi_menu_title,
             'manage_options',
             'vigilante-file-integrity',
             array( $this, 'redirect_to_tab' )
@@ -1046,6 +1130,26 @@ class Vigilante_Admin {
             }
         }
 
+        /*
+         * Self-protection (15 points). Having it on is configuration, which is
+         * what this card measures; the state of the last check caps the card,
+         * because a plugin whose own files were changed is not well configured
+         * in any useful sense, whatever the rest of the settings say. The
+         * environment block below already mixes measured state into this score
+         * (WP_DEBUG, insecure usernames), so the card keeps its meaning.
+         */
+        $max_score      += 15;
+        $self_enabled    = Vigilante_Self_Integrity::is_on();
+        $self_tone       = Vigilante_Self_Integrity::tone( Vigilante_Self_Integrity::display_state(), $self_enabled );
+        if ( $self_enabled ) {
+            $score += 10;
+            // The five points are for a check that ran and came out clean: a
+            // site that has never checked itself has not earned them.
+            if ( in_array( $self_tone, array( 'ok', 'info' ), true ) ) {
+                $score += 5;
+            }
+        }
+
         // Environment checks (8 points) - penalize insecure server configuration
         $max_score += 8;
         $env_score = 8;
@@ -1063,7 +1167,12 @@ class Vigilante_Admin {
 
         $score += max( 0, $env_score );
 
-        return $max_score > 0 ? round( ( $score / $max_score ) * 100 ) : 0;
+        $percent = $max_score > 0 ? (int) round( ( $score / $max_score ) * 100 ) : 0;
+        if ( in_array( $self_tone, array( 'critical', 'off' ), true ) ) {
+            // Same cap and same reason as the Security Check score.
+            $percent = min( $percent, Vigilante_Security_Analyzer::SCORE_CAP_ON_TAMPER );
+        }
+        return $percent;
     }
 
     /**
@@ -1074,6 +1183,49 @@ class Vigilante_Admin {
      */
     private function get_security_recommendations( $options ) {
         $recommendations = array();
+
+        // Self-protection first: if Vigilant itself cannot be trusted, nothing
+        // else on this card means much.
+        $vg_self_enabled = Vigilante_Self_Integrity::is_on();
+        $vg_self_tone    = Vigilante_Self_Integrity::tone( Vigilante_Self_Integrity::display_state(), $vg_self_enabled );
+        if ( ! $vg_self_enabled ) {
+            $recommendations[] = array(
+                'icon'     => 'shield',
+                'priority' => 'high',
+                'tab'      => 'file-integrity',
+                'message'  => __( 'Turn Vigilant self-protection on, so a change to Vigilant own files does not go unnoticed.', 'vigilante' ),
+            );
+        } elseif ( 'off' === $vg_self_tone ) {
+            $recommendations[] = array(
+                'icon'     => 'warning',
+                'priority' => 'critical',
+                'tab'      => 'file-integrity',
+                'message'  => __( 'Something on this site switched Vigilant self-protection off: File Integrity says which file does it.', 'vigilante' ),
+            );
+        } elseif ( 'critical' === $vg_self_tone ) {
+            $recommendations[] = array(
+                'icon'     => 'warning',
+                'priority' => 'critical',
+                'tab'      => 'file-integrity',
+                'message'  => __( 'Vigilant own files have been changed: repair Vigilant from File Integrity before anything else.', 'vigilante' ),
+            );
+        } elseif ( 'warning' === $vg_self_tone ) {
+            $recommendations[] = array(
+                'icon'     => 'shield',
+                'priority' => 'high',
+                'tab'      => 'file-integrity',
+                'message'  => __( 'Vigilant self-protection needs your attention: File Integrity says what it found and what to do.', 'vigilante' ),
+            );
+        } elseif ( 'none' === $vg_self_tone ) {
+            // The score holds back the points of a check that has not run yet,
+            // so the card has to say why instead of just showing a lower number.
+            $recommendations[] = array(
+                'icon'     => 'shield',
+                'priority' => 'high',
+                'tab'      => 'file-integrity',
+                'message'  => __( 'Vigilant has not checked its own files yet: run a scan from File Integrity.', 'vigilante' ),
+            );
+        }
 
         // Critical: Firewall disabled
         if ( empty( $options['modules']['firewall'] ) ) {
@@ -1479,6 +1631,7 @@ class Vigilante_Admin {
             array( 'tab' => 'file-integrity', 'tab_label' => __( 'File Integrity', 'vigilante' ), 'section' => __( 'File Integrity Monitoring', 'vigilante' ), 'anchor' => 'vigilante-section-fi-monitoring', 'label' => __( 'File Integrity Monitoring', 'vigilante' ), 'label_en' => 'File Integrity Monitoring', 'keywords' => _x( 'file integrity monitoring files checksum checksums tamper', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'file-integrity', 'tab_label' => __( 'File Integrity', 'vigilante' ), 'section' => __( 'File Integrity Monitoring', 'vigilante' ), 'anchor' => 'vigilante-section-fi-monitoring', 'label' => __( 'Scan schedule', 'vigilante' ), 'label_en' => 'Scan schedule', 'keywords' => _x( 'scan schedule scans scanning check cron', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'file-integrity', 'tab_label' => __( 'File Integrity', 'vigilante' ), 'section' => __( 'File Integrity Monitoring', 'vigilante' ), 'anchor' => 'vigilante-section-fi-monitoring', 'label' => __( 'Instant alert', 'vigilante' ), 'label_en' => 'Instant alert', 'keywords' => _x( 'instant alert alerts notification warning email', 'settings search keywords', 'vigilante' ) ),
+            array( 'tab' => 'file-integrity', 'tab_label' => __( 'File Integrity', 'vigilante' ), 'section' => __( 'Vigilant self-protection', 'vigilante' ), 'anchor' => 'vigilante-section-fi-self', 'label' => __( 'Vigilant self-protection', 'vigilante' ), 'label_en' => 'Vigilant self-protection', 'keywords' => _x( 'self protection selfprotection self-check autoproteccion manifest sha256 checksums tampering tampered repair reinstall own files guardian integrity of the plugin', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'file-integrity', 'tab_label' => __( 'File Integrity', 'vigilante' ), 'section' => __( 'Ignored Files', 'vigilante' ), 'anchor' => 'vigilante-section-fi-ignored', 'label' => __( 'Ignored Files', 'vigilante' ), 'label_en' => 'Ignored Files', 'keywords' => _x( 'ignored files file exclude', 'settings search keywords', 'vigilante' ) ),
             // Security Audit
             array( 'tab' => 'activity-log', 'tab_label' => __( 'Security Audit', 'vigilante' ), 'section' => __( 'Security Audit Settings', 'vigilante' ), 'anchor' => 'vigilante-section-audit-settings', 'label' => __( 'Retention', 'vigilante' ), 'label_en' => 'Retention', 'keywords' => _x( 'retention keep days storage log', 'settings search keywords', 'vigilante' ) ),
@@ -1633,6 +1786,7 @@ class Vigilante_Admin {
 
         wp_localize_script( 'vigilante-admin', 'vigilanteAdmin', array(
             'ajaxUrl'       => admin_url( 'admin-ajax.php' ),
+            'selfBoxUrl'          => esc_url( admin_url( 'admin.php?page=vigilante&tab=file-integrity#vigilante-section-fi-self' ) ),
             'nonce'         => wp_create_nonce( 'vigilante_admin_nonce' ),
             'currentUserId' => get_current_user_id(),
             'logoutUrl'     => wp_logout_url( wp_login_url() ),
@@ -1682,6 +1836,11 @@ class Vigilante_Admin {
                 'reason'              => __( 'Reason', 'vigilante' ),
                 'type'                => __( 'Type', 'vigilante' ),
                 'unknown'             => __( 'Unknown', 'vigilante' ),
+                'selfType'            => __( 'Vigilant (self)', 'vigilante' ),
+                'logWhatHappened'     => __( 'What happened', 'vigilante' ),
+                'logWhatItMeans'      => __( 'What it means', 'vigilante' ),
+                'logWhatToDo'         => __( 'What to do', 'vigilante' ),
+                'logSelfSeeDetails'   => __( 'Open File Integrity for the full detail', 'vigilante' ),
                 'modifiedFiles'       => __( 'Modified Files', 'vigilante' ),
                 'modifiedDescription' => __( 'These files (apparently) differ from the original WordPress or plugin versions.', 'vigilante' ),
                 'extraFiles'          => __( 'Extra Files', 'vigilante' ),
@@ -1935,7 +2094,87 @@ class Vigilante_Admin {
     /**
      * Show admin notices
      */
+    /**
+     * Self-protection notice.
+     *
+     * A change to Vigilant own files is shown on every admin screen, because
+     * waiting for someone to open the plugin is exactly what an attacker who
+     * patched it would want. A warning is shown only on Vigilant screens, so
+     * the notice that matters is not diluted. Neither is dismissible, both are
+     * for administrators only, and on a network the steps depend on whether
+     * the person can install plugins at all.
+     */
+    public function maybe_show_self_protection_notice() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            return;
+        }
+        $summary = $this->self_integrity_summary();
+        $tone    = $summary['tone'];
+        if ( ! in_array( $tone, array( 'critical', 'off', 'warning' ), true ) ) {
+            return;
+        }
+
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Reading the screen slug to decide where a notice is shown; no action taken.
+        $page         = isset( $_GET['page'] ) ? sanitize_key( wp_unslash( $_GET['page'] ) ) : '';
+        $on_vigilante = ( 0 === strpos( $page, 'vigilante' ) );
+        if ( 'warning' === $tone && ! $on_vigilante ) {
+            return;
+        }
+        $alarma = in_array( $tone, array( 'critical', 'off' ), true );
+
+        $link    = admin_url( 'admin.php?page=vigilante&tab=file-integrity#vigilante-section-fi-self' );
+        $network = is_multisite() && ! current_user_can( 'update_plugins' );
+        ?>
+        <div class="notice notice-<?php echo $alarma ? 'error' : 'warning'; ?> vigilante-self-notice">
+            <p class="vigilante-self-notice-title">
+                <span class="dashicons dashicons-shield" aria-hidden="true"></span>
+                <strong>
+                    <?php
+                    if ( 'critical' === $tone ) {
+                        esc_html_e( 'Vigilant detected changes in its own files', 'vigilante' );
+                    } elseif ( 'off' === $tone ) {
+                        esc_html_e( 'Vigilant self-protection is switched off by code', 'vigilante' );
+                    } else {
+                        echo esc_html( $this->self_integrity_headline( $tone, $summary['state'] ) );
+                    }
+                    ?>
+                </strong>
+            </p>
+            <p class="vigilante-self-notice-text">
+                <span>
+                    <?php
+                    if ( 'critical' === $tone ) {
+                        esc_html_e( 'Your security plugin may have been tampered with, and while that is true nothing it reports can be trusted.', 'vigilante' );
+                    } elseif ( 'off' === $tone ) {
+                        esc_html_e( 'Nothing is checking that Vigilant own files are intact. File Integrity says which file switches it off.', 'vigilante' );
+                    } else {
+                        esc_html_e( 'File Integrity says what was found, what it means and what to do about it.', 'vigilante' );
+                    }
+                    if ( $network ) {
+                        echo ' ' . esc_html__( 'Only your network administrator can repair Vigilant, because its files are shared by every site in the network. Let them know.', 'vigilante' );
+                    }
+                    ?>
+                </span>
+                <?php
+                /*
+                 * One button, on the same line as the text it belongs to, and it
+                 * leads to the whole story. Repairing from a notice, without
+                 * seeing which files, what it means and what it will do, is
+                 * asking someone to fix what they have not read: the repair
+                 * button lives in the card, after all that.
+                 */
+                ?>
+                <a class="button button-primary button-small" href="<?php echo esc_url( $link ); ?>">
+                    <?php esc_html_e( 'See what to do', 'vigilante' ); ?>
+                </a>
+            </p>
+        </div>
+        <?php
+    }
+
     public function show_admin_notices() {
+        $this->maybe_show_self_protection_notice();
+
         // Activation notice
         if ( get_transient( 'vigilante_activated' ) ) {
             ?>
@@ -2440,6 +2679,20 @@ class Vigilante_Admin {
         $weekly_enabled = ! isset( $analyzer_settings['weekly_scan_enabled'] ) || ! empty( $analyzer_settings['weekly_scan_enabled'] );
         $email_enabled  = ! empty( $analyzer_settings['email_on_regression'] );
 
+        /*
+         * Self-protection caps the score, and it does so here and not only in
+         * the stored report: the report is reused until the next Security
+         * Check, so tampering found after it ran would otherwise be shown next
+         * to the score the site earned before it happened.
+         */
+        $self_summary = $this->self_integrity_summary();
+        $self_capped  = in_array( $self_summary['tone'], array( 'critical', 'off' ), true )
+            || ( 'self_integrity' === ( isset( $last_scan['capped_by'] ) ? $last_scan['capped_by'] : '' ) );
+        if ( $self_capped && $has_data && $score > Vigilante_Security_Analyzer::SCORE_CAP_ON_TAMPER ) {
+            $score = Vigilante_Security_Analyzer::SCORE_CAP_ON_TAMPER;
+            $grade = 'E';
+        }
+
         $quality = self::analyzer_quality_tag( $score );
         ?>
         <div class="vigilante-analyzer" id="vigilante-analyzer"
@@ -2465,6 +2718,17 @@ class Vigilante_Admin {
                     </button>
                 </div>
             </div>
+
+            <?php if ( $self_capped ) : ?>
+            <p class="vigilante-analyzer-capped">
+                <span class="dashicons dashicons-shield" aria-hidden="true"></span>
+                <strong><?php esc_html_e( 'This score is not reliable right now.', 'vigilante' ); ?></strong>
+                <?php esc_html_e( 'Vigilant own files have been changed, and every other result on this page is produced by that same code. The score is held at the bottom of the scale until the files verify clean again.', 'vigilante' ); ?>
+                <a href="<?php echo esc_url( admin_url( 'admin.php?page=vigilante&tab=file-integrity#vigilante-section-fi-self' ) ); ?>">
+                    <?php esc_html_e( 'See what to do', 'vigilante' ); ?>
+                </a>
+            </p>
+            <?php endif; ?>
 
             <div class="vigilante-analyzer-summary">
                 <div class="vigilante-analyzer-score-card">
@@ -2841,6 +3105,56 @@ class Vigilante_Admin {
     /**
      * Render dashboard tab
      */
+    /**
+     * One line strip at the top of the Dashboard tab: the state of Vigilant own
+     * files, above the Configuration Score and the Security Check, because
+     * nothing else on this screen means much while it is red.
+     */
+    private function render_self_protection_strip() {
+        $summary = $this->self_integrity_summary();
+        $tone    = $summary['tone'];
+        $state   = $summary['state'];
+        $count   = count( $summary['findings'] );
+        $link    = admin_url( 'admin.php?page=vigilante&tab=file-integrity#vigilante-section-fi-self' );
+        ?>
+        <div class="vigilante-self-strip vigilante-self-strip--<?php echo esc_attr( $tone ); ?>">
+            <span class="dashicons dashicons-shield" aria-hidden="true"></span>
+            <strong><?php esc_html_e( 'Vigilant self-protection', 'vigilante' ); ?></strong>
+            <span class="vigilante-self-strip-state"><?php echo esc_html( $this->self_integrity_headline( $tone, $state ) ); ?></span>
+            <?php if ( $count > 0 ) : ?>
+            <span class="vigilante-self-strip-count">
+                <?php
+                printf(
+                    /* translators: %d: number of findings about Vigilant own files */
+                    esc_html( _n( '%d finding', '%d findings', $count, 'vigilante' ) ),
+                    (int) $count
+                );
+                ?>
+            </span>
+            <?php elseif ( ! empty( $state['last_check'] ) && 'off' !== $tone ) : ?>
+            <span class="vigilante-self-strip-count">
+                <?php
+                printf(
+                    /* translators: %s: human time difference, like "2 hours" */
+                    esc_html__( 'checked %s ago', 'vigilante' ),
+                    esc_html( human_time_diff( (int) $state['last_check'], time() ) )
+                );
+                ?>
+            </span>
+            <?php endif; ?>
+            <a href="<?php echo esc_url( $link ); ?>">
+                <?php
+                if ( in_array( $tone, array( 'critical', 'off', 'warning' ), true ) ) {
+                    esc_html_e( 'See what to do', 'vigilante' );
+                } else {
+                    esc_html_e( 'See details', 'vigilante' );
+                }
+                ?>
+            </a>
+        </div>
+        <?php
+    }
+
     private function render_tab_dashboard() {
         $options = $this->settings->get_all_options();
         $module_labels = $this->settings->get_module_labels();
@@ -2862,6 +3176,7 @@ class Vigilante_Admin {
         $analyzer_settings       = isset( $options['security_analyzer'] ) ? $options['security_analyzer'] : array();
         ?>
         <div class="vigilante-dashboard">
+            <?php $this->render_self_protection_strip(); ?>
             <div class="vigilante-status-card">
                 <h2><?php esc_html_e( 'Configuration Score', 'vigilante' ); ?></h2>
                 <p class="vigilante-score-kind description">
@@ -6218,6 +6533,17 @@ class Vigilante_Admin {
                                 'is_ua_whitelisted'  => ( '' !== $ua_val && in_array( $ua_val, $ua_whitelist, true ) ),
                                 'is_ua_blacklisted'  => ( '' !== $ua_val && in_array( $ua_val, $ua_blacklist, true ) ),
                             );
+                            // Self-protection entries carry what happened, what
+                            // it means and what to do, from the same catalogue
+                            // the File Integrity box uses.
+                            $vg_self_event = Vigilante_Self_Integrity_Guidance::for_log_event(
+                                (string) ( $log->event_action ?? '' ),
+                                $log->extra_data ?? '',
+                                (string) ( $log->severity ?? 'info' )
+                            );
+                            if ( null !== $vg_self_event ) {
+                                $details['self'] = $vg_self_event;
+                            }
                             $display_type = isset( $type_labels[ $log->event_type ] ) ? $type_labels[ $log->event_type ] : $log->event_type;
                             $display_severity = isset( $severity_labels[ $log->severity ] ) ? $severity_labels[ $log->severity ] : $log->severity;
                             ?>
@@ -6262,6 +6588,401 @@ class Vigilante_Admin {
     /**
      * Render File Integrity tab
      */
+    /**
+     * Findings of the self-check grouped by the case that explains them, worst
+     * first: ten modified files are one case with ten paths, not ten copies of
+     * the same explanation.
+     *
+     * @param array $findings Findings from the state.
+     * @return array
+     */
+    private function self_findings_by_case( $findings ) {
+        $groups = array();
+        foreach ( (array) $findings as $finding ) {
+            if ( ! is_array( $finding ) || 'info' === ( $finding['severity'] ?? '' ) ) {
+                continue;
+            }
+            $guidance = Vigilante_Self_Integrity_Guidance::for_finding( $finding );
+            $key      = $guidance['key'];
+            if ( ! isset( $groups[ $key ] ) ) {
+                $guidance['files']    = array();
+                $guidance['severity'] = 'warning';
+                $groups[ $key ]       = $guidance;
+            }
+            $file = isset( $finding['file'] ) ? (string) $finding['file'] : '';
+            if ( '' !== $file && ! in_array( $file, $groups[ $key ]['files'], true ) ) {
+                $groups[ $key ]['files'][] = $file;
+            }
+            if ( 'critical' === ( $finding['severity'] ?? '' ) ) {
+                $groups[ $key ]['severity'] = 'critical';
+            }
+        }
+        uasort(
+            $groups,
+            function ( $a, $b ) {
+                $rank = array( 'critical' => 0, 'warning' => 1 );
+                $ra   = isset( $rank[ $a['severity'] ] ) ? $rank[ $a['severity'] ] : 2;
+                $rb   = isset( $rank[ $b['severity'] ] ) ? $rank[ $b['severity'] ] : 2;
+                return $ra - $rb;
+            }
+        );
+        return $groups;
+    }
+
+    /**
+     * Human label for the context that ran the last self-check.
+     *
+     * @param string $context Stored context.
+     * @return string
+     */
+    private function self_context_label( $context ) {
+        switch ( (string) $context ) {
+            case 'scan':
+                return __( 'during a file integrity scan', 'vigilante' );
+            case 'upgrader':
+                return __( 'right after updating Vigilant', 'vigilante' );
+            case 'version_change':
+                return __( 'after a version change made outside the updater', 'vigilante' );
+            case 'migration':
+                return __( 'while updating to this version', 'vigilante' );
+            case 'activation':
+                return __( 'when Vigilant was activated', 'vigilante' );
+            case 'watchdog':
+                return __( 'from the scheduled task watchdog', 'vigilante' );
+        }
+        return '';
+    }
+
+    /**
+     * Short line for the badge of the box, the notices and the Dashboard strip.
+     *
+     * @param string $tone    Tone from Vigilante_Self_Integrity::tone().
+     * @param array  $state   State.
+     * @return string
+     */
+    private function self_integrity_headline( $tone, $state ) {
+        $files   = isset( $state['files_checked'] ) ? (int) $state['files_checked'] : 0;
+        $anchors = ( isset( $state['anchors'] ) && is_array( $state['anchors'] ) ) ? $state['anchors'] : array();
+        switch ( $tone ) {
+            case 'critical':
+                return __( 'Changes detected in Vigilant own files', 'vigilante' );
+            case 'warning':
+                return ( $files < 1 )
+                    ? __( 'Vigilant could not check its own files', 'vigilante' )
+                    : __( 'Vigilant self-protection needs your attention', 'vigilante' );
+            case 'off':
+                return __( 'Self-protection is switched off by code', 'vigilante' );
+            case 'none':
+                return __( 'Vigilant has not checked its own files yet', 'vigilante' );
+        }
+        return sprintf(
+            /* translators: 1: number of files verified, 2: number of references available, out of three */
+            __( 'Verified: %1$d files, %2$d of 3 references', 'vigilante' ),
+            $files,
+            count( array_filter( $anchors ) )
+        );
+    }
+
+    /**
+     * Vigilant self-protection box: the first block of the File Integrity
+     * results, with its own colour by severity, what each finding means and
+     * how to fix it.
+     *
+     * It renders whether or not a scan has been stored, because the self-check
+     * also runs after every update and once a day: before 3.0.0 this lived in
+     * a line above the numeric cards of the last scan, where it was invisible
+     * and, without a stored scan, absent.
+     *
+     * @param array $fi_options File Integrity settings section.
+     */
+    /**
+     * Everything the screens need to say about self-protection, read once:
+     * the state, its findings grouped by case, and the tone that colours the
+     * box, the menu counter and the notices.
+     *
+     * @param array|null $fi_options File Integrity settings, read if not given.
+     * @return array { state, findings, groups, tone, enabled }
+     */
+    private function self_integrity_summary( $fi_options = null ) {
+        // Four to six screens ask for this in the same page load (menu, notice,
+        // box, strip, both scores). The option is cached by the core options
+        // layer, but the grouping and the tone are not: memoize per request.
+        static $cached = null;
+        if ( null !== $cached && ! is_array( $fi_options ) ) {
+            return $cached;
+        }
+        if ( ! is_array( $fi_options ) ) {
+            $fi_options = (array) $this->settings->get_section( 'file_integrity' );
+        }
+        $enabled  = Vigilante_Self_Integrity::is_on();
+        $state    = Vigilante_Self_Integrity::display_state();
+        $findings = Vigilante_Self_Integrity::state_findings( $state, $enabled );
+        $summary = array(
+            'state'    => $state,
+            'findings' => $findings,
+            'groups'   => $this->self_findings_by_case( $findings ),
+            'tone'     => Vigilante_Self_Integrity::tone( $state, $enabled ),
+            'enabled'  => $enabled,
+        );
+        $cached = $summary;
+        return $summary;
+    }
+
+    private function render_self_protection_box( $fi_options ) {
+        $summary  = $this->self_integrity_summary( $fi_options );
+        $enabled  = $summary['enabled'];
+        $state    = $summary['state'];
+        $findings = $summary['findings'];
+        $groups   = $summary['groups'];
+        $tone     = $summary['tone'];
+        $total    = isset( $state['last_findings_total'] ) ? (int) $state['last_findings_total'] : count( $findings );
+        $status   = array(
+            'status'  => isset( $state['last_status'] ) ? (string) $state['last_status'] : '',
+            'files'   => isset( $state['files_checked'] ) ? (int) $state['files_checked'] : 0,
+            'anchors' => ( isset( $state['anchors'] ) && is_array( $state['anchors'] ) ) ? $state['anchors'] : array(),
+            'enabled' => $enabled,
+            'has_run' => ! empty( $state['last_check'] ),
+        );
+
+        /*
+         * Nothing to do, nothing to open: one line. A card with a big icon and
+         * folded sections for "everything is fine" is furniture, and furniture
+         * is what made the previous version of this invisible.
+         */
+        if ( empty( $groups ) ) {
+            $this->render_self_line( $tone, $state, $status );
+            return;
+        }
+
+        $datetime_format = get_option( 'date_format' ) . ' ' . get_option( 'time_format' );
+        $context_label   = $this->self_context_label( isset( $state['last_context'] ) ? $state['last_context'] : '' );
+        $icon            = ( 'critical' === $tone ) ? 'dashicons-shield' : 'dashicons-warning';
+        ?>
+        <div id="vigilante-section-fi-self" class="vigilante-settings-section vigilante-self-box vigilante-self-box--<?php echo esc_attr( $tone ); ?>">
+            <div class="vigilante-self-card">
+            <div class="vigilante-self-head">
+                <span class="vigilante-self-icon"><span class="dashicons <?php echo esc_attr( $icon ); ?>" aria-hidden="true"></span></span>
+                <div class="vigilante-self-head-text">
+                    <h2><?php echo esc_html( $this->self_integrity_headline( $tone, $state ) ); ?></h2>
+                    <p class="vigilante-self-meta">
+                        <?php
+                        printf(
+                            /* translators: %s: date and time of the last self-check */
+                            esc_html__( 'Checked on %s', 'vigilante' ),
+                            esc_html( wp_date( $datetime_format, (int) $state['last_check'] ) )
+                        );
+                        if ( '' !== $context_label ) {
+                            echo ', ' . esc_html( $context_label );
+                        }
+                        if ( $status['files'] > 0 ) {
+                            echo ', ';
+                            printf(
+                                /* translators: 1: number of files checked, 2: number of references available, out of three */
+                                esc_html__( '%1$d files against %2$d of 3 references', 'vigilante' ),
+                                (int) $status['files'],
+                                (int) count( array_filter( $status['anchors'] ) )
+                            );
+                        }
+                        ?>
+                    </p>
+                </div>
+            </div>
+
+            <div class="vigilante-self-cases">
+                <?php
+                $first = true;
+                foreach ( $groups as $group ) {
+                    $this->render_self_case( $group, $group['files'], $group['severity'], $first );
+                    $first = false;
+                }
+
+                if ( in_array( $tone, array( 'critical', 'warning' ), true ) ) {
+                    $can_repair = class_exists( 'Vigilante_Self_Repair' ) && Vigilante_Self_Repair::can_repair();
+                    if ( ! $can_repair ) {
+                        if ( class_exists( 'Vigilante_Self_Repair' ) && ! Vigilante_Self_Repair::folder_is_the_distributed_one() ) {
+                            $vg_reason = 'renamed';
+                        } elseif ( ! wp_is_file_mod_allowed( 'capability_update_core' ) ) {
+                            // With DISALLOW_FILE_MODS nobody can do it from the admin,
+                            // not even a network administrator: telling a subsite admin
+                            // to ask theirs would send them to someone equally blocked.
+                            $vg_reason = 'no_caps';
+                        } elseif ( is_multisite() && ! current_user_can( 'update_plugins' ) ) {
+                            $vg_reason = 'network';
+                        } else {
+                            $vg_reason = 'no_caps';
+                        }
+                        $this->render_self_case(
+                            array(
+                                'title'   => __( 'How to repair it here', 'vigilante' ),
+                                'meaning' => __( 'This site does not let Vigilant replace its own files from this screen.', 'vigilante' ),
+                                'steps'   => Vigilante_Self_Integrity_Guidance::manual_steps( $vg_reason ),
+                            ),
+                            array(),
+                            '',
+                            false
+                        );
+                    }
+                }
+                ?>
+            </div>
+
+            <?php if ( $total > count( $findings ) ) : ?>
+            <p class="description">
+                <?php
+                printf(
+                    /* translators: 1: findings shown, 2: findings found in total */
+                    esc_html__( 'Showing %1$d of %2$d findings: the rest are of the same kind.', 'vigilante' ),
+                    (int) count( $findings ),
+                    (int) $total
+                );
+                ?>
+            </p>
+            <?php endif; ?>
+
+            <?php
+            /*
+             * Reinstalling fixes files, not a filter someone wrote or a hook
+             * someone removed: the button only appears when at least one of the
+             * cases on screen is one a clean copy solves. Offering it next to
+             * "switched off by code" was telling the person to fix something
+             * else.
+             */
+            $vg_offer_repair = false;
+            foreach ( $groups as $vg_group ) {
+                if ( ! empty( $vg_group['repair'] ) ) {
+                    $vg_offer_repair = true;
+                    break;
+                }
+            }
+            ?>
+            <p class="vigilante-self-actions">
+                <?php if ( $vg_offer_repair && class_exists( 'Vigilante_Self_Repair' ) && Vigilante_Self_Repair::can_repair() ) : ?>
+                    <a class="button button-primary" href="<?php echo esc_url( Vigilante_Self_Repair::action_url() ); ?>">
+                        <?php esc_html_e( 'Repair Vigilant', 'vigilante' ); ?>
+                    </a>
+                    <span class="description">
+                        <?php esc_html_e( 'It downloads a clean copy from WordPress.org, asks before changing anything, and keeps your settings and log.', 'vigilante' ); ?>
+                    </span>
+                <?php else : ?>
+                    <span class="description">
+                        <?php esc_html_e( 'After fixing it, run a new scan with the Run Scan Now button above.', 'vigilante' ); ?>
+                    </span>
+                <?php endif; ?>
+            </p>
+            </div>
+        </div>
+        <?php
+    }
+
+    /**
+     * The same state when there is nothing to act on: one line inside the same
+     * card, so the first block of the results is always the same object.
+     *
+     * @param string $tone   Tone from Vigilante_Self_Integrity::tone().
+     * @param array  $state  State.
+     * @param array  $status Arguments for the guidance catalogue.
+     */
+    private function render_self_line( $tone, $state, $status ) {
+        $guidance = Vigilante_Self_Integrity_Guidance::for_status( $status );
+        $icon     = ( 'ok' === $tone ) ? 'dashicons-yes-alt' : 'dashicons-shield';
+        ?>
+        <div id="vigilante-section-fi-self" class="vigilante-settings-section vigilante-self-box vigilante-self-box--<?php echo esc_attr( $tone ); ?> vigilante-self-box--quiet">
+            <div class="vigilante-self-card vigilante-self-card--quiet">
+            <p class="vigilante-self-line">
+                <span class="dashicons <?php echo esc_attr( $icon ); ?>" aria-hidden="true"></span>
+                <strong><?php esc_html_e( 'Vigilant self-protection:', 'vigilante' ); ?></strong>
+                <span class="vigilante-self-line-state"><?php echo esc_html( $this->self_integrity_headline( $tone, $state ) ); ?></span>
+                <?php if ( ! empty( $state['last_check'] ) ) : ?>
+                    <span class="vigilante-self-line-meta">
+                        <?php
+                        printf(
+                            /* translators: %s: human time difference, like "2 hours" */
+                            esc_html__( 'checked %s ago', 'vigilante' ),
+                            esc_html( human_time_diff( (int) $state['last_check'], time() ) )
+                        );
+                        ?>
+                    </span>
+                <?php endif; ?>
+            </p>
+            <?php if ( ! empty( $guidance['steps'] ) && 'none' === $tone ) : ?>
+            <p class="description vigilante-self-line-help"><?php echo esc_html( $guidance['steps'][0] ); ?></p>
+            <?php endif; ?>
+            </div>
+        </div>
+        <?php
+    }
+
+    /**
+     * One case of the self-protection box, as a row that opens: what it is, how
+     * many files, its severity, and inside, the files, what it means and what to
+     * do. Plain HTML details, so there is no JavaScript between a finding about
+     * the security plugin and the person reading it.
+     *
+     * @param array  $guidance Guidance entry (title, meaning, steps).
+     * @param array  $files    Paths this case was found in.
+     * @param string $severity critical|warning, empty for the how-to-repair row.
+     * @param bool   $open     Whether the row starts open.
+     */
+    private function render_self_case( $guidance, $files = array(), $severity = '', $open = false ) {
+        $shown  = array_slice( (array) $files, 0, 20 );
+        $hidden = count( (array) $files ) - count( $shown );
+        ?>
+        <details class="vigilante-self-case vigilante-self-case--<?php echo esc_attr( '' !== $severity ? $severity : 'plain' ); ?>"<?php echo $open ? ' open' : ''; ?>>
+            <summary>
+                <span class="vigilante-self-case-title"><?php echo esc_html( $guidance['title'] ); ?></span>
+                <?php if ( ! empty( $files ) ) : ?>
+                    <span class="vigilante-self-case-count">
+                        <?php
+                        printf(
+                            /* translators: %d: number of files of this finding */
+                            esc_html( _n( '%d file', '%d files', count( (array) $files ), 'vigilante' ) ),
+                            (int) count( (array) $files )
+                        );
+                        ?>
+                    </span>
+                <?php endif; ?>
+                <?php if ( '' !== $severity ) : ?>
+                    <span class="vigilante-self-case-severity">
+                        <?php echo esc_html( 'critical' === $severity ? __( 'critical', 'vigilante' ) : __( 'warning', 'vigilante' ) ); ?>
+                    </span>
+                <?php endif; ?>
+            </summary>
+            <div class="vigilante-self-case-body">
+                <?php if ( ! empty( $shown ) ) : ?>
+                <ul class="vigilante-self-paths">
+                    <?php foreach ( $shown as $file ) : ?>
+                    <li><code><?php echo esc_html( $file ); ?></code></li>
+                    <?php endforeach; ?>
+                    <?php if ( $hidden > 0 ) : ?>
+                    <li>
+                        <?php
+                        printf(
+                            /* translators: %d: number of additional files */
+                            esc_html__( 'and %d more', 'vigilante' ),
+                            (int) $hidden
+                        );
+                        ?>
+                    </li>
+                    <?php endif; ?>
+                </ul>
+                <?php endif; ?>
+                <p class="vigilante-self-meaning">
+                    <strong><?php esc_html_e( 'What it means:', 'vigilante' ); ?></strong>
+                    <?php echo esc_html( $guidance['meaning'] ); ?>
+                </p>
+                <?php if ( ! empty( $guidance['steps'] ) ) : ?>
+                <p class="vigilante-self-todo"><strong><?php esc_html_e( 'What to do:', 'vigilante' ); ?></strong></p>
+                <ol class="vigilante-self-steps">
+                    <?php foreach ( $guidance['steps'] as $step ) : ?>
+                    <li><?php echo esc_html( $step ); ?></li>
+                    <?php endforeach; ?>
+                </ol>
+                <?php endif; ?>
+            </div>
+        </details>
+        <?php
+    }
+
     private function render_tab_file_integrity() {
         $is_disabled = $this->render_module_disabled_notice( 'file_integrity' );
         $options = $this->settings->get_section( 'file_integrity' );
@@ -6273,6 +6994,30 @@ class Vigilante_Admin {
         $last_scan = get_option( 'vigilante_last_integrity_scan' );
         $last_results = get_option( 'vigilante_last_integrity_results' );
         $ignored_files = get_option( 'vigilante_ignored_files', array() );
+
+        /*
+         * Vigilant own findings are shown in their own box, the first of the
+         * results, with what each one means and how to fix it. They are taken
+         * out of the generic tables here (and out of the counters above them)
+         * so the same finding is not reported twice and so no row of the
+         * security plugin's own files offers an Ignore button. The stored
+         * results keep them: the scan email reads its own section from there.
+         */
+        if ( is_array( $last_results ) ) {
+            foreach ( array( 'modified', 'suspicious', 'extra', 'missing' ) as $vg_bucket ) {
+                if ( empty( $last_results[ $vg_bucket ] ) || ! is_array( $last_results[ $vg_bucket ] ) ) {
+                    continue;
+                }
+                $last_results[ $vg_bucket ] = array_values(
+                    array_filter(
+                        $last_results[ $vg_bucket ],
+                        function ( $vg_item ) {
+                            return ! ( is_array( $vg_item ) && 'vigilante_self' === ( $vg_item['type'] ?? '' ) );
+                        }
+                    )
+                );
+            }
+        }
 
         // Backward compat: convert old notify_on_changes to notify_level
         $notify_level = $options['notify_level'] ?? '';
@@ -6458,6 +7203,8 @@ class Vigilante_Admin {
 
         <div id="vigilante-scan-results" class="vigilante-settings-section" style="display:none;"></div>
 
+        <?php $this->render_self_protection_box( $options ); ?>
+
         <?php if ( $last_scan || $has_closed || $closed_last_check > 0 ) : ?>
         <div id="vigilante-section-fi-last-scan" class="vigilante-settings-section">
             <h2><?php esc_html_e( 'Last Scan Results', 'vigilante' ); ?></h2>
@@ -6584,6 +7331,9 @@ class Vigilante_Admin {
                                     } else {
                                         $file_path = (string) $item;
                                     }
+                                    if ( 'vigilante_self' === $file_type ) {
+                                        $file_type = __( 'Vigilant (self)', 'vigilante' );
+                                    }
                                     ?>
                                     <tr>
                                         <th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" value="<?php echo esc_attr( $file_path ); ?>"></th>
@@ -6625,6 +7375,9 @@ class Vigilante_Admin {
                                     $file_path = is_array( $item ) ? ( $item['file'] ?? '' ) : (string) $item;
                                     $file_reason = is_array( $item ) ? ( $item['reason'] ?? __( 'Unknown', 'vigilante' ) ) : __( 'Unknown', 'vigilante' );
                                     $file_type = is_array( $item ) ? ( $item['type'] ?? 'unknown' ) : 'unknown';
+                                    if ( 'vigilante_self' === $file_type ) {
+                                        $file_type = __( 'Vigilant (self)', 'vigilante' );
+                                    }
                                     ?>
                                     <tr>
                                         <th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" value="<?php echo esc_attr( $file_path ); ?>"></th>
@@ -6653,6 +7406,17 @@ class Vigilante_Admin {
                             if ( is_array( $item ) && isset( $item['type'] ) && 'critical_config' === $item['type'] ) {
                                 $critical_modified[] = $item;
                             } else {
+                                $regular_modified[] = $item;
+                            }
+                        }
+                    }
+                    // A missing file of Vigilant is critical, and the missing
+                    // files of the generic scan have no table: it is listed with
+                    // the modified files, or the tab said "All files passed" with
+                    // a module deleted.
+                    if ( $last_results && ! empty( $last_results['missing'] ) && is_array( $last_results['missing'] ) ) {
+                        foreach ( $last_results['missing'] as $item ) {
+                            if ( is_array( $item ) && 'vigilante_self' === ( $item['type'] ?? '' ) ) {
                                 $regular_modified[] = $item;
                             }
                         }
@@ -6857,6 +7621,9 @@ class Vigilante_Admin {
                                     } else {
                                         $file_path = (string) $item;
                                     }
+                                    if ( 'vigilante_self' === $file_type ) {
+                                        $file_type = __( 'Vigilant (self)', 'vigilante' );
+                                    }
                                     ?>
                                     <tr>
                                         <th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" value="<?php echo esc_attr( $file_path ); ?>"></th>
@@ -6872,7 +7639,14 @@ class Vigilante_Admin {
                     </div>
                     <?php endif; ?>
 
-                    <?php if ( $last_results && empty( $last_results['modified'] ) && empty( $last_results['suspicious'] ) && empty( $last_results['extra'] ) && ! $has_closed ) : ?>
+                    <?php
+                    // "All files passed" is about every file, and Vigilant's own
+                    // are files too: with the self-protection box in red or amber
+                    // above, this line contradicted it (its findings no longer
+                    // travel in the tables below).
+                    $vg_self_alarm = in_array( $this->self_integrity_summary( $options )['tone'], array( 'critical', 'off', 'warning' ), true );
+                    ?>
+                    <?php if ( $last_results && ! $vg_self_alarm && empty( $critical_modified ) && empty( $regular_modified ) && empty( $last_results['suspicious'] ) && empty( $last_results['extra'] ) && ! $has_closed ) : ?>
                     <p class="vigilante-all-clear" style="color: #00a32a; font-weight: bold;">
                         <?php esc_html_e( 'Good Job! All files passed integrity check. No issues found.', 'vigilante' ); ?>
                     </p>
@@ -7980,20 +8754,25 @@ class Vigilante_Admin {
          * review of 2.11.8. So for somebody who cannot approve, those entries
          * stay and everything else goes.
          */
-        if ( $this->critical_approval_locked() && is_array( $results ) && ! empty( $results['modified'] ) && is_array( $results['modified'] ) ) {
-            $critical = array_values(
-                array_filter(
-                    $results['modified'],
-                    function ( $item ) {
-                        return is_array( $item ) && 'critical_config' === ( $item['type'] ?? '' );
-                    }
-                )
-            );
+        // The findings about Vigilant's own files stay too: they report for the
+        // whole network, and ignoring them already takes network rights.
+        if ( $this->critical_approval_locked() && is_array( $results ) ) {
+            $kept  = array();
+            $found = false;
+            foreach ( array( 'modified', 'missing', 'suspicious', 'extra' ) as $bucket ) {
+                $kept[ $bucket ] = array_values(
+                    array_filter(
+                        isset( $results[ $bucket ] ) && is_array( $results[ $bucket ] ) ? $results[ $bucket ] : array(),
+                        function ( $item ) {
+                            return is_array( $item ) && in_array( $item['type'] ?? '', array( 'critical_config', 'vigilante_self' ), true );
+                        }
+                    )
+                );
+                $found = $found || ! empty( $kept[ $bucket ] );
+            }
 
-            if ( $critical ) {
-                $results['modified']   = $critical;
-                $results['suspicious'] = array();
-                $results['extra']      = array();
+            if ( $found ) {
+                $results = array_merge( $results, $kept );
                 update_option( 'vigilante_last_integrity_results', $results );
                 update_option( 'vigilante_last_integrity_scan', $scanned_at ? $scanned_at : time() );
             }
@@ -8030,6 +8809,15 @@ class Vigilante_Admin {
         // takes the network. Ignoring it would close the same warning without.
         if ( $this->critical_approval_locked() && in_array( $file, array( 'wp-config.php', '.htaccess' ), true ) ) {
             wp_send_json_error( $this->critical_approval_notice() );
+        }
+
+        // Vigilant's own files are never ignored, on any site: silencing the
+        // check that says the security plugin was changed is the one button
+        // an attacker would want on this screen. Since 3.0.0 those findings
+        // are not rows of these tables either, so nothing in the interface
+        // sends them here; this is the door, not the label.
+        if ( Vigilante_Self_Integrity::is_own_file_path( $file ) ) {
+            wp_send_json_error( __( 'Findings about Vigilant own files cannot be ignored. File Integrity explains what each one means and how to repair it.', 'vigilante' ) );
         }
 
         $file_integrity = new Vigilante_File_Integrity( $this->settings, $this->database );
@@ -8098,11 +8886,13 @@ class Vigilante_Admin {
         }
 
         $files  = array();
-        $shared = $this->critical_approval_locked() ? array( 'wp-config.php', '.htaccess' ) : array();
+        $locked = $this->critical_approval_locked();
+        $shared = $locked ? array( 'wp-config.php', '.htaccess' ) : array();
         foreach ( $raw_files as $f ) {
             $clean = sanitize_text_field( $f );
-            // Same rule as ajax_ignore_file() for the two shared files.
-            if ( '' !== $clean && ! in_array( $clean, $shared, true ) ) {
+            // Same rule as ajax_ignore_file(): the two shared files when the
+            // network locks them, and Vigilant's own files always.
+            if ( '' !== $clean && ! in_array( $clean, $shared, true ) && ! Vigilante_Self_Integrity::is_own_file_path( $clean ) ) {
                 $files[] = $clean;
             }
         }

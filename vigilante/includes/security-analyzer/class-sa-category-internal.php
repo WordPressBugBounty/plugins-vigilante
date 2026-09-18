@@ -1,6 +1,6 @@
 <?php
 /**
- * Security Analyzer — Internal-exclusive category (30 pts).
+ * Security Analyzer — Internal-exclusive category (33 pts).
  *
  * The differential of this analyzer vs any external scanner. Each check
  * reads data that is impossible to observe from the outside.
@@ -13,6 +13,8 @@
  *  - inactive_plugins (2)
  *  - closed_plugins (3)  ← v2.6.0: reads the cached state from the daily
  *                          Vigilante_Plugin_Status check; no extra HTTP call.
+ *  - self_integrity (3)  ← v3.0.0: reads the cached state written by
+ *                          Vigilante_Self_Integrity; no FS hashing, no HTTP.
  *  - file_permissions (2)
  *  - salts_default (2)
  *  - table_prefix (2)
@@ -77,6 +79,7 @@ class Vigilante_SA_Category_Internal {
         $results[] = $this->check_theme_updates();
         $results[] = $this->check_inactive_plugins();
         $results[] = $this->check_closed_plugins();
+        $results[] = $this->check_self_integrity();
         $results[] = $this->check_file_permissions();
         $results[] = $this->check_salts_default();
         $results[] = $this->check_table_prefix();
@@ -414,6 +417,105 @@ class Vigilante_SA_Category_Internal {
             implode( ', ', $sample )
         );
         return Vigilante_SA_Check_Result::fail( $args );
+    }
+
+    /**
+     * Vigilant self-integrity state (self-protection, 3.0.0).
+     *
+     * Reads the cached vigilante_self_integrity_state option written by
+     * Vigilante_Self_Integrity: no filesystem hashing and no HTTP here, so
+     * the check is fast-phase safe. The wording is the shared guidance
+     * catalogue, so this check, the File Integrity box, the audit details and
+     * the alert email say the same thing about the same finding.
+     *
+     * It is the heaviest single check of the analyzer (10 points) and a
+     * critical result caps the whole score in build_report(): every other
+     * result is computed by the same code whose files were changed.
+     */
+    private function check_self_integrity() {
+        $args = array(
+            'id'       => 'self_integrity',
+            'category' => self::SLUG,
+            'max'      => 10,
+            'label'    => __( 'Vigilant self-protection', 'vigilante' ),
+            'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'file-integrity', 'vigilante-section-fi-self' ),
+        );
+
+        $enabled    = Vigilante_Self_Integrity::is_on();
+        $state      = Vigilante_Self_Integrity::display_state();
+        $tone       = Vigilante_Self_Integrity::tone( $state, $enabled );
+        $findings   = Vigilante_Self_Integrity::state_findings( $state, $enabled );
+        $files      = isset( $state['files_checked'] ) ? (int) $state['files_checked'] : 0;
+        $anchors    = ( isset( $state['anchors'] ) && is_array( $state['anchors'] ) ) ? $state['anchors'] : array();
+
+        $args['data'] = array(
+            'status'        => isset( $state['last_status'] ) ? (string) $state['last_status'] : '',
+            'tone'          => $tone,
+            'files_checked' => $files,
+            'anchors'       => count( array_filter( $anchors ) ),
+            'findings'      => count( $findings ),
+            'last_check'    => isset( $state['last_check'] ) ? (int) $state['last_check'] : 0,
+        );
+
+        // Worst finding first: it is the one that decides the tone, so it is
+        // the one to explain.
+        $worst = null;
+        foreach ( $findings as $finding ) {
+            $severity = isset( $finding['severity'] ) ? (string) $finding['severity'] : '';
+            if ( 'critical' === $severity ) {
+                $worst = $finding;
+                break;
+            }
+            if ( 'warning' === $severity && null === $worst ) {
+                $worst = $finding;
+            }
+        }
+
+        if ( null !== $worst ) {
+            $guidance = Vigilante_Self_Integrity_Guidance::for_finding( $worst );
+        } else {
+            $guidance = Vigilante_Self_Integrity_Guidance::for_status(
+                array(
+                    'status'  => isset( $state['last_status'] ) ? $state['last_status'] : '',
+                    'files'   => $files,
+                    'anchors' => $anchors,
+                    'enabled' => $enabled,
+                    'has_run' => ! empty( $state['last_check'] ),
+                )
+            );
+        }
+
+        $detail = $guidance['title'] . '. ' . $guidance['meaning'];
+        if ( ! empty( $guidance['steps'] ) ) {
+            $detail .= ' ' . $guidance['steps'][0];
+        }
+        $count = count( $findings );
+        if ( $count > 1 ) {
+            $detail .= ' ' . sprintf(
+                /* translators: %d: number of findings about Vigilant own files */
+                _n(
+                    '%d finding in total: File Integrity lists every one, with what it means and what to do.',
+                    '%d findings in total: File Integrity lists every one, with what each one means and what to do.',
+                    $count,
+                    'vigilante'
+                ),
+                $count
+            );
+        }
+        $args['detail'] = $detail;
+
+        if ( 'none' === $tone ) {
+            return Vigilante_SA_Check_Result::skip( $args );
+        }
+        // Switched off by code counts as a failure, not as a check that did not
+        // apply: somebody had to write that filter.
+        if ( 'critical' === $tone || 'off' === $tone ) {
+            return Vigilante_SA_Check_Result::fail( $args );
+        }
+        if ( 'warning' === $tone ) {
+            return Vigilante_SA_Check_Result::warn( $args );
+        }
+        return Vigilante_SA_Check_Result::pass( $args );
     }
 
     private function check_file_permissions() {

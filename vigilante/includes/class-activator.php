@@ -107,6 +107,9 @@ class Vigilante_Activator {
         // Schedule cron events
         self::schedule_events();
 
+        // Capture the self-integrity anchor (A3: manifest fingerprint in DB).
+        self::anchor_self_integrity( $settings );
+
         // Set activation transient for admin notice
         set_transient( 'vigilante_activated', true, 30 );
 
@@ -121,6 +124,33 @@ class Vigilante_Activator {
 
         // Clean any output that may have been generated
         ob_end_clean();
+    }
+
+    /**
+     * Anchor the self-integrity check on activation
+     *
+     * The first activation captures the fingerprint of the shipped manifest,
+     * unless WordPress.org distributes something else for that version, so
+     * the self-check has a baseline from the very first run. A
+     * reactivation keeps the anchor it already has and checks against it:
+     * capturing again adopted whatever manifest the folder held at that
+     * moment, a regenerated one included, the same reason the critical files
+     * baseline is not thrown away on reactivation.
+     *
+     * @since 3.0.0
+     *
+     * @param Vigilante_Settings $settings Settings instance.
+     * @return void
+     */
+    public static function anchor_self_integrity( $settings ) {
+        if ( ! class_exists( 'Vigilante_Self_Integrity' ) ) {
+            require_once VIGILANTE_INCLUDES_DIR . 'class-self-integrity.php';
+        }
+        // run_check() captures on the first run itself, but only when
+        // WordPress.org does not contradict the manifest; with an anchor already
+        // there it checks against it.
+        $self_integrity = new Vigilante_Self_Integrity( $settings );
+        $self_integrity->run_check( 'activation' );
     }
 
     /**

@@ -3602,3 +3602,375 @@
         grid-column: 2 / -1;
     }
 }
+/* ---------------------------------------------------------------------------
+   Self-protection (File Integrity, first block of the results)
+
+   Two shapes, on purpose. With nothing to do it is one line, because a card
+   with an icon and folded sections for "everything is fine" is furniture. With
+   something to do it is a card with one row per case, the shape of Site Health,
+   which is what holds up when there are four findings at once. Colour lives in
+   the icon, the severity word and a thin edge: never a filled background behind
+   the text.
+--------------------------------------------------------------------------- */
+/*
+ * A card of the same family as the rest of the page (the counters use
+ * border 1px #ddd and radius 8px), not a notice bar: this block belongs to the
+ * results, it is not something pinned on top of them.
+ */
+.vigilante-self-card {
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 16px 20px;
+}
+
+.vigilante-self-card--quiet {
+    padding: 12px 20px;
+}
+
+.vigilante-self-box--critical .vigilante-self-card {
+    border-color: #d63638;
+}
+
+.vigilante-self-box--warning .vigilante-self-card {
+    border-color: #dba617;
+}
+
+/* --- one line, when there is nothing to act on --- */
+.vigilante-self-line {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0;
+}
+
+.vigilante-self-line .dashicons {
+    color: #50575e;
+}
+
+.vigilante-self-box--ok .vigilante-self-line .dashicons {
+    color: #00a32a;
+}
+
+.vigilante-self-box--info .vigilante-self-line .dashicons {
+    color: #2271b1;
+}
+
+.vigilante-self-line-meta {
+    color: #646970;
+}
+
+.vigilante-self-line-help {
+    margin: 6px 0 0 28px;
+}
+
+/* --- card, when something needs attention --- */
+.vigilante-self-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+}
+
+.vigilante-self-icon {
+    flex: none;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #f0f0f1;
+}
+
+.vigilante-self-icon .dashicons {
+    color: #50575e;
+}
+
+.vigilante-self-box--critical .vigilante-self-icon {
+    background: #fcf0f1;
+}
+
+.vigilante-self-box--critical .vigilante-self-icon .dashicons {
+    color: #d63638;
+}
+
+.vigilante-self-box--warning .vigilante-self-icon {
+    background: #fcf9e8;
+}
+
+.vigilante-self-box--warning .vigilante-self-icon .dashicons {
+    color: #996800;
+}
+
+.vigilante-self-head-text h2 {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    font-size: 15px;
+    line-height: 1.4;
+}
+
+.vigilante-self-meta {
+    margin: 2px 0 0;
+    color: #646970;
+}
+
+.vigilante-self-cases {
+    margin-top: 14px;
+    border-top: 1px solid #e0e0e0;
+}
+
+.vigilante-self-case {
+    border-bottom: 1px solid #e0e0e0;
+}
+
+.vigilante-self-case > summary {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 2px;
+    cursor: pointer;
+    list-style: none;
+}
+
+.vigilante-self-case > summary::-webkit-details-marker {
+    display: none;
+}
+
+.vigilante-self-case > summary::before {
+    content: "\f139";
+    font-family: dashicons;
+    font-size: 18px;
+    line-height: 1;
+    color: #646970;
+}
+
+.vigilante-self-case[open] > summary::before {
+    content: "\f140";
+}
+
+.vigilante-self-case-title {
+    font-weight: 600;
+}
+
+.vigilante-self-case-count {
+    color: #646970;
+}
+
+.vigilante-self-case-severity {
+    margin-left: auto;
+    font-size: 12px;
+    text-transform: lowercase;
+    color: #646970;
+}
+
+.vigilante-self-case--critical .vigilante-self-case-severity {
+    color: #d63638;
+}
+
+.vigilante-self-case--warning .vigilante-self-case-severity {
+    color: #996800;
+}
+
+.vigilante-self-case-body {
+    padding: 0 2px 12px 28px;
+}
+
+.vigilante-self-paths {
+    margin: 0 0 8px 18px;
+    list-style: disc;
+}
+
+.vigilante-self-paths code {
+    background: rgba(0, 0, 0, 0.05);
+}
+
+.vigilante-self-meaning,
+.vigilante-self-todo {
+    margin: 6px 0 0;
+}
+
+.vigilante-self-steps {
+    margin: 4px 0 0 20px;
+}
+
+.vigilante-self-steps li {
+    margin-bottom: 6px;
+}
+
+.vigilante-self-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: 14px 0 0;
+}
+
+/* ---------------------------------------------------------------------------
+   Self-protection on the Dashboard tab: the same card as the ones below it
+   (white, 1px border, 4px radius, 20px padding), not a notice bar pinned on
+   top. Its content is centred, like the score cards it sits above.
+--------------------------------------------------------------------------- */
+.vigilante-self-strip {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    background: #fff;
+    border: 1px solid #e5e5e5;
+    border-radius: 4px;
+    padding: 16px 20px;
+    margin-bottom: 20px;
+    text-align: center;
+}
+
+.vigilante-self-strip--critical {
+    border-color: #d63638;
+}
+
+.vigilante-self-strip--warning {
+    border-color: #dba617;
+}
+
+.vigilante-self-strip .dashicons {
+    color: #50575e;
+}
+
+.vigilante-self-strip--critical .dashicons {
+    color: #d63638;
+}
+
+.vigilante-self-strip--warning .dashicons {
+    color: #996800;
+}
+
+.vigilante-self-strip--ok .dashicons {
+    color: #00a32a;
+}
+
+.vigilante-self-strip-state {
+    color: #1d2327;
+}
+
+.vigilante-self-strip--critical .vigilante-self-strip-state {
+    color: #d63638;
+    font-weight: 600;
+}
+
+.vigilante-self-strip--warning .vigilante-self-strip-state {
+    color: #996800;
+    font-weight: 600;
+}
+
+.vigilante-self-strip-count {
+    color: #646970;
+}
+
+.vigilante-self-notice .dashicons {
+    vertical-align: text-bottom;
+}
+
+.vigilante-analyzer-capped {
+    margin: 0 0 12px;
+    padding: 10px 14px;
+    border-left: 4px solid #d63638;
+    border-radius: 3px;
+    background: #fcf0f1;
+}
+
+.vigilante-analyzer-capped .dashicons {
+    color: #d63638;
+    vertical-align: text-bottom;
+}
+
+/* Notice: what happened on one line, the explanation on another, the actions at
+   the end. All of it inline was a wall nobody reads at a glance. */
+/* Two lines and not one pixel more than they need: a notice that takes a
+   quarter of the screen is a notice that pushes the page down every time. */
+.vigilante-self-notice {
+    padding: 6px 12px;
+}
+
+.vigilante-self-notice p {
+    margin: 3px 0;
+    line-height: 1.5;
+}
+
+.vigilante-self-notice-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+}
+
+.vigilante-self-notice-title .dashicons {
+    font-size: 17px;
+    width: 17px;
+    height: 17px;
+}
+
+.vigilante-self-notice-text {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    max-width: 75em;
+    color: #3c434a;
+}
+
+/*
+ * On the Vigilant screens the notice lands inside the header row, where
+ * WordPress drops it after the first h1. It goes after the search box and
+ * takes the space that is left, in two lines: what happened, and the
+ * explanation with its button.
+ */
+.vigilante-header-row .vigilante-page-title {
+    order: 1;
+}
+
+.vigilante-header-row .vigilante-search-wrapper {
+    order: 2;
+}
+
+.vigilante-header-row .vigilante-self-notice {
+    order: 3;
+    /* Only as wide as what it says: a notice is block level and would take the
+       rest of the row, which on a wide screen is a band of colour with a line
+       of text lost in it. Outside the Vigilant screens it keeps the full width
+       of any WordPress notice, because there it is the alarm. */
+    flex: 0 1 auto;
+    max-width: 100%;
+    margin: 0;
+}
+
+/* The submenu counter of File Integrity: the core bubble is small and low on
+   contrast down there, and a counter nobody can read is a counter that is not
+   there. */
+#adminmenu .toplevel_page_vigilante .wp-submenu .awaiting-mod,
+#adminmenu .toplevel_page_vigilante .wp-submenu .update-plugins {
+    background: #d63638;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 18px;
+    min-width: 18px;
+    padding: 0 6px;
+    border-radius: 9px;
+    margin-left: 6px;
+}
+
+#adminmenu .toplevel_page_vigilante .wp-submenu .update-plugins.vigilante-badge-warning {
+    background: #dba617;
+    color: #1d2327;
+}
+
+#adminmenu .toplevel_page_vigilante .wp-submenu .awaiting-mod .pending-count,
+#adminmenu .toplevel_page_vigilante .wp-submenu .update-plugins .pending-count {
+    background: transparent;
+    color: inherit;
+    font-size: inherit;
+    font-weight: inherit;
+    padding: 0;
+}
