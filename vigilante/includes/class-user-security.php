@@ -285,7 +285,9 @@ class Vigilante_User_Security {
      */
     private function is_insecure_username( $username ) {
         $username = strtolower( trim( $username ) );
-        $insecure_usernames = $this->options['insecure_usernames'] ?? array();
+        // Vigilante_Settings::list_or_shipped(): an empty list of a setting with
+        // no field on screen is a leftover, not a choice. See its docblock.
+        $insecure_usernames = $this->get_insecure_usernames();
 
         return in_array( $username, array_map( 'strtolower', $insecure_usernames ), true );
     }
@@ -989,7 +991,12 @@ class Vigilante_User_Security {
      * @return array
      */
     public function get_insecure_usernames() {
-        return $this->options['insecure_usernames'] ?? array();
+        // The single reader of this list, so what blocks and what the screen
+        // reports can never disagree.
+        return Vigilante_Settings::list_or_shipped(
+            $this->options['insecure_usernames'] ?? array(),
+            array( 'user_security', 'insecure_usernames' )
+        );
     }
 
     /**
@@ -1342,7 +1349,12 @@ class Vigilante_User_Security {
         }
 
         $settings = $this->options['registration_approval'] ?? array();
-        $affected_roles = $settings['affected_roles'] ?? array( 'subscriber' );
+        // Vigilante_Settings::list_or_shipped(): an empty list of a setting with
+        // no field on screen is a leftover, not a choice. See its docblock.
+        $affected_roles = Vigilante_Settings::list_or_shipped(
+            $settings['affected_roles'] ?? array(),
+            array( 'user_security', 'registration_approval', 'affected_roles' )
+        );
 
         // Check if user role requires approval
         $user_roles = $user->roles;
@@ -3233,7 +3245,7 @@ class Vigilante_User_Security {
         // Check if this user's role requires approval
         $needs_approval = false;
         if ( ! empty( $registration_approval['enabled'] ) ) {
-            $affected_roles = $registration_approval['affected_roles'] ?? array( 'subscriber' );
+            $affected_roles = Vigilante_Settings::list_or_shipped( $registration_approval['affected_roles'] ?? array(), array( 'user_security', 'registration_approval', 'affected_roles' ) );
             $needs_approval = ! empty( array_intersect( $user->roles, $affected_roles ) );
         }
 
@@ -3347,7 +3359,7 @@ class Vigilante_User_Security {
             return false;
         }
 
-        $affected_roles = $registration_approval['affected_roles'] ?? array( 'subscriber' );
+        $affected_roles = Vigilante_Settings::list_or_shipped( $registration_approval['affected_roles'] ?? array(), array( 'user_security', 'registration_approval', 'affected_roles' ) );
         return ! empty( array_intersect( $user->roles, $affected_roles ) );
     }
 

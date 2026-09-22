@@ -1075,9 +1075,24 @@ class Vigilante_Firewall {
         }
 
         $method = strtoupper( $this->request_data['method'] );
-        $allowed_methods = isset( $this->options['allowed_http_methods'] ) 
-            ? $this->options['allowed_http_methods'] 
-            : array( 'GET', 'POST', 'HEAD', 'OPTIONS', 'PUT', 'PATCH', 'DELETE' );
+        /*
+         * An empty list here means "nothing was stored", not "the site wants
+         * none". These four lists have no field on any screen, so nobody can
+         * empty them on purpose, and every version up to 3.0.0 blanked them in
+         * the database whenever their tab was saved. Reading the settings used
+         * to hide it by merging the shipped values over the top; since 3.0.1 a
+         * stored empty list is respected, which is what makes unticking every
+         * role work. The migration in vigilante.php removes the blanked keys
+         * once, and this is the second line of defence: a list that arrives
+         * empty by any other route falls back to what ships, instead of
+         * blocking every HTTP method, hiding a protection that the screen says
+         * is on, or cutting the public REST API. The list itself lives in
+         * get_default_options(), read through list_or_shipped().
+         */
+        $allowed_methods = Vigilante_Settings::list_or_shipped(
+            $this->options['allowed_http_methods'] ?? array(),
+            array( 'firewall', 'allowed_http_methods' )
+        );
         $allowed = array_map( 'strtoupper', $allowed_methods );
 
         if ( ! in_array( $method, $allowed, true ) ) {

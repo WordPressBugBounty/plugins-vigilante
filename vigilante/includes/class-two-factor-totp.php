@@ -1582,10 +1582,11 @@ class Vigilante_Two_Factor_TOTP {
     }
 
     /**
-     * Get TOTP setup data for a new setup (generates secret and QR)
+     * Get TOTP setup data for a new setup
      *
      * @param int $user_id User ID.
-     * @return array Setup data with secret, uri, and qr_svg.
+     * @return array Setup data with secret and uri. The QR code is drawn in the
+     *               browser from the uri, and always was.
      */
     public function get_setup_data( $user_id ) {
         $user = get_user_by( 'ID', $user_id );

@@ -3,7 +3,7 @@
  * Plugin Name: Vigilant - 100% Free Security Suite: Firewall, 2FA, Login, Headers, Scanner…
  * Plugin URI: https://servicios.ayudawp.com
  * Description: Complete security solution for WordPress. Firewall, 2FA, security headers, login protection, file integrity monitoring, activity logging and more.
- * Version: 3.0.0
+ * Version: 3.0.1
  * Author: Fernando Tellado
  * Author URI: https://ayudawp.com
  * Text Domain: vigilante
@@ -24,7 +24,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Plugin constants
  */
-define( 'VIGILANTE_VERSION', '3.0.0' );
+define( 'VIGILANTE_VERSION', '3.0.1' );
 define( 'VIGILANTE_PLUGIN_FILE', __FILE__ );
 define( 'VIGILANTE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'VIGILANTE_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -283,6 +283,63 @@ final class Vigilante_Main {
         // that earlier versions kept in the options table, on this site and, on
         // a network, on every site of it.
         Vigilante_Backup_Manager::maybe_purge_stored_copies();
+
+        /*
+         * One-time (3.0.1): put back the lists that every version up to 3.0.0
+         * blanked without being asked.
+         *
+         * Saving any tab wrote array() over every list of that section whose key
+         * the submitted form did not carry, and four of those lists have no
+         * field on any screen, so their key could never be carried. Pressing
+         * Save on the Firewall tab emptied allowed_http_methods; pressing it on
+         * Users emptied insecure_usernames and the roles of registration
+         * approval. Nothing showed, because reading the settings merged the
+         * shipped values over the top of whatever was stored.
+         *
+         * 3.0.1 stops doing that: an empty stored list now means empty, which is
+         * what makes unticking every role work. On a site that had been saved,
+         * an empty allowed_http_methods would make the firewall answer 403 to
+         * every method, the front page included.
+         *
+         * So the key is removed, not filled in: with no key the setting takes
+         * its shipped value again, which is exactly what it was worth before,
+         * and it follows the shipped value if that ever changes. Only these
+         * four, and only when empty. Every other list has a field on screen, so
+         * an empty one was emptied by somebody who meant it, and it is left
+         * alone. Runs once per site, tracked by an option and not a transient.
+         */
+        if ( ! get_option( 'vigilante_blank_lists_restored' ) ) {
+            $vig_stored  = get_option( Vigilante_Settings::OPTION_NAME, array() );
+            $vig_changed = false;
+
+            if ( is_array( $vig_stored ) ) {
+                $vig_blanked = array(
+                    array( 'firewall', 'allowed_http_methods' ),
+                    array( 'user_security', 'insecure_usernames' ),
+                    array( 'rest_api_security', 'allowed_public_endpoints' ),
+                    array( 'user_security', 'registration_approval', 'affected_roles' ),
+                );
+
+                foreach ( $vig_blanked as $vig_path ) {
+                    if ( 2 === count( $vig_path ) ) {
+                        if ( isset( $vig_stored[ $vig_path[0] ][ $vig_path[1] ] ) && array() === $vig_stored[ $vig_path[0] ][ $vig_path[1] ] ) {
+                            unset( $vig_stored[ $vig_path[0] ][ $vig_path[1] ] );
+                            $vig_changed = true;
+                        }
+                    } elseif ( isset( $vig_stored[ $vig_path[0] ][ $vig_path[1] ][ $vig_path[2] ] ) && array() === $vig_stored[ $vig_path[0] ][ $vig_path[1] ][ $vig_path[2] ] ) {
+                        unset( $vig_stored[ $vig_path[0] ][ $vig_path[1] ][ $vig_path[2] ] );
+                        $vig_changed = true;
+                    }
+                }
+            }
+
+            if ( $vig_changed ) {
+                update_option( Vigilante_Settings::OPTION_NAME, $vig_stored );
+                $this->settings->clear_cache();
+            }
+
+            update_option( 'vigilante_blank_lists_restored', 1, false );
+        }
 
         // One-time migration (2.9.0): add '.css' to File Integrity's excluded
         // extensions on existing installs. Stylesheets are rewritten so often by

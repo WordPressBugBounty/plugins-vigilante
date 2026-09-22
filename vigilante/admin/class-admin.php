@@ -4438,6 +4438,7 @@ class Vigilante_Admin {
                     <th scope="row"><?php esc_html_e( 'Enforce for roles', 'vigilante' ); ?></th>
                     <td>
                         <div class="vigilante-2fa-roles">
+                            <?php $this->list_sentinel( 'login_security[two_factor][enforced_roles]' ); ?>
                             <?php foreach ( $all_roles as $role_slug => $role_data ) : 
                                 $user_count = count( get_users( array( 'role' => $role_slug, 'fields' => 'ID' ) ) );
                             ?>
@@ -4467,6 +4468,7 @@ class Vigilante_Admin {
                                 <div class="vigilante-2fa-search-results"></div>
                             </div>
                             <div class="vigilante-2fa-excluded-users">
+                                <?php $this->list_sentinel( 'login_security[two_factor][excluded_users]' ); ?>
                                 <?php 
                                 foreach ( $excluded as $user_id ) :
                                     $user = get_user_by( 'ID', $user_id );
@@ -5124,6 +5126,7 @@ class Vigilante_Admin {
                     <tr>
                         <th scope="row"><?php esc_html_e( 'Apply Password Rules To', 'vigilante' ); ?></th>
                         <td>
+                            <?php $this->list_sentinel( 'user_security[password_policy][affected_roles]' ); ?>
                             <?php foreach ( wp_roles()->get_names() as $role_slug => $role_name ) : ?>
                             <label style="display:block;margin-bottom:5px;">
                                 <input type="checkbox" name="user_security[password_policy][affected_roles][]" value="<?php echo esc_attr( $role_slug ); ?>" <?php checked( empty( $pw_policy_roles ) || in_array( $role_slug, $pw_policy_roles, true ) ); ?>>
@@ -5365,6 +5368,7 @@ class Vigilante_Admin {
                             <?php
                             $affected_roles = $password_exp['affected_roles'] ?? array( 'administrator', 'editor' );
                             $all_roles = wp_roles()->get_names();
+                            $this->list_sentinel( 'user_security[password_expiration][affected_roles]' );
                             foreach ( $all_roles as $role_slug => $role_name ) :
                             ?>
                             <label style="display: block; margin-bottom: 5px;">
@@ -5388,6 +5392,7 @@ class Vigilante_Admin {
                                     <div class="vigilante-pwexp-search-results"></div>
                                 </div>
                                 <div class="vigilante-pwexp-excluded-users">
+                                    <?php $this->list_sentinel( 'user_security[password_expiration][excluded_users]' ); ?>
                                     <?php
                                     foreach ( $pwexp_excluded as $pwexp_excluded_id ) :
                                         $excluded_user = get_user_by( 'ID', $pwexp_excluded_id );
@@ -8191,14 +8196,49 @@ class Vigilante_Admin {
      * @return array Processed data.
      */
     private function process_section_data( $submitted_data, $defaults, $current, $section_name = '' ) {
-        // Start with defaults, then merge current saved values
+        // Start with defaults, then merge current saved values. Lists are put
+        // back whole afterwards: array_replace_recursive() merges them index by
+        // index, so a saved list shorter than the default kept the default's
+        // tail (see below, and Vigilante_Settings::array_merge_deep()).
         $result = array_replace_recursive( $defaults, $current );
-        
+        $result = $this->restore_lists( $result, $current );
+
         // Process each submitted value
         foreach ( $submitted_data as $key => $value ) {
             $key = sanitize_key( $key );
-            
-            if ( is_array( $value ) ) {
+
+            if ( is_array( $value ) && $this->is_list_field( $key, $value, $defaults, $current ) ) {
+                /*
+                 * A list of values, not a group of settings: the roles of a
+                 * checkbox group, the excluded user ids. What the form sent IS
+                 * the list, so it replaces the stored one outright.
+                 *
+                 * Until 3.0.1 this went through the recursion below, which
+                 * writes position by position and left every stored entry the
+                 * new list was too short to overwrite. Unchecking Editor in
+                 * "Enforce for roles" saved administrator over position 0 and
+                 * kept editor in position 1, so the box came back ticked
+                 * (reported on the support forum for 3.0.0, and the same bug
+                 * merge_preset() was fixed for in 2.9.8).
+                 *
+                 * Keys are dropped on purpose: a list is data, so anything the
+                 * request tried to name is not carried over. The empty string
+                 * is dropped too, which is what the hidden field that marks an
+                 * empty group sends.
+                 */
+                $list = array();
+                foreach ( $value as $entry ) {
+                    if ( ! is_scalar( $entry ) ) {
+                        continue;
+                    }
+                    $entry = sanitize_text_field( (string) $entry );
+                    if ( '' === $entry ) {
+                        continue;
+                    }
+                    $list[] = $entry;
+                }
+                $result[ $key ] = $list;
+            } elseif ( is_array( $value ) ) {
                 // Nested array (like rate_limiting)
                 $nested_defaults = isset( $defaults[ $key ] ) && is_array( $defaults[ $key ] ) ? $defaults[ $key ] : array();
                 $nested_current = isset( $result[ $key ] ) && is_array( $result[ $key ] ) ? $result[ $key ] : array();
@@ -8286,8 +8326,24 @@ class Vigilante_Admin {
                 }
 
                 if ( $is_value_list ) {
-                    // All items removed - reset to empty array
-                    $result[ $key ] = array();
+                    /*
+                     * A list whose key did not travel is left as it was. Until
+                     * 3.0.1 it was blanked here, which read "the user unticked
+                     * everything" into something the form never asked about:
+                     * saving the Firewall tab blanked allowed_http_methods,
+                     * which has no field on any screen, and saving Users blanked
+                     * insecure_usernames. Both survived only because reading the
+                     * option put the defaults back on top, and that is exactly
+                     * the merge being removed in this release: with lists
+                     * replaced whole, blanking here would have left a site
+                     * answering 403 to every HTTP method.
+                     *
+                     * Emptying a group is still possible, and is now said out
+                     * loud: each checkbox group prints a hidden field with an
+                     * empty value, so an empty group arrives as an empty list
+                     * instead of as silence. See list_sentinel().
+                     */
+                    continue;
                 } else {
                     // Nested settings group - handle boolean children
                     foreach ( $default_value as $nested_key => $nested_default ) {
@@ -8305,6 +8361,104 @@ class Vigilante_Admin {
         }
         
         return $result;
+    }
+
+    /**
+     * Whether a submitted value is a list of values rather than a group of settings
+     *
+     * The difference decides whether what arrived replaces the stored value or
+     * is merged into it key by key, so it is answered from what the setting is
+     * (its default, or what is stored today), not from the shape of the
+     * request. A request that sends named keys where a list belongs gets them
+     * dropped, which is one way this is narrower than what it replaces.
+     *
+     * @since 3.0.1
+     *
+     * @param string $key      Setting key, already through sanitize_key().
+     * @param array  $value    Value as submitted.
+     * @param array  $defaults Defaults of the section being processed.
+     * @param array  $current  Stored values of the section being processed.
+     * @return bool
+     */
+    private function is_list_field( $key, $value, $defaults, $current ) {
+        $default_known = array_key_exists( $key, $defaults ) && is_array( $defaults[ $key ] );
+
+        // The default has the first and the last word, the same rule that
+        // array_merge_deep() and restore_lists() follow. Letting the stored
+        // value decide, as this did until the fourth cross review of 3.0.1,
+        // disagrees with them where it matters: an option corrupted into
+        // two_factor = array( 'a', 'b' ) would have been treated as a list and
+        // saving the tab would have replaced the whole group of settings with
+        // the two values that arrived.
+        if ( $default_known && array() !== $defaults[ $key ] ) {
+            return Vigilante_Settings::is_list( $defaults[ $key ] );
+        }
+
+        // Nothing declares it either way (an empty default, or a key with no
+        // default at all), so what is stored, and then what was submitted, is
+        // all there is to go on.
+        if ( isset( $current[ $key ] ) && is_array( $current[ $key ] ) && array() !== $current[ $key ] && Vigilante_Settings::is_list( $current[ $key ] ) ) {
+            return true;
+        }
+
+        return Vigilante_Settings::is_list( $value );
+    }
+
+    /**
+     * Put stored lists back after array_replace_recursive()
+     *
+     * array_replace_recursive() merges a list by position, so a stored list
+     * shorter than the default comes out with the default's tail attached:
+     * ['administrator'] over ['administrator','editor'] gives both back. Every
+     * list that is stored is therefore restored whole before anything else is
+     * processed, and only associative arrays are walked into.
+     *
+     * @since 3.0.1
+     *
+     * @param array $result  Defaults with the stored values merged over them.
+     * @param array $current Stored values.
+     * @return array
+     */
+    private function restore_lists( $result, $current ) {
+        if ( ! is_array( $current ) ) {
+            return $result;
+        }
+
+        foreach ( $current as $key => $value ) {
+            if ( ! is_array( $value ) || ! isset( $result[ $key ] ) || ! is_array( $result[ $key ] ) ) {
+                continue;
+            }
+
+            // Decided by what is in $result, which comes from the defaults, and
+            // never by the stored value: array() is a list by any definition, so
+            // a section stored empty would have replaced a whole group of
+            // settings with nothing. Same reasoning as in array_merge_deep().
+            if ( Vigilante_Settings::is_list( $result[ $key ] ) ) {
+                $result[ $key ] = $value;
+                continue;
+            }
+
+            $result[ $key ] = $this->restore_lists( $result[ $key ], $value );
+        }
+
+        return $result;
+    }
+
+    /**
+     * Print the hidden field that lets a checkbox group arrive empty
+     *
+     * A checkbox group sends nothing at all when every box is unticked, which
+     * is indistinguishable from a form that never had that field. Since 3.0.1
+     * the save path leaves an absent list alone, so the difference has to be
+     * stated: this empty entry always travels, and the save path drops empty
+     * strings, so an untouched group arrives as an empty list.
+     *
+     * @since 3.0.1
+     *
+     * @param string $name Field name without the trailing [].
+     */
+    private function list_sentinel( $name ) {
+        printf( '<input type="hidden" name="%s[]" value="">', esc_attr( $name ) );
     }
 
     /**

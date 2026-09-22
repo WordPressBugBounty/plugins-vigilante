@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.0.0
+Stable tag: 3.0.1
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -441,6 +441,19 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 3.0.1 =
+Fixes the role lists of two factor, password rules and password expiry, which came back ticked after saving, and stops a saved tab from clearing lists that have no field on screen.
+
+* Improved: SECURITY.md describes the self-protection alert and the File Integrity block as they work now, and two code comments that still described the previous behaviour.
+* Fix: unticking a role in Enforce for roles, in Apply Password Rules To or in Affected Roles of password expiration is saved and stays unticked. Lists of values were merged position by position, both when saving and when reading the settings, so a list shorter than the one shipped came back with the tail of that one attached and a role could not be removed at all.
+* Fix: a literal 0 is no longer written into those lists when the first role of a group is unticked.
+* Fix: unticking every role in a group is now sent as an empty list instead of as nothing at all, so it can be told apart from a form that never carried that field.
+* Fix: saving a tab no longer empties a list that has no field on that screen, such as the allowed HTTP methods of the firewall or the list of insecure usernames. Those values survived only because reading the settings put the shipped ones back on top.
+* Fix: self-protection adopts a manifest that WordPress.org confirms for the installed version, instead of reporting it as replaced for good. A site that had installed a test copy of a version and then the published one stayed critical, and the repair could not clear it, because it reinstalls those same official files.
+* Fix: the lists that had no field on any screen are put back on update. Saving a tab emptied them in the database, and until now that was hidden by the settings falling back to the shipped values when read. A site that had saved the Firewall tab would otherwise have started answering 403 to every HTTP method. The four are the allowed HTTP methods, the insecure usernames, the roles of registration approval and the public REST endpoints, and each one goes back to its shipped value, so a list you shortened on purpose is untouched.
+* Fix: those four settings also fall back to their shipped value when the stored list is empty, wherever the empty list came from. None of them can be emptied from any screen, so an empty one is a leftover, and it used to mean block every method, allow every registration through while the switch says otherwise, or cut the public REST API.
+* Fix: adopting a manifest that WordPress.org confirms is logged for what it is, instead of as a version change that did not happen.
+
 = 3.0.0 =
 Vigilant now verifies its own files against WordPress.org, a shipped SHA-256 manifest and a database fingerprint, checks itself after every update and restores its own scheduled tasks. The Security Check score may change slightly: a new check was added.
 
@@ -460,8 +473,8 @@ For older changelog entries, please check the [changelog.txt](https://plugins.sv
 
 == Upgrade Notice ==
 
-= 3.0.0 =
-Vigilant now verifies its own files against WordPress.org, a shipped SHA-256 manifest and a database fingerprint, checks itself after every update and restores its own scheduled tasks. The Security Check score may change slightly: a new check was added.
+= 3.0.1 =
+Fixes the role lists of two factor, password rules and password expiry, which came back ticked after saving, and stops a saved tab from clearing lists that have no field on screen.
 
 == Support ==
 

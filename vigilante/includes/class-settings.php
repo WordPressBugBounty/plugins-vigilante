@@ -559,21 +559,47 @@ class Vigilante_Settings {
     /**
      * Deep merge arrays
      *
+     * Associative arrays are merged key by key, because that is what lets a
+     * saved option keep working when a release adds a setting. Lists are
+     * replaced whole, and that part is not cosmetic: merging a list key by key
+     * means index by index, so a stored list shorter than the default came back
+     * with the default's tail glued to it. Saving "administrator" alone into
+     * enforced_roles (default administrator, editor) was read back as
+     * administrator, editor, and unchecking every role was read back as the two
+     * defaults, so three role pickers could not be narrowed at all. It is the
+     * same bug merge_preset() was given its own merge for in 2.9.8; the fix
+     * never reached this one or the one in the admin save.
+     *
+     * An empty saved list therefore means empty, not "fall back to the default".
+     * That is the honest reading of what was saved, and the save path is what
+     * makes sure a list only becomes empty when somebody emptied it: a list the
+     * form did not carry is left alone rather than blanked.
+     *
+     * Which of the two happens is decided by the DEFAULT, never by what was
+     * saved. Deciding by what was saved looks equivalent and is not: an empty
+     * array is a list by any definition, so a section stored as array() would
+     * have replaced a whole group of settings instead of merging into it, and
+     * every key of that group would have come back missing. Found by the third
+     * cross review of this release, measured on rest_api_security (7 keys to 0)
+     * and on registration_approval (4 to 0, including its enabled flag).
+     *
+     * @since 3.0.1 Lists replace instead of merging index by index.
+     *
      * @param array $defaults Default values.
      * @param array $saved    Saved values.
      * @return array Merged array.
      */
     private function array_merge_deep( $defaults, $saved ) {
         $result = $defaults;
-        
+
         foreach ( $saved as $key => $value ) {
-            if ( is_array( $value ) && isset( $result[ $key ] ) && is_array( $result[ $key ] ) ) {
+            if ( is_array( $value ) && isset( $result[ $key ] ) && is_array( $result[ $key ] ) && ! self::is_list( $result[ $key ] ) ) {
                 $result[ $key ] = $this->array_merge_deep( $result[ $key ], $value );
             } else {
                 $result[ $key ] = $value;
             }
         }
-        
+
         return $result;
     }
 
@@ -1408,16 +1434,67 @@ class Vigilante_Settings {
     }
 
     /**
+     * A stored list, or the shipped one when it arrives empty
+     *
+     * For the four lists that have NO field on any screen: the allowed HTTP
+     * methods, the insecure usernames, the public REST endpoints and the roles
+     * of registration approval. Nobody can empty those from the interface, so
+     * an empty one is a leftover, and every version up to 3.0.0 produced them:
+     * saving any tab wrote array() over every list of that section whose key the
+     * form did not carry, which for these four was always. Reading the settings
+     * hid it by merging the shipped values on top, and 3.0.1 stops doing that,
+     * because a stored empty list is what makes unticking every role work.
+     *
+     * The migration in vigilante.php removes those keys once. This is the line
+     * of defence for every other route, including Under Attack, which
+     * photographs the raw option when it is switched on and puts it back whole
+     * when it expires, after the migration has already marked itself done.
+     *
+     * It goes through every reader of those four lists, the ones that enforce
+     * and the ones that only report, because a screen that says "no insecure
+     * user" while the check is blocking them is its own kind of wrong. The
+     * shipped value is read from get_default_options() rather than written out
+     * again here: a second copy of a list drifts from the first.
+     *
+     * @since 3.0.1
+     *
+     * @param mixed    $value Stored value, as the caller already has it.
+     * @param string[] $path  Path of the setting in the options array.
+     * @return array
+     */
+    public static function list_or_shipped( $value, $path ) {
+        if ( is_array( $value ) && array() !== $value ) {
+            return $value;
+        }
+
+        $instance = new self();
+        $shipped  = $instance->get_default_options();
+
+        foreach ( (array) $path as $key ) {
+            if ( ! is_array( $shipped ) || ! array_key_exists( $key, $shipped ) ) {
+                return array();
+            }
+            $shipped = $shipped[ $key ];
+        }
+
+        return is_array( $shipped ) ? $shipped : array();
+    }
+
+    /**
      * Whether an array is a plain list (0..n-1 keys)
      *
      * array_is_list() is PHP 8.1 and this plugin supports 7.4.
      *
      * @since 2.9.8
      *
+     * Public since 3.0.1 because the admin save path needs the same answer: the
+     * two places that used to merge lists index by index have to agree on what
+     * a list is, or they disagree on a different subset of the settings.
+     *
      * @param array $value Array to inspect.
      * @return bool
      */
-    private static function is_list( $value ) {
+    public static function is_list( $value ) {
         if ( array() === $value ) {
             return true;
         }

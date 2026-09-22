@@ -17,8 +17,9 @@
  *
  * What this deliberately does NOT cover: vulnerabilities in Vigilant's own
  * code (this detects tampering, not bugs), and an attacker with database
- * write access, who can switch the toggle off or blank the fingerprint, as
- * with any security plugin. Both are documented in SECURITY.md.
+ * write access, who can blank the fingerprint, as with any security plugin.
+ * There is no toggle to switch off: only the filter of is_on(), and using it
+ * is reported as critical. Both are documented in SECURITY.md.
  *
  * Entry points:
  *  - File Integrity scan (first block of run_scan(), exempt from the time
@@ -887,7 +888,8 @@ class Vigilante_Self_Integrity {
      *  - disk == manifest but != wp.org          -> distribution_mismatch (warning)
      *  - on disk, not in manifest                -> self_extra (critical if PHP or a link)
      * Anchor level:
-     *  - manifest hash != A3, same version       -> manifest_replaced (critical)
+     *  - manifest hash != A3, same version       -> rebaseline if wp.org confirms the manifest;
+     *                                               manifest_replaced (critical) otherwise
      *  - manifest hash != A3, version changed    -> rebaseline if the upgrader did it or wp.org confirms;
      *                                               manifest_replaced if wp.org contradicts it;
      *                                               manifest_unverified (sticky warning) otherwise;
@@ -917,6 +919,8 @@ class Vigilante_Self_Integrity {
                 'fingerprint' => false,
             ),
             'rebaselined'   => false,
+            // Same version, manifest adopted because wp.org confirms it (3.0.1).
+            'manifest_adopted' => false,
             'downgraded'    => false,
         );
 
@@ -1015,13 +1019,33 @@ class Vigilante_Self_Integrity {
                 // bulk update that skipped it, an install that failed before
                 // copying), so it is not proof that WordPress replaced the files.
                 if ( $stored_version === $disk_version ) {
-                    // Same version, different manifest: swapped without an update.
-                    $findings[] = $this->finding(
-                        'manifest_replaced',
-                        self::MANIFEST_FILE,
-                        'critical',
-                        __( 'MANIFEST.sha256 was replaced without a plugin update. An attacker regenerating the manifest to hide file changes would look exactly like this.', 'vigilante' )
-                    );
+                    if ( $wporg_ok && $this->manifest_consistent_with_wporg( $manifest, $wporg ) ) {
+                        // The manifest on disk IS the one WordPress.org
+                        // distributes for this version, so whatever was anchored
+                        // before was not. That happens to a site that had a test
+                        // zip of a version and then installed the published one:
+                        // until 3.0.1 it stayed critical for good, because the
+                        // repair reinstalls those same official files and lands
+                        // here again (B45 of the roadmap, reproduced on 18 Sep
+                        // 2026 with a seeded anchor).
+                        //
+                        // Adopting it is the same argument the version-change
+                        // branch below already makes: an attacker who edits
+                        // files and regenerates the manifest cannot also make
+                        // WordPress.org's published checksums agree with it,
+                        // and that agreement is what is being checked here,
+                        // file by file and in both directions.
+                        $result['rebaselined']      = true;
+                        $result['manifest_adopted'] = true;
+                    } else {
+                        // Same version, different manifest: swapped without an update.
+                        $findings[] = $this->finding(
+                            'manifest_replaced',
+                            self::MANIFEST_FILE,
+                            'critical',
+                            __( 'MANIFEST.sha256 was replaced without a plugin update. An attacker regenerating the manifest to hide file changes would look exactly like this.', 'vigilante' )
+                        );
+                    }
                 } else {
                     // Version changed: the WordPress updater, a manual/FTP
                     // update, or an attacker who bumped the Version: header to
@@ -1199,7 +1223,24 @@ class Vigilante_Self_Integrity {
         // --- Rebaseline A3 ------------------------------------------------
         if ( $result['rebaselined'] ) {
             $this->capture_fingerprint( 'upgrader' === $context ? 'upgrader' : 'version_change' );
-            if ( 'upgrader' !== $context ) {
+            if ( 'upgrader' !== $context && $result['manifest_adopted'] ) {
+                // Same version, another manifest, and wp.org confirms the one on
+                // disk. Saying "version change" here would be false, and a log
+                // line that consoles with something untrue is worse than no line.
+                $this->log(
+                    'self_rebaselined',
+                    sprintf(
+                        /* translators: %s: plugin version */
+                        __( 'Vigilant self-protection: MANIFEST.sha256 of version %s adopted as the reference, confirmed by WordPress.org; baseline refreshed.', 'vigilante' ),
+                        $disk_version
+                    ),
+                    array(
+                        'previous_version' => $stored_version,
+                        'new_version'      => $disk_version,
+                    ),
+                    'info'
+                );
+            } elseif ( 'upgrader' !== $context ) {
                 $this->log(
                     'self_rebaselined',
                     $result['downgraded']
@@ -1955,9 +1996,9 @@ class Vigilante_Self_Integrity {
      * Deliberately NOT gated by the File Integrity instant_alert toggle
      * (unlike Vigilante_Plugin_Status): a tamper of the guardian itself is
      * the product's maximum alarm. There is no setting that silences it; only
-     * the filter of is_on(), which SECURITY.md documents. Findings from a
-     * File Integrity scan go in the scan email instead, which follows its
-     * notification setting.
+     * the filter of is_on(), which SECURITY.md documents. Findings raised by a
+     * File Integrity scan come through here too: switching off the report about
+     * changed files must not switch off the alarm about the plugin itself.
      *
      * Sent only from the site that owns the installation's shared files: the
      * plugin files are the same for every site and every network of an

@@ -168,7 +168,12 @@ class Vigilante_Rest_Api_Security {
             return false;
         }
 
-        $allowed_public = $this->options['allowed_public_endpoints'] ?? array();
+        // Vigilante_Settings::list_or_shipped(): an empty list of a setting with
+        // no field on screen is a leftover, not a choice. See its docblock.
+        $allowed_public = Vigilante_Settings::list_or_shipped(
+            $this->options['allowed_public_endpoints'] ?? array(),
+            array( 'rest_api_security', 'allowed_public_endpoints' )
+        );
 
         foreach ( $allowed_public as $endpoint ) {
             if ( strpos( $current_route, $endpoint ) === 0 ) {
@@ -343,7 +348,9 @@ class Vigilante_Rest_Api_Security {
             'user_enum_blocked'    => ! empty( $this->options['block_user_enumeration'] ),
             'jsonp_disabled'       => ! empty( $this->options['disable_jsonp'] ),
             'protected_endpoints'  => count( $this->options['protected_endpoints'] ?? array() ),
-            'allowed_endpoints'    => count( $this->options['allowed_public_endpoints'] ?? array() ),
+            // Counted from the same value the check uses, or the screen would
+            // report zero while five endpoints are exempt.
+            'allowed_endpoints'    => count( Vigilante_Settings::list_or_shipped( $this->options['allowed_public_endpoints'] ?? array(), array( 'rest_api_security', 'allowed_public_endpoints' ) ) ),
         );
     }
 

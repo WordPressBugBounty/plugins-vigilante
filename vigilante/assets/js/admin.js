@@ -379,14 +379,26 @@
 
         /**
          * Serialize form including unchecked checkboxes
+         *
+         * A single checkbox that is unticked sends nothing, so it is sent as 0
+         * or the saved value would stay on. A GROUP of checkboxes that share one
+         * name[] is a different thing: the ticked ones are the whole value, and
+         * a 0 is not one of them. Adding it wrote a literal "0" into the list of
+         * roles, which is what sites saving 3.0.0 have in enforced_roles, and
+         * because names were de-duplicated it only happened when the FIRST box
+         * of the group was unticked, which is why it looked random. The empty
+         * group now travels through the hidden field the group prints.
          */
         serializeFormWithCheckboxes: function($form) {
             var data = $form.serializeArray();
             var checkboxNames = [];
-            
+
             // Find all checkboxes and add unchecked ones with value 0
             $form.find('input[type="checkbox"]').each(function() {
                 var name = $(this).attr('name');
+                if (name && name.slice(-2) === '[]') {
+                    return;
+                }
                 if (name && checkboxNames.indexOf(name) === -1) {
                     checkboxNames.push(name);
                     if (!$(this).is(':checked')) {
@@ -394,7 +406,7 @@
                     }
                 }
             });
-            
+
             // Convert to query string
             return $.param(data);
         },
