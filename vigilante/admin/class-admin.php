@@ -1009,6 +1009,26 @@ class Vigilante_Admin {
     }
 
     /**
+     * Whether XML-RPC is blocked, whole or its pingback methods
+     *
+     * Both levels have to say so: the three-way setting under WP Hardening, read
+     * through the module's own resolver, and the WP Hardening module that
+     * enforces it. Until 3.0.2 the Dashboard read login_security[disable_xmlrpc],
+     * the checkbox that moved to WP Hardening in 2.9.7 and is never written any
+     * more, so the score never granted its three points and the recommendation
+     * to disable XML-RPC stayed on for good.
+     *
+     * @since 3.0.2
+     *
+     * @param array $options Plugin options.
+     * @return bool
+     */
+    private function is_xmlrpc_protected( $options ) {
+        return ! empty( $options['modules']['wp_hardening'] )
+            && 'none' !== Vigilante_Comment_Security::resolve_xmlrpc_mode( $this->settings );
+    }
+
+    /**
      * Calculate comprehensive security score (0-100)
      *
      * @param array $options Plugin options.
@@ -1068,8 +1088,8 @@ class Vigilante_Admin {
             if ( isset( $login['max_attempts'] ) && $login['max_attempts'] <= 5 ) {
                 $score += 3;
             }
-            // XML-RPC disabled
-            if ( ! empty( $login['disable_xmlrpc'] ) ) {
+            // XML-RPC blocked, whole or its pingback methods
+            if ( $this->is_xmlrpc_protected( $options ) ) {
                 $score += 3;
             }
             // 2FA enabled
@@ -1311,12 +1331,12 @@ class Vigilante_Admin {
         }
 
         // Low: XML-RPC enabled (only if login security is active)
-        if ( ! empty( $options['modules']['login_security'] ) && empty( $login['disable_xmlrpc'] ) ) {
+        if ( ! empty( $options['modules']['login_security'] ) && ! $this->is_xmlrpc_protected( $options ) ) {
             $recommendations[] = array(
                 'icon'     => 'info',
                 'priority' => 'low',
                 'message'  => __( 'Disable XML-RPC if not needed (reduces attack surface).', 'vigilante' ),
-                'tab'      => 'login',
+                'tab'      => 'wp-hardening',
             );
         }
 
@@ -2704,7 +2724,7 @@ class Vigilante_Admin {
                         <?php esc_html_e( 'Security Check', 'vigilante' ); ?>
                     </h2>
                     <p class="description">
-                        <?php esc_html_e( 'On-demand audit of what an attacker would see right now, plus 13 internal checks impossible from the outside.', 'vigilante' ); ?>
+                        <?php esc_html_e( 'On-demand audit of what an attacker would see right now, plus internal checks impossible from the outside.', 'vigilante' ); ?>
                     </p>
                     <p class="vigilante-analyzer-last-scan" data-role="ran-at">
                         <span class="dashicons dashicons-clock" aria-hidden="true"></span>
@@ -4774,6 +4794,7 @@ class Vigilante_Admin {
                                 <input type="checkbox" name="security_headers[csp][enabled]" value="1" <?php checked( ! empty( $options['csp']['enabled'] ) ); ?>>
                                 <?php esc_html_e( 'Enable Content Security Policy', 'vigilante' ); ?>
                             </label>
+                            <p class="description"><?php esc_html_e( 'The default policy includes upgrade-insecure-requests, which asks browsers to request every http:// resource over https. Vigilant writes it only when the site address starts with https://, because on a site served over http it would stop every stylesheet, script and image from loading. If your site is served over https through a proxy or CDN that terminates TLS, set the site address to https:// in Settings > General; the rules follow the next time this tab is saved or Vigilant is updated.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
                     <tr>
@@ -7795,7 +7816,7 @@ class Vigilante_Admin {
             // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
             $raw_data = wp_unslash( $_POST['data'] );
             parse_str( $raw_data, $data );
-            $data = map_deep( $data, 'sanitize_textarea_field' );
+            $data = $this->sanitize_posted_settings( $data );
         } else {
             $data = array();
         }
@@ -8187,6 +8208,46 @@ class Vigilante_Admin {
     }
 
     /**
+     * Sanitize the settings a tab posted, once the serialized form is parsed
+     *
+     * Every value goes through sanitize_textarea_field() except the lists of
+     * file paths (Vigilante_Settings::path_list_keys()). That one deletes every
+     * %XX octet and, when it finds one, collapses repeated spaces, so an
+     * exclusion for a folder called foto%20x was saved as fotox and excluded
+     * nothing (measured on 1 oct 2026 against 3.0.1). The paths are read as
+     * paths before the generic sanitizer runs and put back after it.
+     *
+     * @since 3.0.2
+     *
+     * @param array $data Parsed form: section => key => value.
+     * @return array
+     */
+    private function sanitize_posted_settings( $data ) {
+        $paths = Vigilante_Settings::take_path_lists( $data );
+        $data  = map_deep( $data, 'sanitize_textarea_field' );
+
+        return Vigilante_Settings::restore_path_lists( $data, $paths );
+    }
+
+    /**
+     * Sanitize an imported settings file, once it is decoded
+     *
+     * Same rule as sanitize_posted_settings(): the lists of paths keep what the
+     * export wrote, so an exclusion survives an export and an import.
+     *
+     * @since 3.0.2
+     *
+     * @param array $imported Decoded export.
+     * @return array
+     */
+    private function sanitize_imported_settings( $imported ) {
+        $paths = Vigilante_Settings::take_path_lists( $imported );
+        $imported = map_deep( $imported, 'sanitize_text_field' );
+
+        return Vigilante_Settings::restore_path_lists( $imported, $paths );
+    }
+
+    /**
      * Process section data maintaining proper types from defaults
      *
      * @param array  $submitted_data Data submitted from form.
@@ -8515,7 +8576,7 @@ class Vigilante_Admin {
         }
 
         // Sanitize imported data recursively
-        $imported = map_deep( $imported, 'sanitize_text_field' );
+        $imported = $this->sanitize_imported_settings( $imported );
 
         // Validate structure: only sections and keys of the schema survive, and
         // every value takes the type of its default. Until 2.11.0 this was an
@@ -8953,7 +9014,27 @@ class Vigilante_Admin {
             wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
         }
 
-        $file = isset( $_POST['file'] ) ? sanitize_text_field( wp_unslash( $_POST['file'] ) ) : '';
+        /*
+         * The path as the scan reported it, which is what the interface sends
+         * back. sanitize_text_field() is the wrong reader for it: it deletes
+         * every %XX octet and collapses repeated spaces, so a file named
+         * foto%20nueva.php was stored as fotonueva.php, the scan compared the
+         * list with the paths it finds one by one, never matched, and the
+         * warning came back (measured on 1 oct 2026 against 3.0.1). The four
+         * handlers of the ignore list read the path the same way.
+         *
+         * Known limits, found by the cross review, that only a file name with a
+         * stray < in it reaches. wp_strip_all_tags() shortens such a name at the
+         * < instead of refusing it, so the stored entry can match another file
+         * (a.php<b is stored as a.php), and the value ignore_file() returns is
+         * not read, so a refusal of its own is answered as success. The fix, if
+         * a site ever needs it, is to answer with an error when
+         * wp_strip_all_tags() changes what was sent and to check that return
+         * value. An entry the old reader stored for such a name (it wrote the
+         * < as &lt;) is listed but "Stop ignoring" cannot remove it; "Clear all
+         * ignored files" does.
+         */
+        $file = ( isset( $_POST['file'] ) && is_string( $_POST['file'] ) ) ? wp_strip_all_tags( wp_unslash( $_POST['file'] ) ) : '';
 
         if ( empty( $file ) ) {
             wp_send_json_error( __( 'No file specified.', 'vigilante' ) );
@@ -9008,7 +9089,7 @@ class Vigilante_Admin {
             wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
         }
 
-        $file = isset( $_POST['file'] ) ? sanitize_text_field( wp_unslash( $_POST['file'] ) ) : '';
+        $file = ( isset( $_POST['file'] ) && is_string( $_POST['file'] ) ) ? wp_strip_all_tags( wp_unslash( $_POST['file'] ) ) : '';
 
         if ( empty( $file ) ) {
             wp_send_json_error( __( 'No file specified.', 'vigilante' ) );
@@ -9043,7 +9124,7 @@ class Vigilante_Admin {
         $locked = $this->critical_approval_locked();
         $shared = $locked ? array( 'wp-config.php', '.htaccess' ) : array();
         foreach ( $raw_files as $f ) {
-            $clean = sanitize_text_field( $f );
+            $clean = is_string( $f ) ? wp_strip_all_tags( $f ) : '';
             // Same rule as ajax_ignore_file(): the two shared files when the
             // network locks them, and Vigilant's own files always.
             if ( '' !== $clean && ! in_array( $clean, $shared, true ) && ! Vigilante_Self_Integrity::is_own_file_path( $clean ) ) {
@@ -9112,7 +9193,7 @@ class Vigilante_Admin {
 
         $files = array();
         foreach ( $raw_files as $f ) {
-            $clean = sanitize_text_field( $f );
+            $clean = is_string( $f ) ? wp_strip_all_tags( $f ) : '';
             if ( '' !== $clean ) {
                 $files[] = $clean;
             }

@@ -3,7 +3,9 @@
  * IP matching utilities
  *
  * Shared IP/pattern matching for the firewall and login modules. Supports
- * exact addresses, CIDR ranges and wildcards, for both IPv4 and IPv6.
+ * exact addresses, CIDR ranges and wildcards, for both IPv4 and IPv6. It is
+ * also where the plugin reads what the client sends about the request: the
+ * client address (get_client_ip()) and the request target (request_uri()).
  *
  * @package Vigilante
  */
@@ -867,5 +869,41 @@ class Vigilante_IP_Utils {
         }
 
         return self::resolve_client_ip( $server, $trusted, self::trusted_proxies() );
+    }
+
+    /**
+     * The request target as the client wrote it: path and query, with the
+     * percent-encoding and the UTF-8 bytes intact.
+     *
+     * The one reader of REQUEST_URI for everything that is not the firewall's
+     * pattern haystack. sanitize_text_field() is the wrong tool for it: it
+     * deletes every %XX octet instead of decoding it (_sanitize_text_fields(),
+     * wp-includes/formatting.php), so /categor%C3%ADa/ came out as /categora/
+     * and a path in Cyrillic as //. The redirects built from that value landed
+     * on a 404, the hidden login address written in a non-Latin script never
+     * matched, and the activity log kept the evidence with the evidence removed
+     * (measured on 1 oct 2026 against 3.0.1).
+     *
+     * esc_url_raw() keeps the %XX octets and the raw UTF-8, writes a space as
+     * %20, drops what a URL cannot carry (< > " { } ^ ` and control characters)
+     * and leaves a target that starts with a slash alone. Its liberties, none of
+     * which matters to the callers: [ ] become %5B %5D, a ;// becomes ://, and a
+     * target that does not start with a slash (OPTIONS *, an absolute-form
+     * request line) comes back with a scheme added or empty, which is why a
+     * caller that needs a path checks for the leading slash itself.
+     *
+     * Not for the firewall's pattern checks, which need the bytes untouched and
+     * read their own raw copy (Vigilante_Firewall::gather_request_data()).
+     *
+     * @since 3.0.2
+     *
+     * @return string Path and query as sent, or '' when the server gives none.
+     */
+    public static function request_uri() {
+        if ( ! isset( $_SERVER['REQUEST_URI'] ) || ! is_string( $_SERVER['REQUEST_URI'] ) ) {
+            return '';
+        }
+
+        return esc_url_raw( wp_unslash( $_SERVER['REQUEST_URI'] ) );
     }
 }

@@ -1712,6 +1712,169 @@ class Vigilante_Settings {
     }
 
     /**
+     * The settings that hold a list of file paths, by section
+     *
+     * A path is read by what it is. sanitize_text_field() deletes every %XX octet
+     * and, when it finds one, collapses repeated spaces, so an exclusion written
+     * for a folder called foto%20x was saved as fotox and excluded nothing: the
+     * scan compares what is stored with the paths it finds, one by one (measured
+     * on 1 oct 2026 against 3.0.1). Every other list in the options is a list of
+     * addresses, names or extensions, where nothing meaningful is lost, and keeps
+     * its reader.
+     *
+     * @since 3.0.2
+     *
+     * @return array<string,string[]>
+     */
+    public static function path_list_keys() {
+        return array(
+            'file_integrity' => array( 'excluded_paths' ),
+        );
+    }
+
+    /**
+     * One path as it was typed: invalid UTF-8 out, the ends trimmed, and nothing
+     * else touched. Invalid UTF-8 has to go because the option would not be
+     * written with it.
+     *
+     * A line that has tags (or a stray <) is dropped whole, not cut. A path has
+     * none, and wp_strip_all_tags() would cut it at the < and leave a shorter path
+     * than the one written, which excludes more than anyone asked: a folder
+     * called a<b would exclude a. Until 3.0.1 the < was kept as an entity, which
+     * matched nothing, and dropping the line has the same effect.
+     *
+     * A line with a line break inside is dropped too. The textarea is read line by
+     * line, so only an element of a list can have one (an export edited by hand),
+     * and the next save of the tab would show it as two lines and store two paths:
+     * a, a line break and wp-content would end up excluding all of wp-content.
+     * 3.0.1 turned the break into a space, which matched nothing, and dropping the
+     * line has the same effect (fourth cross review, 1 oct 2026).
+     *
+     * @since 3.0.2
+     *
+     * @param mixed $line Entry.
+     * @return string
+     */
+    public static function sanitize_path_line( $line ) {
+        if ( ! is_scalar( $line ) ) {
+            return '';
+        }
+
+        $line = trim( wp_check_invalid_utf8( (string) $line, true ) );
+
+        if ( false !== strpbrk( $line, "\r\n" ) ) {
+            return '';
+        }
+
+        return wp_strip_all_tags( $line ) === $line ? $line : '';
+    }
+
+    /**
+     * The text of a textarea of paths, one per line, each line read as one path.
+     *
+     * Line by line, because a stray < in one line would take the lines after it
+     * with it if the whole text went through wp_strip_all_tags().
+     *
+     * @since 3.0.2
+     *
+     * @param mixed $text Text.
+     * @return string
+     */
+    public static function sanitize_path_text( $text ) {
+        $lines = preg_split( '/\r\n|\r|\n/', (string) $text );
+
+        return implode( "\n", array_map( array( __CLASS__, 'sanitize_path_line' ), (array) $lines ) );
+    }
+
+    /**
+     * Take the lists of paths out of a settings tree before the generic sanitizer reads it
+     *
+     * Known limits (fourth cross review, 1 oct 2026), none reachable from the
+     * settings screen and all on the side of watching more: process_section_data()
+     * reads the entries of a list posted as an array (excluded_paths[]=) with
+     * sanitize_text_field() and applies sanitize_key() to the keys, so a key
+     * written with another spelling is not found here, and a form posted as an
+     * array instead of a string goes through a generic sanitizer. In those three
+     * the %XX are lost, as they were in 3.0.1.
+     *
+     * @since 3.0.2
+     *
+     * @param mixed $data Settings tree: section => key => value.
+     * @return array Only the path lists that are present, in the same shape, each already read as paths.
+     */
+    public static function take_path_lists( $data ) {
+        $taken = array();
+
+        if ( ! is_array( $data ) ) {
+            return $taken;
+        }
+
+        foreach ( self::path_list_keys() as $section => $keys ) {
+            if ( ! isset( $data[ $section ] ) || ! is_array( $data[ $section ] ) ) {
+                continue;
+            }
+
+            foreach ( $keys as $key ) {
+                if ( ! isset( $data[ $section ][ $key ] ) ) {
+                    continue;
+                }
+
+                $value = $data[ $section ][ $key ];
+
+                if ( is_array( $value ) ) {
+                    $taken[ $section ][ $key ] = array_map( array( __CLASS__, 'sanitize_path_line' ), array_values( array_filter( $value, 'is_scalar' ) ) );
+                } elseif ( is_scalar( $value ) ) {
+                    $taken[ $section ][ $key ] = self::sanitize_path_text( $value );
+                }
+            }
+        }
+
+        return $taken;
+    }
+
+    /**
+     * Put back the lists of paths take_path_lists() took out, over what the generic sanitizer left
+     *
+     * @since 3.0.2
+     *
+     * @param mixed $data  Sanitized settings tree.
+     * @param array $taken What take_path_lists() returned for the same tree.
+     * @return mixed The tree, with the path lists as they were read.
+     */
+    public static function restore_path_lists( $data, $taken ) {
+        if ( ! is_array( $data ) ) {
+            return $data;
+        }
+
+        foreach ( $taken as $section => $values ) {
+            if ( ! isset( $data[ $section ] ) || ! is_array( $data[ $section ] ) ) {
+                continue;
+            }
+
+            foreach ( $values as $key => $value ) {
+                $data[ $section ][ $key ] = $value;
+            }
+        }
+
+        return $data;
+    }
+
+    /**
+     * Whether a position in the options, as section.key, is a list of paths
+     *
+     * @since 3.0.2
+     *
+     * @param string $trail Section and key joined by a dot.
+     * @return bool
+     */
+    private static function is_path_list( $trail ) {
+        $parts = explode( '.', (string) $trail, 2 );
+        $paths = self::path_list_keys();
+
+        return 2 === count( $parts ) && isset( $paths[ $parts[0] ] ) && in_array( $parts[1], $paths[ $parts[0] ], true );
+    }
+
+    /**
      * Validate options before saving
      *
      * @param array $input Raw input to validate.
@@ -1736,7 +1899,7 @@ class Vigilante_Settings {
                 }
             } elseif ( isset( $defaults[ $section ] ) ) {
                 // Validate other sections using generic validator
-                $validated[ $section ] = $this->validate_section( $data, $defaults[ $section ] );
+                $validated[ $section ] = $this->validate_section( $data, $defaults[ $section ], $section );
 
                 // The few keys that live outside get_default_options() on
                 // purpose (see apply_install_tweaks()) survive with their own
@@ -1831,11 +1994,12 @@ class Vigilante_Settings {
      * 2026 audit). Lists are the exception, handled first: their entries are
      * data, not keys.
      *
-     * @param array $input    Input values.
-     * @param array $defaults Default values.
+     * @param array  $input    Input values.
+     * @param array  $defaults Default values.
+     * @param string $trail    Where this is in the options, as section.key, so a list of paths is read as paths.
      * @return array Validated values.
      */
-    private function validate_section( $input, $defaults ) {
+    private function validate_section( $input, $defaults, $trail = '' ) {
         $validated = array();
 
         if ( $this->is_list_default( $defaults ) ) {
@@ -1843,10 +2007,11 @@ class Vigilante_Settings {
                 return array();
             }
 
-            $list = array();
+            $is_paths = self::is_path_list( $trail );
+            $list     = array();
             foreach ( $input as $value ) {
                 if ( is_scalar( $value ) ) {
-                    $list[] = sanitize_text_field( (string) $value );
+                    $list[] = $is_paths ? self::sanitize_path_line( $value ) : sanitize_text_field( (string) $value );
                 } elseif ( is_array( $value ) ) {
                     $list[] = map_deep( $value, 'sanitize_text_field' );
                 }
@@ -1869,7 +2034,7 @@ class Vigilante_Settings {
                 $validated[ $key ] = intval( $value );
             } elseif ( is_array( $default_value ) ) {
                 if ( is_array( $value ) ) {
-                    $validated[ $key ] = $this->validate_section( $value, $default_value );
+                    $validated[ $key ] = $this->validate_section( $value, $default_value, '' === $trail ? (string) $key : $trail . '.' . $key );
                 } else {
                     $validated[ $key ] = $default_value;
                 }

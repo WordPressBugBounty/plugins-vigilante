@@ -5280,14 +5280,30 @@ class Vigilante_File_Integrity {
     /**
      * Add a file to the ignored list
      *
+     * The path is stored exactly as it comes: the callers are the AJAX
+     * handlers, which have already read it and checked it against the shared
+     * files and Vigilant's own, and the scan compares the stored strings with
+     * the paths it finds one by one (in_array(), strict). This used to run
+     * sanitize_text_field() over it, which deletes every %XX octet and collapses
+     * repeated spaces, so the entry never matched the file it was made for
+     * (measured on 1 oct 2026 against 3.0.1). Anything that is not a plain
+     * string, is empty or carries tags is not a path and is refused. That guards
+     * a direct caller: the AJAX handlers read the path with wp_strip_all_tags()
+     * first, which shortens a name with a stray < instead of handing it over
+     * intact (see ajax_ignore_file()).
+     *
      * @param string $file_path Relative file path to ignore.
      * @return bool
      */
     public function ignore_file( $file_path ) {
+        if ( ! is_string( $file_path ) || '' === $file_path || wp_strip_all_tags( $file_path ) !== $file_path ) {
+            return false;
+        }
+
         $ignored = get_option( 'vigilante_ignored_files', array() );
 
         if ( ! in_array( $file_path, $ignored, true ) ) {
-            $ignored[] = sanitize_text_field( $file_path );
+            $ignored[] = $file_path;
             return update_option( 'vigilante_ignored_files', $ignored );
         }
 

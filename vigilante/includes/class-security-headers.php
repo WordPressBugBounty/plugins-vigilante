@@ -310,6 +310,26 @@ class Vigilante_Security_Headers {
     }
 
     /**
+     * Whether the site address is an https:// one
+     *
+     * Read from the stored address and from nothing else. is_ssl() is false
+     * behind a proxy that terminates TLS and says nothing in a cron run or from
+     * WP-CLI, and home_url() takes its scheme from is_ssl() when the request is
+     * secure (wp-includes/link-template.php:3471-3477 in 7.1.2), so the same site
+     * would write different rules from an https request and from a scheduled
+     * task. Vigilante_Htaccess_Recovery and File
+     * Integrity compare the file with what this class would write now, so the
+     * answer has to be the same wherever it is asked.
+     *
+     * @since 3.0.2
+     *
+     * @return bool
+     */
+    private function site_address_is_https() {
+        return 0 === strpos( (string) get_option( 'home' ), 'https://' );
+    }
+
+    /**
      * Generate rules content (without markers)
      *
      * Public since 2.10.0: it is also "what this configuration would write right
@@ -415,7 +435,23 @@ class Vigilante_Security_Headers {
             }
 
             if ( ! empty( $csp['directives'] ) && is_array( $csp['directives'] ) ) {
+                $site_is_https = $this->site_address_is_https();
+
                 foreach ( $csp['directives'] as $directive => $value ) {
+                    /*
+                     * upgrade-insecure-requests tells the browser to ask for every
+                     * http:// resource of the page over https. On a site whose
+                     * address is http:// nothing answers there, so every
+                     * stylesheet, script and image stops loading, and the factory
+                     * policy carries it. It is written only when the site address
+                     * is https://. The setting itself is left as it is, so the
+                     * next rewrite of the block after the address changes writes
+                     * it.
+                     */
+                    if ( 'upgrade-insecure-requests' === strtolower( (string) $directive ) && ! $site_is_https ) {
+                        continue;
+                    }
+
                     // Override frame-ancestors with synchronized value if X-Frame-Options is set
                     if ( 'frame-ancestors' === $directive && ! empty( $frame_ancestors_value ) ) {
                         $directives[] = $directive . ' ' . $frame_ancestors_value;

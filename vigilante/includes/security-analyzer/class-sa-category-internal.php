@@ -1,6 +1,6 @@
 <?php
 /**
- * Security Analyzer — Internal-exclusive category (33 pts).
+ * Security Analyzer — Internal-exclusive category (40 pts).
  *
  * The differential of this analyzer vs any external scanner. Each check
  * reads data that is impossible to observe from the outside.
@@ -13,7 +13,7 @@
  *  - inactive_plugins (2)
  *  - closed_plugins (3)  ← v2.6.0: reads the cached state from the daily
  *                          Vigilante_Plugin_Status check; no extra HTTP call.
- *  - self_integrity (3)  ← v3.0.0: reads the cached state written by
+ *  - self_integrity (10)  ← v3.0.0: reads the cached state written by
  *                          Vigilante_Self_Integrity; no FS hashing, no HTTP.
  *  - file_permissions (2)
  *  - salts_default (2)

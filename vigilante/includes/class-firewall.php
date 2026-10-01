@@ -175,16 +175,17 @@ class Vigilante_Firewall {
         $this->haystack = null;
 
         $this->request_data = array(
-            'uri'         => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
-            'query_string'=> isset( $_SERVER['QUERY_STRING'] ) ? sanitize_text_field( wp_unslash( $_SERVER['QUERY_STRING'] ) ) : '',
             /*
              * Copies that keep the percent encoding, used only as the haystack
              * of the pattern checks and never logged, printed or stored.
              *
              * They exist because sanitize_text_field() deletes every %XX
-             * sequence instead of decoding it: the copies above are the payload
+             * sequence instead of decoding it: a sanitized copy is the payload
              * with the evidence removed, so an encoded attack was invisible to
-             * every rule that reads them. Measured on 22 aug 2026 against 2.9.8,
+             * every rule that read one. Two such copies (uri and query_string)
+             * used to sit above these; nothing read them, because the log takes
+             * loggable_uri(), so they were removed and the next reader does not
+             * copy the pattern. Measured on 22 aug 2026 against 2.9.8,
              * ?x=%3Cscript%3E, javascript%3A, php%3A%2F%2F and GLOBALS%5B all
              * reached the checks as harmless text and went straight through.
              *
@@ -192,11 +193,14 @@ class Vigilante_Firewall {
              * destroys exactly what has to be matched. sanitize_text_field()
              * deletes the %XX sequences and strips tags. esc_url_raw() is worse
              * here: measured on 22 aug 2026, it returns an empty string for a
-             * query that carries an unencoded :// , which is precisely the
-             * remote inclusion shape, so it would blind the firewall instead of
-             * arming it. These two values are never echoed, never stored and
-             * never reach a query; they are the haystack of preg_match() and
-             * nothing else.
+             * query read on its own that carries an unencoded :// , which is
+             * precisely the remote inclusion shape, and over a whole target it
+             * drops < > and quotes, which are what the rules look for, so it
+             * would blind the firewall instead of arming it. (For anything that
+             * is not a pattern check, the reader of the request target is
+             * Vigilante_IP_Utils::request_uri().) These two values are never
+             * echoed, never stored and never reach a query; they are the
+             * haystack of preg_match() and nothing else.
              */
             // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- inspection buffer for the pattern checks, see the note above. Sanitizing it is what hid the attacks. Never output, stored nor queried.
             'uri_raw'     => isset( $_SERVER['REQUEST_URI'] ) ? wp_unslash( $_SERVER['REQUEST_URI'] ) : '',

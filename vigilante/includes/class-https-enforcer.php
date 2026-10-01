@@ -126,12 +126,142 @@ class Vigilante_Https_Enforcer {
         }
 
         // Build HTTPS URL
-        $redirect_url = 'https://' . ( isset( $_SERVER['HTTP_HOST'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_HOST'] ) ) : '' );
-        $redirect_url .= isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
+        $redirect_url = $this->build_https_url();
+
+        if ( '' === $redirect_url ) {
+            return;
+        }
 
         // Redirect with 301 (permanent)
-        wp_safe_redirect( $redirect_url, 301 );
+        $this->send_redirect( $redirect_url );
+    }
+
+    /**
+     * Send the permanent redirect to the HTTPS address.
+     *
+     * wp_safe_redirect() only knows the home host, and answers any other with
+     * a 301 to admin_url(). The admin area of a site whose WordPress lives on a
+     * host of its own is built on the siteurl host, so that host is added to
+     * the allowed ones for this one call. It is the site's own declaration, read
+     * from the siteurl option; the host of the URL being sent is deliberately
+     * not the one that is allowed, so a URL that was not built from the two
+     * options still falls back to admin_url() instead of being let through.
+     *
+     * @param string $url Absolute https URL, built by build_https_url().
+     */
+    private function send_redirect( $url ) {
+        $siteurl_host = $this->host_of( (string) get_option( 'siteurl' ) );
+
+        if ( '' !== $siteurl_host ) {
+            add_filter(
+                'allowed_redirect_hosts',
+                static function ( $hosts ) use ( $siteurl_host ) {
+                    $hosts   = (array) $hosts;
+                    $hosts[] = $siteurl_host;
+
+                    return $hosts;
+                }
+            );
+        }
+
+        wp_safe_redirect( $url, 301 );
         exit;
+    }
+
+    /**
+     * The host of a URL, cut by hand as wp_parse_url() damages raw UTF-8.
+     *
+     * Like parse_url() for an ordinary URL: no port, an IPv6 literal keeps its
+     * brackets. A user in the option is not taken off, so a value such as
+     * https://user@host gives "user@host", which matches no host and fails
+     * safe.
+     *
+     * @param string $url URL, as stored in an option.
+     * @return string Host, or '' when the URL has none.
+     */
+    private function host_of( $url ) {
+        return preg_match( '~^https?://(\[[^\]]+\]|[^/:?#]+)~i', $url, $m ) ? $m[1] : '';
+    }
+
+    /**
+     * The HTTPS address of the request being redirected.
+     *
+     * Made of two things and nothing else: the host the site declares
+     * (declared_authority()) and the target the client asked for, as it was
+     * sent (Vigilante_IP_Utils::request_uri(), whose docblock lists the few
+     * things it does not keep).
+     *
+     * It used to be the Host header plus sanitize_text_field() over the target,
+     * and both were wrong. sanitize_text_field() deletes every %XX octet, so
+     * http://site/categor%C3%ADa/ was sent to https://site/categora/, a 404
+     * (measured on 1 oct 2026 against 3.0.1; a Cyrillic path became //, and
+     * every parameter lost its encoded characters). And the Host is picked by
+     * whoever makes the request: wp_safe_redirect() refuses a host that is not
+     * the site's, but what it does then is not refuse, it is send a 301 to the
+     * admin URL. A visit to the www alias of the site, or to the bare domain
+     * when home has the www, or to the server by its IP, was sent permanently
+     * to /wp-admin/ before WordPress' own canonical redirect, which runs later,
+     * could send it to the same page. The declared host is the one core
+     * canonicalizes to as well.
+     *
+     * A site that served other hostnames of its own through
+     * allowed_redirect_hosts now gets the declared host for all of them, which
+     * is what a canonical redirect is.
+     *
+     * @return string Absolute https URL, or '' when the site declares no host to send it to.
+     */
+    private function build_https_url() {
+        $authority = $this->declared_authority();
+
+        if ( '' === $authority ) {
+            return '';
+        }
+
+        $uri = Vigilante_IP_Utils::request_uri();
+
+        // A target in origin form starts with a slash. Anything else (OPTIONS *,
+        // an absolute-form request line, a bare @host) must not be glued to the
+        // authority, where it could be read as something other than a path.
+        if ( '' === $uri || '/' !== $uri[0] ) {
+            $uri = '/';
+        }
+
+        return 'https://' . $authority . $uri;
+    }
+
+    /**
+     * The host, with its port if it has one, the site declares for this request.
+     *
+     * The admin area is built on the siteurl option, which is where core itself
+     * sends admin_url(), and everything else on the home option, the one the
+     * guard in redirect_to_https() reads. They are the same host on almost
+     * every site. They differ when WordPress is served from a host of its own,
+     * as in a decoupled site, and then an http visit to the admin area has to
+     * stay on the admin host and a visit to the public site on the public one.
+     * Cut by hand, as wp_parse_url() damages raw UTF-8.
+     *
+     * Known limits, found by the cross review, none of them a configuration a
+     * real site has. A siteurl declared as http:// still gives its authority,
+     * port included, to the https address: with home https and siteurl
+     * http://host:8080 the admin goes to https://host:8080, where it used to go
+     * to the home port. And a siteurl on a host of its own that is an IPv6
+     * literal or a raw UTF-8 IDN is not matched by wp_validate_redirect(), so
+     * the visit falls back to admin_url() and, without FORCE_SSL_ADMIN, can
+     * loop. If a site ever has one of them, take the siteurl authority only
+     * when it is https, and encode the host.
+     *
+     * @return string Authority, or '' when the site declares none.
+     */
+    private function declared_authority() {
+        if ( is_admin() && preg_match( '~^https?://([^/?#]+)~i', (string) get_option( 'siteurl' ), $m ) ) {
+            return $m[1];
+        }
+
+        if ( preg_match( '~^https://([^/?#]+)~i', (string) get_option( 'home' ), $m ) ) {
+            return $m[1];
+        }
+
+        return '';
     }
 
     /**
@@ -195,14 +325,18 @@ class Vigilante_Https_Enforcer {
             return true;
         }
 
-        if ( ! isset( $_SERVER['REQUEST_URI'] ) ) {
+        $uri = Vigilante_IP_Utils::request_uri();
+
+        if ( '' === $uri ) {
             return false;
         }
 
-        $path   = wp_parse_url( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ), PHP_URL_PATH );
+        // The path is cut by hand: wp_parse_url() turns the raw UTF-8 bytes
+        // 0x80-0x9F and 0xAD into underscores.
+        $path   = (string) substr( $uri, 0, strcspn( $uri, '?#' ) );
         $prefix = '/' . trim( rest_get_url_prefix(), '/' ) . '/';
 
-        return is_string( $path ) && 0 === strpos( $path, $prefix );
+        return 0 === strpos( $path, $prefix );
     }
 
     /**

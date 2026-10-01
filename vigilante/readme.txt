@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.0.1
+Stable tag: 3.0.2
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -441,6 +441,21 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 3.0.2 =
+Fixes addresses with accents or non-Latin letters in the HTTPS redirect, the Under Attack check and a custom login address, stops the www alias landing on the dashboard, saves File Integrity paths as written, and stops the default CSP from breaking the styles of sites served over http.
+
+* Fix: the HTTP to HTTPS redirect keeps the percent-encoded characters of the address. A visit to /categor%C3%ADa/ was sent to /categora/, a 404, a path in Cyrillic to //, and every parameter lost its encoded characters.
+* Fix: the same redirect takes its host from the one the site declares, not from the Host header. A visit to the www alias of the site, or to the server by its IP, was sent with a permanent redirect to the dashboard instead of the same page. A site that served other hostnames of its own through allowed_redirect_hosts now gets the declared host for all of them, while the admin area of a site whose WordPress lives on a host of its own stays on that host.
+* Fix: a hidden login address written in a non-Latin script matched nothing, so the login page was hidden and its own address answered 404. It now matches in upper and lower case hex and as raw UTF-8. An address that only matched after its encoded characters were deleted, such as /my-log%41in/ for /my-login/, no longer opens the login page.
+* Fix: after solving the Under Attack challenge the visitor lands on the page they asked for, with its accents and parameters intact.
+* Fix: the activity log keeps the address of a blocked request as it was sent, instead of with its encoded characters deleted.
+* Fix: ignoring a file in File Integrity whose name has encoded characters (a literal %20, for example) or repeated spaces now works. The path was saved with those characters deleted, so it never matched the file and the warning came back, and the saved entry could match a different file with the mangled name.
+* Fix: an excluded path in File Integrity whose name has encoded characters (a literal %20, for example) or repeated spaces is now saved as written, also when exporting and importing the settings. It was saved with them deleted, so it never matched, and when the encoded characters were the last part of the name it was saved as the folder above it, which silenced the scan of everything inside that folder. A line with HTML tags is now dropped. Entries already saved are not changed, so one that was saved cut has to be written again.
+* Fix: the admin area and its open endpoints are recognised from the path as sent. /wp-admin/admin-ajax.php%20 is no longer taken for admin-ajax.php, nor /wp-%41admin/page for a page of the admin area.
+* Fix: on a site whose address is http://, the default Content-Security-Policy no longer includes upgrade-insecure-requests. With Apache and the headers module active, that directive made browsers ask for every stylesheet, script and image over https, where the site does not answer, so the site lost its styles. The directive is now written only when the site address is https://, so a site served over https through a proxy or CDN that terminates TLS should have its site address set to https://. The rules are rewritten on update, so a site that was already affected recovers by updating, and the Security Headers tab says so next to the policy.
+* Fix: the Dashboard reads the XML-RPC setting where it lives now. The Configuration Score never gave the three points for blocking XML-RPC, and the recommendation to disable it always showed, because both read a checkbox that stopped being saved in 2.9.7. A site that blocks XML-RPC, as the factory settings do, will see its score go up by two or three points without changing anything, and the recommendation, when it applies, now leads to WP Hardening.
+* Fix: the Security Check card on the Dashboard said it ran 13 internal checks when there are 16, and no longer gives a number.
+
 = 3.0.1 =
 Fixes the role lists of two factor, password rules and password expiry, which came back ticked after saving, and stops a saved tab from clearing lists that have no field on screen.
 
@@ -473,8 +488,8 @@ For older changelog entries, please check the [changelog.txt](https://plugins.sv
 
 == Upgrade Notice ==
 
-= 3.0.1 =
-Fixes the role lists of two factor, password rules and password expiry, which came back ticked after saving, and stops a saved tab from clearing lists that have no field on screen.
+= 3.0.2 =
+Fixes addresses with accents or non-Latin letters in the HTTPS redirect, the Under Attack check and a custom login address, stops the www alias landing on the dashboard, saves File Integrity paths as written, and stops the default CSP from breaking the styles of sites served over http.
 
 == Support ==
 

@@ -208,7 +208,7 @@ class Vigilante_Login_Security {
         }
         
         // Check if the redirect is coming from wp-admin area
-        $request = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
+        $request = Vigilante_IP_Utils::request_uri();
         
         
         // If accessing wp-admin and being redirected to login, show 404 instead
@@ -273,11 +273,17 @@ class Vigilante_Login_Security {
      * site itself (WP_SITEURL vs WP_HOME), so wp-admin matching needs the
      * raw path.
      *
+     * Raw also means the %XX octets are neither decoded nor deleted. This path
+     * decides what is the admin area and what is an open endpoint, so it must
+     * not be a string the client never sent: with sanitize_text_field() a
+     * /wp-%41admin/page was read as /wp-admin/page, and /wp-admin/admin-ajax.php%20
+     * as the open endpoint.
+     *
      * @since 2.9.4
      * @return string
      */
     private static function get_request_uri_path() {
-        $request = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
+        $request = Vigilante_IP_Utils::request_uri();
 
         if ( '' === $request ) {
             return '';
@@ -384,7 +390,7 @@ class Vigilante_Login_Security {
         }
 
         // Get the request URI
-        $request = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
+        $request = Vigilante_IP_Utils::request_uri();
         
         
         // Check if accessing wp-admin
@@ -568,7 +574,7 @@ class Vigilante_Login_Security {
 
         // Log the attempt
         if ( $this->activity_log ) {
-            $request = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
+            $request = Vigilante_IP_Utils::request_uri();
             $this->activity_log->log(
                 'login',
                 'hidden_login_access',
@@ -607,7 +613,7 @@ class Vigilante_Login_Security {
         }
 
         if ( $this->activity_log ) {
-            $request_uri = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
+            $request_uri = Vigilante_IP_Utils::request_uri();
             $this->activity_log->log(
                 'login',
                 'hidden_login_access',
@@ -623,10 +629,13 @@ class Vigilante_Login_Security {
     /**
      * Get the request path without query string
      *
+     * As the client sent it, percent-encoding included: is_custom_login_request()
+     * is the one that decodes, because it is the one that compares.
+     *
      * @return string
      */
     private function get_request_path() {
-        $request = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
+        $request = Vigilante_IP_Utils::request_uri();
         
         // Remove query string
         if ( false !== strpos( $request, '?' ) ) {
@@ -649,11 +658,21 @@ class Vigilante_Login_Security {
     /**
      * Check if this is a request to our custom login URL
      *
+     * Both sides are percent-decoded before they are compared. The slug is what
+     * sanitize_title() stored, and in a non-Latin script that is lower-case
+     * percent-encoded octets (%d0%b2%d1%85%d0%be%d0%b4 for the Cyrillic word
+     * for "login"), while a browser sends the same address with upper-case hex
+     * (%D0%B2...) and some tools with raw UTF-8: three spellings of one
+     * address. The request used to lose its %XX to sanitize_text_field(), so
+     * the comparison could never succeed: with such a slug the login page was
+     * hidden and its own address answered 404 (measured on 1 oct 2026 against
+     * 3.0.1), which locks an administrator out of a site they are signed out of.
+     *
      * @param string $request The request path.
      * @return bool
      */
     private function is_custom_login_request( $request ) {
-        return $request === $this->custom_login_slug;
+        return rawurldecode( $request ) === rawurldecode( $this->custom_login_slug );
     }
 
     /**
@@ -1610,7 +1629,7 @@ class Vigilante_Login_Security {
         require_once VIGILANTE_INCLUDES_DIR . 'class-database.php';
         require_once VIGILANTE_INCLUDES_DIR . 'class-activity-log.php';
 
-        $request = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
+        $request = Vigilante_IP_Utils::request_uri();
 
         $activity_log = new Vigilante_Activity_Log( new Vigilante_Settings(), new Vigilante_Database() );
         $activity_log->log(

@@ -1252,8 +1252,23 @@ class Vigilante_Under_Attack {
         // expires, so a refresh while the solver runs does not break it.
         $challenge_nonce = $this->issue_challenge_token();
 
-        // Get current URL for redirect after verification
-        $current_url = ( is_ssl() ? 'https' : 'http' ) . '://' . sanitize_text_field( wp_unslash( $_SERVER['HTTP_HOST'] ?? '' ) ) . sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ?? '/' ) );
+        /*
+         * Where to send the visitor once the challenge is solved: the page they
+         * asked for, as they asked for it. The target used to go through
+         * sanitize_text_field(), which deletes every %XX octet, so a visitor who
+         * asked for /categor%C3%ADa/ landed on /categora/, a 404, on every page
+         * whose address has an accent or a non-Latin letter (measured on 1 oct
+         * 2026 against 3.0.1). The host only picks where the visitor lands:
+         * process_challenge_response() validates it against the site's own
+         * before redirecting and falls back to the home page.
+         */
+        $request_uri = Vigilante_IP_Utils::request_uri();
+
+        if ( '' === $request_uri || '/' !== $request_uri[0] ) {
+            $request_uri = '/';
+        }
+
+        $current_url = ( is_ssl() ? 'https' : 'http' ) . '://' . sanitize_text_field( wp_unslash( $_SERVER['HTTP_HOST'] ?? '' ) ) . $request_uri;
 
         // Asset URLs (external files for CSP compatibility)
         $css_url = VIGILANTE_ASSETS_URL . 'css/under-attack-challenge.css?ver=' . VIGILANTE_VERSION;
