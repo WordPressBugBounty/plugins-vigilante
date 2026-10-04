@@ -295,8 +295,8 @@ class Vigilante_Htaccess_Protection {
         // UI: "Limit HTTP Methods" checkbox
         // Note: REST API excluded - needs PUT, PATCH, DELETE for plugins like SiteGround Optimizer
         if ( ! empty( $this->options['limit_http_methods'] ) ) {
-            $rules[] = '# Block suspicious HTTP methods (allow only GET, POST, HEAD)';
-            $rules[] = '# Exception: REST API endpoints need PUT, PATCH, DELETE';
+            $rules[] = '# Block HTTP methods WordPress does not use (TRACE, TRACK, CONNECT, DEBUG, MOVE)';
+            $rules[] = '# The REST API is left out of this rule';
             $rules[] = '<IfModule mod_rewrite.c>';
             $rules[] = '    RewriteEngine On';
             $rules   = array_merge( $rules, $whitelist_exceptions );

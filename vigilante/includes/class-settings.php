@@ -438,9 +438,12 @@ class Vigilante_Settings {
                 'scan_frequency'          => 'daily',
                 'notify_level'            => 'suspicious_only',
                 'instant_alert'           => false,
-                'excluded_paths'          => array(
-                    'wp-content/cache',
-                ),
+                // Empty for a new installation. It used to start with
+                // wp-content/cache, from when nothing in the scan looked in
+                // that folder anyway; the scan now searches it for hidden
+                // code. A site that has the entry saved keeps it: what is in
+                // this list is the site's own, and an update does not edit it.
+                'excluded_paths'          => array(),
                 'excluded_extensions'     => array(
                     // Translations (regenerated per-locale, never in checksums).
                     '.po', '.mo', '.pot',

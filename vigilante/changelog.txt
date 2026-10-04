@@ -3,6 +3,39 @@ Vigilant — Full changelog
 For each release, see the entries below. The latest version is always at the top.
 The current release notes also live in readme.txt under "== Changelog ==".
 
+= 3.0.3 =
+* Improved: File Integrity compares themes from WordPress.org with the package WordPress.org publishes for the installed version. WordPress.org has no checksums for themes, so until now no theme file was compared with anything. The package is downloaded once per version.
+* Improved: File Integrity searches every PHP file of a plugin or theme with no official copy for hidden code, not only the first 50, and reads files of up to 8 MB. A file over 512,000 bytes was not opened, so it passed as clean. One over 8 MB is listed as not searched.
+* Improved: File Integrity looks at files added to wp-admin and wp-includes, at must-use plugins and drop-ins, at loose PHP files in wp-content, and at folders with PHP among the plugins or the themes that WordPress does not list as one.
+* Improved: File Integrity searches the PHP files of the other folders of wp-content (languages, upgrade and the like) for hidden code. A translation file that holds anything other than text is reported, because WordPress loads translation files on every request.
+* Improved: a new installation no longer starts with wp-content/cache among the excluded paths, so that folder is searched too. A site that already has it there keeps it.
+* Improved: File Integrity reports a .htaccess, .user.ini or php.ini outside uploads that makes the server run code or load a file.
+* Improved: File Integrity finds, in code with no official copy, request data run as code or as a command, a function chosen by the request and a file included from another server. The same text in a comment is not reported.
+* Improved: a file on which the search for hidden code cannot finish is listed as not searched instead of passing as clean.
+* Improved: File Integrity now compares wp-includes/version.php, and compares sites that are not in English with the English checksums while WordPress.org has none for their language, instead of leaving the core unchecked.
+* Improved: File Integrity reports files deleted from a plugin or a theme, and reports a failed request to WordPress.org as an error instead of treating the plugin as one with no official copy.
+* Improved: File Integrity reports more file types in uploads (.pht, .php8, names such as shell.php.suspected, .user.ini, php.ini, shell and CGI scripts), a .user.ini or php.ini in the site root that loads a file on every request, and backups left in the site root.
+* Improved: the File Integrity tab says what each kind of finding usually is and what to do about it, names the plugins and themes that could not be compared, and says when a scan was partial instead of saying that every file passed.
+* Improved: when a scan runs out of time, File Integrity and the scan email name the plugins, the themes and the areas it did not reach, and File Integrity lists the folders to exclude so that a scan run by hand reaches the rest. A scan runs for 60 seconds at most and starts from the beginning each time, so on a very large site the same part is left unchecked on every scan.
+* Improved: File Integrity and Security Check say when Excluded Paths holds the whole folder of a plugin or of a theme, or the uploads folder. No scan looks inside them, and Security Check no longer counts such a scan as clean.
+* Improved: File Integrity and Security Check say when no scheduled scan has finished for longer than the schedule allows. A scan the server stops halfway stores no result, and neither does one WordPress never starts, so the last one that did finish kept showing as the current one.
+* Improved: the scan email is sent when a scan finds something new, not after every scan, and its subject names wp-config.php or .htaccess when that is all that changed.
+* Improved: two-factor events can be filtered in Security Audit, and PHP 8.5 is in the end-of-life table of Security Check.
+* Fix: a .htaccess in uploads that only denies access is no longer reported, and neither is the rule that forbids PHP or a commented line. Options +ExecCGI and CGI or SSI handlers, which were listed as custom rules, are now suspicious.
+* Fix: the two-line index.php placeholder WordPress ships is no longer reported as PHP in uploads or as an extra file.
+* Fix: the bundled themes and Akismet no longer show as modified or missing core files when they update or are deleted.
+* Fix: a hexadecimal string of some 12,000 characters or more was not found by the search for hidden code. The longer the payload, the less it was found.
+* Fix: a function name split in pieces was not found when a long chain of joined strings came before it in the file.
+* Fix: a file built for the purpose could keep the search for hidden code busy long enough to cut the scan short.
+* Fix: the scan of uploads stopped after 10,000 files without saying so.
+* Fix: a folder the scan could not read stopped the scan of uploads, of a plugin or of a theme without saying so, and nothing after it was checked. The scan now goes on and reports the folder.
+* Fix: Scan now stored only the second half of the scan in the score history of Security Check.
+* Fix: Security Check passed a file integrity scan that had not checked everything, as long as it had found nothing in what it did check.
+* Fix: the Limit HTTP Methods label, and the comment written to .htaccess, described a rule that is not the one applied.
+* Fix: the alert setting of Security Audit said a new administrator is logged as Critical. It is logged as Warning, and has its own email in Users.
+* Fix: the readme described automatic backups of .htaccess and wp-config.php that no longer exist.
+* Fix: removed 11 strings and a method that nothing used.
+
 = 3.0.2 =
 * Fix: the HTTP to HTTPS redirect keeps the percent-encoded characters of the address. A visit to /categor%C3%ADa/ was sent to /categora/, a 404, a path in Cyrillic to //, and every parameter lost its encoded characters.
 * Fix: the same redirect takes its host from the one the site declares, not from the Host header. A visit to the www alias of the site, or to the server by its IP, was sent with a permanent redirect to the dashboard instead of the same page. A site that served other hostnames of its own through allowed_redirect_hosts now gets the declared host for all of them, while the admin area of a site whose WordPress lives on a host of its own stays on that host.

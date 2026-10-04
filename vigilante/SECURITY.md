@@ -121,4 +121,4 @@ Left out: the manifest itself, `readme.txt` and `changelog.txt` at the plugin ro
 
 ## Connections to other servers
 
-Vigilant does not use accounts, API keys or services of its own. It connects only to WordPress.org (core, plugin and theme checksums for File Integrity, plugin status for closed plugins, and its own checksums for self-protection) and, in the reputation category of Security Check, makes DNS lookups against public blacklists. Each of those features can be switched off.
+Vigilant does not use accounts, API keys or services of its own. It connects only to WordPress.org (core and plugin checksums and theme packages for File Integrity, plugin status for closed plugins, and its own checksums for self-protection) and, in the reputation category of Security Check, makes DNS lookups against public blacklists. File Integrity and the closed plugins check can be switched off. Self-protection has no switch, and the blacklist lookups run whenever Security Check does.

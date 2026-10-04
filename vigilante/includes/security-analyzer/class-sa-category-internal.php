@@ -885,9 +885,60 @@ class Vigilante_SA_Category_Internal {
             'modified'   => $modified,
         );
 
+        // A scan that could not check everything is not a clean bill: what
+        // it did not reach was not looked at. Until now a partial scan with
+        // nothing found passed here like a complete one.
+        $partial = Vigilante_File_Integrity::is_partial( $last );
+
+        $args['data']['partial'] = $partial;
+
+        // A `new` of the scanner is only a `new`: no hooks, no scan.
+        $scanner       = new Vigilante_File_Integrity( $this->settings );
+        $excluded_code = $scanner->excluded_code_folders();
+
+        $args['data']['excluded_code'] = count( $excluded_code );
+
         if ( 0 === $suspicious && 0 === $modified ) {
+            if ( $partial ) {
+                $args['detail'] = __( 'The last file integrity scan found nothing in what it checked, but it could not check everything. File Integrity lists what was left out.', 'vigilante' );
+                return Vigilante_SA_Check_Result::warn( $args );
+            }
+
+            // Nor is a result that is older than the schedule allows: a scan
+            // the server stops halfway stores nothing, one that WordPress
+            // never starts does not either, and the last one that did finish
+            // stays as "the last scan" for as long as that goes on.
+            $last_scan = (int) get_option( 'vigilante_last_integrity_scan', 0 );
+            $frequency = (string) $this->settings->get_option( 'file_integrity', 'scan_frequency', 'daily' );
+
+            if ( $this->settings->is_module_enabled( 'file_integrity' ) && Vigilante_File_Integrity::is_scan_overdue( $last_scan, $frequency ) ) {
+                $args['detail'] = sprintf(
+                    /* translators: %s: How long ago, such as "5 days" */
+                    __( 'The last file integrity scan that finished is from %s ago, and scans are scheduled. Either the scheduled tasks of WordPress are not running or the scans are not finishing: run one from File Integrity.', 'vigilante' ),
+                    human_time_diff( $last_scan )
+                );
+                return Vigilante_SA_Check_Result::warn( $args );
+            }
+
+            // Nor is a scan that Excluded Paths keeps out of whole folders of
+            // code: it finishes, finds nothing, and never looked there.
+            if ( ! empty( $excluded_code ) ) {
+                $args['detail'] = sprintf(
+                    /* translators: %s: Comma separated list of folders */
+                    __( 'The last file integrity scan found nothing, but Excluded Paths holds whole folders of plugins or themes, or the uploads folder, and no scan looks inside them: %s.', 'vigilante' ),
+                    implode( ', ', $excluded_code )
+                );
+                return Vigilante_SA_Check_Result::warn( $args );
+            }
+
             $args['detail'] = __( 'Last file integrity scan returned no suspicious or modified files.', 'vigilante' );
             return Vigilante_SA_Check_Result::pass( $args );
+        }
+
+        $partial_note = $partial ? ' ' . __( 'That scan could not check everything: File Integrity lists what was left out.', 'vigilante' ) : '';
+
+        if ( ! empty( $excluded_code ) ) {
+            $partial_note .= ' ' . __( 'Whole folders of plugins or themes, or the uploads folder, are in Excluded Paths, and no scan looks inside them.', 'vigilante' );
         }
 
         if ( $suspicious > 0 ) {
@@ -895,7 +946,7 @@ class Vigilante_SA_Category_Internal {
                 /* translators: %d: count */
                 _n( '%d suspicious file flagged by the last integrity scan.', '%d suspicious files flagged by the last integrity scan.', $suspicious, 'vigilante' ),
                 $suspicious
-            );
+            ) . $partial_note;
             return Vigilante_SA_Check_Result::fail( $args );
         }
 
@@ -903,7 +954,7 @@ class Vigilante_SA_Category_Internal {
             /* translators: %d: count */
             _n( '%d modified file recorded by the last integrity scan — review in File Integrity.', '%d modified files recorded by the last integrity scan.', $modified, 'vigilante' ),
             $modified
-        );
+        ) . $partial_note;
         return Vigilante_SA_Check_Result::warn( $args );
     }
 

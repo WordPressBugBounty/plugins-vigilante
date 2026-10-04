@@ -1830,7 +1830,6 @@ class Vigilante_Admin {
                 'loading'             => __( 'Loading...', 'vigilante' ),
                 'searching'           => __( 'Searching...', 'vigilante' ),
                 'noUsersFound'        => __( 'No users found', 'vigilante' ),
-                'searchError'         => __( 'Error searching users', 'vigilante' ),
                 'sending'             => __( 'Sending...', 'vigilante' ),
                 'sendNotification'    => __( 'Send notification now', 'vigilante' ),
                 'notificationsSent'   => __( 'notifications sent', 'vigilante' ),
@@ -1851,7 +1850,7 @@ class Vigilante_Admin {
                 'suspicious'          => __( 'Suspicious', 'vigilante' ),
                 'totalScanned'        => __( 'Total Scanned', 'vigilante' ),
                 'suspiciousFiles'     => __( 'Suspicious Files', 'vigilante' ),
-                'suspiciousWarning'   => __( 'These files may contain malicious code or are in unexpected locations. Review immediately!', 'vigilante' ),
+                'suspiciousWarning'   => __( 'Files that can run code where none is expected, or that contain code written the way malware hides itself. Real infections show up here, and so do harmless files that plugins generate. Check the path and the reason before acting.', 'vigilante' ),
                 'file'                => __( 'File', 'vigilante' ),
                 'reason'              => __( 'Reason', 'vigilante' ),
                 'type'                => __( 'Type', 'vigilante' ),
@@ -1862,11 +1861,11 @@ class Vigilante_Admin {
                 'logWhatToDo'         => __( 'What to do', 'vigilante' ),
                 'logSelfSeeDetails'   => __( 'Open File Integrity for the full detail', 'vigilante' ),
                 'modifiedFiles'       => __( 'Modified Files', 'vigilante' ),
-                'modifiedDescription' => __( 'These files (apparently) differ from the original WordPress or plugin versions.', 'vigilante' ),
+                'modifiedDescription' => __( 'These files do not match the copy WordPress.org publishes for the installed version.', 'vigilante' ),
                 'extraFiles'          => __( 'Extra Files', 'vigilante' ),
                 'extra'               => __( 'Extra', 'vigilante' ),
                 'ignored'             => __( 'Ignored', 'vigilante' ),
-                'extraDescription'    => __( 'PHP files found in plugins or themes that are not part of the original distribution from WordPress.org.', 'vigilante' ),
+                'extraDescription'    => __( 'Files that are not part of WordPress, or of the plugin or theme they sit in. Many are legitimate, and an injected file looks the same from here, so confirm where each one comes from.', 'vigilante' ),
                 'actions'             => __( 'Actions', 'vigilante' ),
                 'ignore'              => __( 'Ignore', 'vigilante' ),
                 'ignoring'            => __( 'Ignoring...', 'vigilante' ),
@@ -1876,16 +1875,15 @@ class Vigilante_Admin {
                 'ignoredCleared'      => __( 'Ignored files list cleared. Page will reload...', 'vigilante' ),
                 'selectAll'           => __( 'Select all', 'vigilante' ),
                 'bulkIgnoreSelected'  => __( 'Ignore selected', 'vigilante' ),
-                'bulkUnignoreSelected'=> __( 'Stop ignoring selected', 'vigilante' ),
                 'bulkNoSelection'     => __( 'Select at least one file first.', 'vigilante' ),
                 'bulkConfirmIgnore'   => __( 'Ignore the selected files? They will be hidden from future scan results until you remove them from the ignored list.', 'vigilante' ),
                 'bulkConfirmUnignore' => __( 'Remove the selected files from the ignored list? They will appear in scan results again.', 'vigilante' ),
                 'bulkProcessing'      => __( 'Processing...', 'vigilante' ),
                 /* translators: %d: number of files selected for bulk action. */
                 'bulkSelectedCount'   => __( '%d selected', 'vigilante' ),
-                'allClear'            => __( 'All files verified - no issues found!', 'vigilante' ),
+                'allClear'            => __( 'Good job! Nothing to report in the files that were checked.', 'vigilante' ),
                 'criticalConfigTitle' => __( 'Critical config files modified', 'vigilante' ),
-                'criticalConfigDesc'  => __( 'These files are common targets for code injection. Review the changes and approve if they are legitimate. Vigilant\'s own blocks are excluded from this check.', 'vigilante' ),
+                'criticalConfigDesc'  => __( 'These files changed since you last approved them. They are a common target for code injection, and they are also rewritten by cache, security and redirection plugins, often on every update. Review the changes and approve them if they belong to something you use: approving records the current content as the reference and does not touch the file. Vigilant\'s own blocks are excluded from this check, and Vigilant never restores these files by itself.', 'vigilante' ),
                 'approve'             => __( 'Approve', 'vigilante' ),
                 'approving'           => __( 'Approving...', 'vigilante' ),
                 'approvalLockedNotice' => $this->critical_approval_notice(),
@@ -1980,11 +1978,8 @@ class Vigilante_Admin {
                 'exportFailed'                 => __( 'Export failed', 'vigilante' ),
                 'exportLogs'                   => __( 'Export Logs', 'vigilante' ),
                 // Backup strings
-                'backupCreated'                => __( 'Backup created successfully.', 'vigilante' ),
                 'createBackupNow'              => __( 'Download Backup', 'vigilante' ),
                 'downloadBackup'               => __( 'Download Backup (.zip)', 'vigilante' ),
-                /* translators: %d: number of tables */
-                'tablesCount'                  => __( '%d tables', 'vigilante' ),
                 /* translators: 1: table count, 2: human-readable size */
                 'dbTablesTotal'                => __( '%1$d tables total (%2$s)', 'vigilante' ),
                 /* translators: 1: selected count, 2: human-readable size */
@@ -1993,13 +1988,13 @@ class Vigilante_Admin {
                 'searchNoResults'              => __( 'No matching settings found.', 'vigilante' ),
                 /* translators: %d: number of results that did not fit in the list. */
                 'searchMoreResults'            => __( '%d more results. Refine the search to see them.', 'vigilante' ),
-                'searchInTab'                  => __( 'in', 'vigilante' ),
                 // Modules string
                 /* translators: 1: enabled count, 2: total count */
                 'modulesEnabled'               => __( '%1$d / %2$d modules enabled', 'vigilante' ),
                 // Activity log label maps for JS rendering
                 'eventTypeLabels'              => array(
                     'login'    => __( 'Login', 'vigilante' ),
+                    '2fa'      => __( 'Two-factor', 'vigilante' ),
                     'user'     => __( 'User', 'vigilante' ),
                     'content'  => __( 'Content', 'vigilante' ),
                     'plugin'   => __( 'Plugin', 'vigilante' ),
@@ -2067,8 +2062,6 @@ class Vigilante_Admin {
                 'paginationOf'                 => __( '%1$d–%2$d of %3$d', 'vigilante' ),
                 'paginationEmpty'              => __( '0 items', 'vigilante' ),
                 // Security Analyzer strings
-                'analyzerScanNow'              => __( 'Scan now', 'vigilante' ),
-                'analyzerScanning'             => __( 'Scanning…', 'vigilante' ),
                 'analyzerFastPhase'            => __( 'Running fast checks…', 'vigilante' ),
                 'analyzerSlowPhase'            => __( 'Running remote checks…', 'vigilante' ),
                 'analyzerScanComplete'         => __( 'Security scan complete.', 'vigilante' ),
@@ -2076,9 +2069,6 @@ class Vigilante_Admin {
                 'analyzerShowDetails'          => __( 'Show detailed breakdown', 'vigilante' ),
                 'analyzerHideDetails'          => __( 'Hide detailed breakdown', 'vigilante' ),
                 'analyzerGoToSetting'          => __( 'Go to setting', 'vigilante' ),
-                'analyzerNoData'               => __( 'No data yet — run a scan to populate this category.', 'vigilante' ),
-                'analyzerJustNow'              => __( 'just now', 'vigilante' ),
-                'analyzerAgo'                  => __( 'ago', 'vigilante' ),
                 'analyzerSettingsSaved'        => __( 'Analyzer settings saved.', 'vigilante' ),
                 'analyzerLastScanJustNow'      => __( 'Last scan just now', 'vigilante' ),
                 'analyzerQualityExcellent'     => __( 'Excellent', 'vigilante' ),
@@ -2086,7 +2076,6 @@ class Vigilante_Admin {
                 'analyzerQualityFair'          => __( 'Fair', 'vigilante' ),
                 'analyzerQualityPoor'          => __( 'Poor', 'vigilante' ),
                 'analyzerQualityCritical'      => __( 'Critical', 'vigilante' ),
-                'analyzerPts'                  => __( 'pts', 'vigilante' ),
                 'analyzerLearnMore'            => __( 'Learn more', 'vigilante' ),
                 'analyzerInfoAllClear'         => __( 'All clear', 'vigilante' ),
                 /* translators: %d: number of findings in an info-only category */
@@ -3742,6 +3731,7 @@ class Vigilante_Admin {
                                 <input type="checkbox" name="firewall[block_bad_bots]" value="1" <?php disabled( $vg_main_locked ); ?> <?php checked( ! empty( $options['block_bad_bots'] ) ); ?>>
                                 <?php esc_html_e( 'Block known malicious bots and scanners', 'vigilante' ); ?>
                             </label>
+                            <p class="description"><?php esc_html_e( 'The list also stops SEO crawlers such as Ahrefs, Semrush, Majestic and Screaming Frog, and command line clients such as curl, wget and python-requests. To let one of them through, add its name to the User-Agent Whitelist below. On Apache part of the list is applied in .htaccess, before WordPress loads, so those requests get a 403 and do not appear in the Security Audit.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
                 </table>
@@ -4056,7 +4046,7 @@ class Vigilante_Admin {
                         <td>
                             <label>
                                 <input type="checkbox" name="firewall[limit_http_methods]" value="1" <?php checked( ! empty( $options['limit_http_methods'] ) ); ?>>
-                                <?php esc_html_e( 'Allow only GET, POST, HEAD (blocks PUT, DELETE, TRACE, etc.)', 'vigilante' ); ?>
+                                <?php esc_html_e( 'Block the HTTP methods WordPress does not use (TRACE, TRACK, CONNECT and any unknown one). GET, POST, HEAD, OPTIONS, PUT, PATCH and DELETE keep working.', 'vigilante' ); ?>
                             </label>
                         </td>
                     </tr>
@@ -6339,7 +6329,7 @@ class Vigilante_Admin {
                                 <option value="critical" <?php selected( $alert_severity, 'critical' ); ?>><?php esc_html_e( 'Critical only (recommended)', 'vigilante' ); ?></option>
                                 <option value="warning" <?php selected( $alert_severity, 'warning' ); ?>><?php esc_html_e( 'Warning and Critical', 'vigilante' ); ?></option>
                             </select>
-                            <p class="description"><?php esc_html_e( 'A new administrator, a closed plugin or a privilege escalation are all logged as Critical, so "Critical only" already covers them.', 'vigilante' ); ?></p>
+                            <p class="description"><?php esc_html_e( 'A closed plugin is logged as Critical, so "Critical only" covers it. A new administrator and a change of role are logged as Warning: they have their own emails, in Users > Admin monitoring, and reach this alert only with "Warning and Critical".', 'vigilante' ); ?></p>
                         </td>
                     </tr>
                     <tr id="field-audit-alerts-threshold">
@@ -6434,6 +6424,7 @@ class Vigilante_Admin {
             // Label maps for translated display
             $type_labels = array(
                 'login'    => __( 'Login', 'vigilante' ),
+                '2fa'      => __( 'Two-factor', 'vigilante' ),
                 'user'     => __( 'User', 'vigilante' ),
                 'content'  => __( 'Content', 'vigilante' ),
                 'plugin'   => __( 'Plugin', 'vigilante' ),
@@ -6464,6 +6455,7 @@ class Vigilante_Admin {
                 <select id="vigilante-log-type-filter" aria-label="<?php esc_attr_e( 'Filter the log by event type', 'vigilante' ); ?>">
                     <option value=""><?php esc_html_e( 'All Types', 'vigilante' ); ?></option>
                     <option value="login"><?php esc_html_e( 'Login', 'vigilante' ); ?></option>
+                    <option value="2fa"><?php esc_html_e( 'Two-factor', 'vigilante' ); ?></option>
                     <option value="user"><?php esc_html_e( 'User', 'vigilante' ); ?></option>
                     <option value="content"><?php esc_html_e( 'Content', 'vigilante' ); ?></option>
                     <option value="plugin"><?php esc_html_e( 'Plugin', 'vigilante' ); ?></option>
@@ -7009,6 +7001,47 @@ class Vigilante_Admin {
         <?php
     }
 
+    /**
+     * Print what each kind of finding in a list usually is and what to do
+     *
+     * One line per kind actually present in the list, from the single source
+     * of that text, Vigilante_File_Integrity::finding_guidance().
+     *
+     * @param array $items Findings of one section of the last scan.
+     */
+    private function render_fi_guidance( $items ) {
+        $seen   = array();
+        $guides = array();
+
+        foreach ( (array) $items as $item ) {
+            $type = is_array( $item ) ? (string) ( $item['type'] ?? '' ) : '';
+
+            if ( '' === $type || 'vigilante_self' === $type || isset( $seen[ $type ] ) ) {
+                continue;
+            }
+            $seen[ $type ] = true;
+
+            $guide = Vigilante_File_Integrity::finding_guidance( $type );
+
+            if ( '' !== $guide['advice'] ) {
+                // A plugin and a theme share their text: one line for both,
+                // under the two names.
+                $guides[ $guide['advice'] ][] = $guide['label'];
+            }
+        }
+
+        if ( empty( $guides ) ) {
+            return;
+        }
+        ?>
+        <ul class="vigilante-fi-guidance" style="margin: 8px 0 12px 18px; list-style: disc;">
+            <?php foreach ( $guides as $advice => $labels ) : ?>
+            <li><strong><?php echo esc_html( implode( ', ', $labels ) ); ?>:</strong> <?php echo esc_html( $advice ); ?></li>
+            <?php endforeach; ?>
+        </ul>
+        <?php
+    }
+
     private function render_tab_file_integrity() {
         $is_disabled = $this->render_module_disabled_notice( 'file_integrity' );
         $options = $this->settings->get_section( 'file_integrity' );
@@ -7082,7 +7115,8 @@ class Vigilante_Admin {
                     <?php esc_html_e( 'File Integrity Monitoring', 'vigilante' ); ?>
                     <span class="vigilante-method-badge php"><?php esc_html_e( 'PHP', 'vigilante' ); ?></span>
                 </h2>
-                <p><?php esc_html_e( 'Detects file modifications using WordPress.org checksums.', 'vigilante' ); ?></p>
+                <p><?php esc_html_e( 'Compares WordPress, and the plugins and themes that come from WordPress.org, with the official copy of each file, looks for code where there should be none (uploads and the site root) and watches wp-config.php and .htaccess for changes.', 'vigilante' ); ?></p>
+                <p class="description"><?php esc_html_e( 'What it cannot compare: plugins and themes that are not on WordPress.org, must-use plugins, drop-ins (advanced-cache.php, object-cache.php and the like) and the other folders of wp-content have no official copy. They are searched for hidden code, which finds malware that disguises itself and misses most code written in the open. The results name what could not be compared.', 'vigilante' ); ?></p>
 
                 <table class="form-table">
                     <tr>
@@ -7107,11 +7141,11 @@ class Vigilante_Admin {
                         <th scope="row"><label for="vigilante-f-file-integrity-notify-level"><?php esc_html_e( 'Email Notifications', 'vigilante' ); ?></label></th>
                         <td>
                             <select id="vigilante-f-file-integrity-notify-level" name="file_integrity[notify_level]">
-                                <option value="all" <?php selected( $notify_level, 'all' ); ?>><?php esc_html_e( 'All issues (modified + suspicious)', 'vigilante' ); ?></option>
-                                <option value="suspicious_only" <?php selected( $notify_level, 'suspicious_only' ); ?>><?php esc_html_e( 'Suspicious files only', 'vigilante' ); ?></option>
+                                <option value="all" <?php selected( $notify_level, 'all' ); ?>><?php esc_html_e( 'Every finding, modified files included', 'vigilante' ); ?></option>
+                                <option value="suspicious_only" <?php selected( $notify_level, 'suspicious_only' ); ?>><?php esc_html_e( 'Serious findings only', 'vigilante' ); ?></option>
                                 <option value="disabled" <?php selected( $notify_level, 'disabled' ); ?>><?php esc_html_e( 'Disabled', 'vigilante' ); ?></option>
                             </select>
-                            <p class="description"><?php esc_html_e( '"Suspicious files only" reduces noise by skipping modified file notifications. Recommended for most sites.', 'vigilante' ); ?></p>
+                            <p class="description"><?php esc_html_e( 'Serious findings are suspicious and extra files, changes in wp-config.php or .htaccess and closed plugins. That is the recommended choice: a file that is only modified is rarely more than an update that did not finish. The email goes out when a scan finds something new: a finding you were already told about is not sent again, unless the file changes once more.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
                     <tr>
@@ -7119,9 +7153,9 @@ class Vigilante_Admin {
                         <td>
                             <label>
                                 <input type="checkbox" name="file_integrity[instant_alert]" value="1" <?php checked( ! empty( $options['instant_alert'] ) ); ?>>
-                                <?php esc_html_e( 'Send immediate alert when modified, suspicious or additional files are detected, or when a closed plugin is found', 'vigilante' ); ?>
+                                <?php esc_html_e( 'Email every finding when a scan ends, modified files included, and email a closed plugin as soon as the daily check finds it', 'vigilante' ); ?>
                             </label>
-                            <p class="description"><?php esc_html_e( 'Fires even if the Email Notifications setting above is set to Disabled.', 'vigilante' ); ?></p>
+                            <p class="description"><?php esc_html_e( 'This takes precedence over the choice above, Disabled included.', 'vigilante' ); ?></p>
                             <p class="description">
                                 <?php
                                 printf(
@@ -7149,27 +7183,27 @@ class Vigilante_Admin {
                             <fieldset>
                                 <label>
                                     <input type="checkbox" name="file_integrity[scan_core]" value="1" <?php checked( $options['scan_core'] ?? true ); ?>>
-                                    <?php esc_html_e( 'Core files (compare against WordPress.org checksums)', 'vigilante' ); ?>
+                                    <?php esc_html_e( 'WordPress core (compared with WordPress.org) and the other files in the site root', 'vigilante' ); ?>
                                 </label>
                                 <br>
                                 <label>
                                     <input type="checkbox" name="file_integrity[scan_plugins]" value="1" <?php checked( $options['scan_plugins'] ?? true ); ?>>
-                                    <?php esc_html_e( 'Plugins (WordPress.org repository plugins)', 'vigilante' ); ?>
+                                    <?php esc_html_e( 'Plugins (compared with WordPress.org; the rest, and the other folders of wp-content, are only searched for hidden code)', 'vigilante' ); ?>
                                 </label>
                                 <br>
                                 <label>
                                     <input type="checkbox" name="file_integrity[scan_themes]" value="1" <?php checked( $options['scan_themes'] ?? true ); ?>>
-                                    <?php esc_html_e( 'Themes (WordPress.org repository themes)', 'vigilante' ); ?>
+                                    <?php esc_html_e( 'Themes (compared with WordPress.org; the rest are only searched for hidden code)', 'vigilante' ); ?>
                                 </label>
                                 <br>
                                 <label>
                                     <input type="checkbox" name="file_integrity[scan_uploads]" value="1" <?php checked( $options['scan_uploads'] ?? true ); ?>>
-                                    <?php esc_html_e( 'Uploads directory (detect PHP files, double extensions, .htaccess)', 'vigilante' ); ?>
+                                    <?php esc_html_e( 'Uploads directory (PHP and other scripts, double extensions, .htaccess and PHP configuration files)', 'vigilante' ); ?>
                                 </label>
                                 <br>
                                 <label>
                                     <input type="checkbox" name="file_integrity[scan_critical_config]" value="1" <?php disabled( $vg_main_locked ); ?> <?php checked( $options['scan_critical_config'] ?? true ); ?>>
-                                    <?php esc_html_e( 'Critical config files (wp-config.php, .htaccess baseline monitoring)', 'vigilante' ); ?>
+                                    <?php esc_html_e( 'wp-config.php and .htaccess (any change since you last approved them)', 'vigilante' ); ?>
                                     <?php if ( $vg_main_locked ) : ?>
                                         <span class="description" style="display:block;margin-left:24px;"><?php echo esc_html( Vigilante_Settings::get_shared_files_notice() ); ?></span>
                                     <?php endif; ?>
@@ -7185,8 +7219,8 @@ class Vigilante_Admin {
                     <tr>
                         <th scope="row"><label for="vigilante-f-file-integrity-excluded-paths"><?php esc_html_e( 'Excluded Paths', 'vigilante' ); ?></label></th>
                         <td>
-                            <textarea id="vigilante-f-file-integrity-excluded-paths" name="file_integrity[excluded_paths]" rows="4" class="large-text code" placeholder="wp-content/cache&#10;wp-content/languages"><?php echo esc_textarea( implode( "\n", $options['excluded_paths'] ?? array() ) ); ?></textarea>
-                            <p class="description"><?php esc_html_e( 'One path per line, relative to the WordPress root. A path such as wp-content/cache excludes exactly that folder and everything under it. A name on its own, such as cache, excludes any folder called exactly that, wherever it is.', 'vigilante' ); ?></p>
+                            <textarea id="vigilante-f-file-integrity-excluded-paths" name="file_integrity[excluded_paths]" rows="4" class="large-text code" placeholder="wp-content/backups"><?php echo esc_textarea( implode( "\n", $options['excluded_paths'] ?? array() ) ); ?></textarea>
+                            <p class="description"><?php esc_html_e( 'One path per line, relative to the WordPress root. A path such as wp-content/backups excludes exactly that folder and everything under it. A name on its own, such as backups, excludes any folder called exactly that, wherever it is. Nothing in an excluded folder is looked at, so keep the list short.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
                     <tr>
@@ -7231,9 +7265,47 @@ class Vigilante_Admin {
 
         <?php $this->render_self_protection_box( $options ); ?>
 
+        <?php
+        // Whole folders of code left out of every scan. A partial scan tells
+        // how to check the rest by excluding what it did check, and those
+        // lines have to come out afterwards: with them in place a scan comes
+        // out complete and clean without having looked there. Said for as
+        // long as they are in the list, whoever put them there and why.
+        $vg_fi_tool         = new Vigilante_File_Integrity( $this->settings, $this->database );
+        $vg_excluded_code   = $vg_fi_tool->excluded_code_folders();
+        $vg_folders_to_skip = $vg_fi_tool->folders_to_exclude( $last_results );
+        ?>
+        <?php if ( ! empty( $vg_excluded_code ) ) : ?>
+        <div id="vigilante-fi-excluded-code" class="notice notice-warning inline">
+            <p>
+                <strong>
+                <?php
+                printf(
+                    /* translators: %s: Comma separated list of folders */
+                    esc_html__( 'Excluded Paths holds whole folders of plugins or themes, or the uploads folder: %s.', 'vigilante' ),
+                    esc_html( implode( ', ', $vg_excluded_code ) )
+                );
+                ?>
+                </strong>
+                <?php esc_html_e( 'No scan looks inside them, the scheduled one included, and a scan can come out complete and clean without having checked them. If you added them to check the rest of a large site, take them out once that scan is done.', 'vigilante' ); ?>
+            </p>
+        </div>
+        <?php endif; ?>
+
         <?php if ( $last_scan || $has_closed || $closed_last_check > 0 ) : ?>
         <div id="vigilante-section-fi-last-scan" class="vigilante-settings-section">
             <h2><?php esc_html_e( 'Last Scan Results', 'vigilante' ); ?></h2>
+            <?php
+            // A scan the server stops halfway stores nothing, and neither
+            // does one WordPress never starts: the tab kept showing the
+            // last result that did finish, with nothing to say that scans
+            // had stopped. Its date is the only sign.
+            if ( $last_scan && $this->settings->is_module_enabled( 'file_integrity' ) && Vigilante_File_Integrity::is_scan_overdue( $last_scan, $options['scan_frequency'] ?? 'daily' ) ) :
+                ?>
+            <div class="notice notice-warning inline">
+                <p><strong><?php esc_html_e( 'Scans are scheduled, and none has finished since the date below.', 'vigilante' ); ?></strong> <?php esc_html_e( 'Either WordPress is not running its scheduled tasks, or the server stops the scan before it ends, and a scan that is stopped stores no result. What you see here is old. Run a scan now: if it finishes, the scheduled tasks are what is failing. If it does not, the site is too large for the time the server gives a request, and adding large folders that do not need checking to Excluded Paths leaves more time for the rest.', 'vigilante' ); ?></p>
+            </div>
+            <?php endif; ?>
             <?php if ( $last_scan ) : ?>
             <p>
                 <?php
@@ -7318,10 +7390,110 @@ class Vigilante_Admin {
                         <?php endif; ?>
                     </div>
 
+                    <?php
+                    // A scan that could not finish, or could not get the official
+                    // copy to compare with, checked less than it seems. Until now
+                    // its errors were stored and never shown, and the tab could
+                    // say that every file had passed.
+                    $vg_scan_errors = ( $last_results && ! empty( $last_results['errors'] ) && is_array( $last_results['errors'] ) ) ? $last_results['errors'] : array();
+                    $vg_scan_partial = ! empty( $vg_scan_errors ) || ( $last_results && ! empty( $last_results['incomplete'] ) );
+
+                    // Files of the official copies that are not on the server. Core
+                    // files under wp-content are left out: results stored before
+                    // the bundled themes and plugins got their own turn list
+                    // there the ones people delete on purpose.
+                    $vg_missing_core = array();
+                    if ( $last_results && ! empty( $last_results['missing'] ) && is_array( $last_results['missing'] ) ) {
+                        foreach ( $last_results['missing'] as $item ) {
+                            if ( ! is_array( $item ) || ! isset( $item['file'] ) ) {
+                                continue;
+                            }
+
+                            $vg_missing_type = (string) ( $item['type'] ?? '' );
+
+                            if ( in_array( $vg_missing_type, array( 'plugin', 'theme' ), true )
+                                || ( 'core' === $vg_missing_type && 0 !== strpos( (string) $item['file'], 'wp-content/' ) ) ) {
+                                $vg_missing_core[] = (string) $item['file'];
+                            }
+                        }
+                    }
+                    ?>
+
+                    <?php if ( $last_results && ! empty( $last_results['unverified'] ) && is_array( $last_results['unverified'] ) ) : ?>
+                    <p class="description">
+                        <?php
+                        printf(
+                            /* translators: %s: Comma separated list of plugin and theme names */
+                            esc_html__( 'No official copy to compare with, so only searched for hidden code: %s.', 'vigilante' ),
+                            esc_html( implode( ', ', array_unique( array_map( 'strval', $last_results['unverified'] ) ) ) )
+                        );
+                        ?>
+                    </p>
+                    <?php endif; ?>
+
+                    <?php
+                    // What the scan did not get to, by name. A scan starts from
+                    // the beginning every time, so on a site too large for it
+                    // these are the same on every scan, and whoever reads the
+                    // result has to know that nothing here was looked at.
+                    $vg_scan_notes = array_merge( $vg_scan_errors, Vigilante_File_Integrity::not_checked_lines( $last_results ) );
+                    ?>
+                    <?php if ( $vg_scan_partial ) : ?>
+                    <div class="notice notice-warning inline">
+                        <p><strong><?php esc_html_e( 'The last scan could not check everything, so its result is partial.', 'vigilante' ); ?></strong></p>
+                        <?php if ( ! empty( $vg_scan_notes ) ) : ?>
+                        <ul style="margin: 0 0 8px 18px; list-style: disc;">
+                            <?php foreach ( $vg_scan_notes as $vg_scan_note ) : ?>
+                            <li><?php echo esc_html( (string) $vg_scan_note ); ?></li>
+                            <?php endforeach; ?>
+                        </ul>
+                        <?php endif; ?>
+                        <p>
+                            <?php
+                            printf(
+                                /* translators: %d: Seconds a scan runs for at most */
+                                esc_html__( 'Run the scan again: a second scan is faster, because what it downloads from WordPress.org is kept for a while. If the result is still partial, either the server cannot reach WordPress.org or the site is larger than a scan can check in its %d seconds, and then every scan leaves the same part unchecked. Adding large folders that do not need checking to Excluded Paths leaves more time for the rest.', 'vigilante' ),
+                                (int) Vigilante_File_Integrity::MAX_SCAN_SECONDS
+                            );
+                            ?>
+                        </p>
+                        <?php if ( ! empty( $vg_folders_to_skip ) ) : ?>
+                        <p><strong><?php esc_html_e( 'To check what was left out:', 'vigilante' ); ?></strong></p>
+                        <ol style="margin: 0 0 8px 18px;">
+                            <li><?php esc_html_e( 'Deal first with what this scan found in the plugins and themes it did check: the next result will not list it. Then add the lines below, which are their folders, to Excluded Paths, higher up on this page, and save.', 'vigilante' ); ?></li>
+                            <li><?php esc_html_e( 'Press Run Scan Now. The scan spends its time on the rest. If it comes out partial again, repeat with the lines it gives then.', 'vigilante' ); ?></li>
+                            <li><?php esc_html_e( 'Take those lines out of Excluded Paths. While they are there no scan looks inside those folders, the scheduled one included.', 'vigilante' ); ?></li>
+                        </ol>
+                        <textarea id="vigilante-fi-folders-to-exclude" readonly rows="<?php echo (int) min( 12, max( 3, count( $vg_folders_to_skip ) ) ); ?>" class="large-text code" style="margin-bottom: 8px;"><?php echo esc_textarea( implode( "\n", $vg_folders_to_skip ) ); ?></textarea>
+                        <?php endif; ?>
+                    </div>
+                    <?php endif; ?>
+
+                    <?php if ( ! empty( $vg_missing_core ) ) : ?>
+                    <div class="vigilante-file-list">
+                        <h3><?php esc_html_e( 'Missing Files', 'vigilante' ); ?></h3>
+                        <p class="description"><?php esc_html_e( 'These files are in the official copy and not on the server. Reinstall what they belong to (WordPress from Dashboard > Updates, a plugin or a theme from its own screen) and scan again.', 'vigilante' ); ?></p>
+                        <ul style="margin: 8px 0 12px 18px; list-style: disc;">
+                            <?php foreach ( array_slice( $vg_missing_core, 0, 20 ) as $vg_missing_file ) : ?>
+                            <li><code><?php echo esc_html( $vg_missing_file ); ?></code></li>
+                            <?php endforeach; ?>
+                        </ul>
+                        <?php if ( count( $vg_missing_core ) > 20 ) : ?>
+                        <p class="description">
+                            <?php
+                            /* translators: %d: Number of additional files */
+                            printf( esc_html__( '... and %d more', 'vigilante' ), (int) ( count( $vg_missing_core ) - 20 ) );
+                            ?>
+                        </p>
+                        <?php endif; ?>
+                    </div>
+                    <?php endif; ?>
+
                     <?php if ( ! empty( $last_results['suspicious'] ) ) : ?>
                     <div class="vigilante-file-list vigilante-suspicious-files vigilante-paginated-section" data-bulk-mode="ignore">
                         <h3 style="color: #d63638;"><?php esc_html_e( 'Suspicious Files', 'vigilante' ); ?></h3>
-                        <p class="description" style="color: #d63638;"><?php esc_html_e( '&#9888; Warning: These files may contain malicious code or are in unexpected locations. Review immediately!', 'vigilante' ); ?></p>
+                        <p class="description" style="color: #d63638;"><?php esc_html_e( '&#9888; Files that can run code where none is expected, or that contain code written the way malware hides itself. Real infections show up here, and so do harmless files that plugins generate. Check the path and the reason before acting.', 'vigilante' ); ?></p>
+                        <?php $this->render_fi_guidance( $last_results['suspicious'] ); ?>
                         <div class="vigilante-fi-bulk-bar">
                             <button type="button" class="button vigilante-bulk-ignore" disabled><?php esc_html_e( 'Ignore selected', 'vigilante' ); ?></button>
                             <span class="vigilante-fi-bulk-count" aria-live="polite"></span>
@@ -7359,6 +7531,9 @@ class Vigilante_Admin {
                                     }
                                     if ( 'vigilante_self' === $file_type ) {
                                         $file_type = __( 'Vigilant (self)', 'vigilante' );
+                                    } else {
+                                        // A name a person can read, instead of the internal slug.
+                                        $file_type = Vigilante_File_Integrity::finding_guidance( $file_type )['label'];
                                     }
                                     ?>
                                     <tr>
@@ -7379,7 +7554,8 @@ class Vigilante_Admin {
                     <?php if ( ! empty( $last_results['extra'] ) ) : ?>
                     <div class="vigilante-file-list vigilante-extra-files vigilante-paginated-section" data-bulk-mode="ignore">
                         <h3 style="color: #b32d2e;"><?php esc_html_e( 'Extra Files', 'vigilante' ); ?></h3>
-                        <p class="description"><?php esc_html_e( 'PHP files found in plugins or themes that are not part of the original distribution from WordPress.org. May be legitimate customizations or injected backdoors.', 'vigilante' ); ?></p>
+                        <p class="description"><?php esc_html_e( 'Files that are not part of WordPress, or of the plugin or theme they sit in. Many are legitimate, and an injected file looks the same from here, so confirm where each one comes from.', 'vigilante' ); ?></p>
+                        <?php $this->render_fi_guidance( $last_results['extra'] ); ?>
                         <div class="vigilante-fi-bulk-bar">
                             <button type="button" class="button vigilante-bulk-ignore" disabled><?php esc_html_e( 'Ignore selected', 'vigilante' ); ?></button>
                             <span class="vigilante-fi-bulk-count" aria-live="polite"></span>
@@ -7403,6 +7579,9 @@ class Vigilante_Admin {
                                     $file_type = is_array( $item ) ? ( $item['type'] ?? 'unknown' ) : 'unknown';
                                     if ( 'vigilante_self' === $file_type ) {
                                         $file_type = __( 'Vigilant (self)', 'vigilante' );
+                                    } else {
+                                        // A name a person can read, instead of the internal slug.
+                                        $file_type = Vigilante_File_Integrity::finding_guidance( $file_type )['label'];
                                     }
                                     ?>
                                     <tr>
@@ -7453,7 +7632,7 @@ class Vigilante_Admin {
                     <div class="vigilante-file-list vigilante-critical-config-files">
                         <h3 style="color: #e36210;"><?php esc_html_e( 'Critical config files modified', 'vigilante' ); ?></h3>
                         <p class="description">
-                            <?php esc_html_e( 'These files are common targets for code injection. Review the changes and approve if they are legitimate. Vigilant\'s own blocks are excluded from this check.', 'vigilante' ); ?>
+                            <?php esc_html_e( 'These files changed since you last approved them. They are a common target for code injection, and they are also rewritten by cache, security and redirection plugins, often on every update. Review the changes and approve them if they belong to something you use: approving records the current content as the reference and does not touch the file. Vigilant\'s own blocks are excluded from this check, and Vigilant never restores these files by itself.', 'vigilante' ); ?>
                         </p>
                         <table class="wp-list-table widefat fixed striped">
                             <thead>
@@ -7616,7 +7795,8 @@ class Vigilante_Admin {
                     <?php if ( ! empty( $regular_modified ) ) : ?>
                     <div class="vigilante-file-list vigilante-paginated-section" data-bulk-mode="ignore">
                         <h3><?php esc_html_e( 'Modified Files', 'vigilante' ); ?></h3>
-                        <p class="description"><?php esc_html_e( 'These files (apparently) differ from the original WordPress or plugin versions.', 'vigilante' ); ?></p>
+                        <p class="description"><?php esc_html_e( 'These files do not match the copy WordPress.org publishes for the installed version.', 'vigilante' ); ?></p>
+                        <?php $this->render_fi_guidance( $regular_modified ); ?>
                         <div class="vigilante-fi-bulk-bar">
                             <button type="button" class="button vigilante-bulk-ignore" disabled><?php esc_html_e( 'Ignore selected', 'vigilante' ); ?></button>
                             <span class="vigilante-fi-bulk-count" aria-live="polite"></span>
@@ -7649,6 +7829,9 @@ class Vigilante_Admin {
                                     }
                                     if ( 'vigilante_self' === $file_type ) {
                                         $file_type = __( 'Vigilant (self)', 'vigilante' );
+                                    } else {
+                                        // A name a person can read, instead of the internal slug.
+                                        $file_type = Vigilante_File_Integrity::finding_guidance( $file_type )['label'];
                                     }
                                     ?>
                                     <tr>
@@ -7672,9 +7855,9 @@ class Vigilante_Admin {
                     // travel in the tables below).
                     $vg_self_alarm = in_array( $this->self_integrity_summary( $options )['tone'], array( 'critical', 'off', 'warning' ), true );
                     ?>
-                    <?php if ( $last_results && ! $vg_self_alarm && empty( $critical_modified ) && empty( $regular_modified ) && empty( $last_results['suspicious'] ) && empty( $last_results['extra'] ) && ! $has_closed ) : ?>
+                    <?php if ( $last_results && ! $vg_self_alarm && empty( $critical_modified ) && empty( $regular_modified ) && empty( $last_results['suspicious'] ) && empty( $last_results['extra'] ) && ! $has_closed && ! $vg_scan_partial && empty( $vg_missing_core ) ) : ?>
                     <p class="vigilante-all-clear" style="color: #00a32a; font-weight: bold;">
-                        <?php esc_html_e( 'Good Job! All files passed integrity check. No issues found.', 'vigilante' ); ?>
+                        <?php esc_html_e( 'Good job! Nothing to report in the files that were checked.', 'vigilante' ); ?>
                     </p>
                     <?php endif; ?>
                 <?php endif; ?>
@@ -7725,7 +7908,7 @@ class Vigilante_Admin {
         <?php if ( ! empty( $ignored_files ) ) : ?>
         <div id="vigilante-section-fi-ignored" class="vigilante-settings-section">
             <h2><?php esc_html_e( 'Ignored Files', 'vigilante' ); ?></h2>
-            <p class="description"><?php esc_html_e( 'These files are excluded from scan results and email notifications. They will still be scanned but any findings will be hidden.', 'vigilante' ); ?></p>
+            <p class="description"><?php esc_html_e( 'These files are excluded from scan results and email notifications. They will still be scanned but any findings will be hidden. To leave a whole folder out, add it to Excluded Paths instead.', 'vigilante' ); ?></p>
             <div class="vigilante-paginated-section" data-bulk-mode="unignore">
                 <div class="vigilante-fi-bulk-bar">
                     <button type="button" class="button vigilante-bulk-unignore" disabled><?php esc_html_e( 'Stop ignoring selected', 'vigilante' ); ?></button>
@@ -8960,6 +9143,10 @@ class Vigilante_Admin {
 
         delete_option( 'vigilante_last_integrity_results' );
         delete_option( 'vigilante_last_integrity_scan' );
+
+        // Starting over also means being told again: the next scan emails
+        // whatever it finds, as if nothing had been reported before.
+        delete_option( Vigilante_File_Integrity::NOTIFIED_OPTION );
 
         /*
          * A pending change to wp-config.php or the root .htaccess is closed by

@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.0.2
+Stable tag: 3.0.3
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -133,14 +133,15 @@ Achieve Grade A security ratings:
 
 Detect unauthorized changes to your files and compromised plugins:
 
-* WordPress core verification against official checksums
-* Plugin and theme file monitoring with WordPress.org checksums
+* WordPress core against official checksums, plus files added to wp-admin and wp-includes
+* Plugins against WordPress.org checksums, themes against their WordPress.org package
+* Whatever has no official copy (other plugins and themes, must-use plugins, drop-ins, the rest of wp-content) searched for hidden code
 * Critical config files (wp-config.php, .htaccess) monitored against baseline, detecting code injection even in files with no official checksum
-* Closed and removed plugins detection - daily check against the WordPress.org repository, flagging any installed plugin closed for malware, security issues or guideline violations, including both explicit closures and silent "removed" takedowns, with per-slug Ignore for legacy plugins you can't uninstall yet
+* Closed and removed plugins detection: a daily check against WordPress.org flags any installed plugin that was closed or silently removed, with per-plugin Ignore
 * Line-level diff view of changes, with per-file approval workflow
-* Suspicious code scanning for plugins and themes without checksums
 * Extra file detection in plugins and themes (files not in original distribution)
-* Uploads directory scanning for PHP files, double extensions and .htaccess, with smart classification of dangerous rules vs protective ones
+* Uploads scanning for PHP, double extensions and .htaccess files
+* What each finding usually is and what to do about it
 * Root directory scanning for non-core PHP files (common attack vector)
 * String concatenation obfuscation detection
 * Configurable notification levels and an ignore list to dismiss known files
@@ -188,7 +189,7 @@ Track everything happening on your site:
 
 On-demand security audit built into the Dashboard. No external services, no accounts, no API keys - everything runs on your server:
 
-* 40+ checks across 6 categories: SSL/TLS, HTTP Headers, WP Exposure, Access & Auth, Sensitive Files and Internal Checks
+* More than 50 checks across 6 categories: SSL/TLS, HTTP Headers, WP Exposure, Access & Auth, Sensitive Files and Internal Checks
 * Single 0-100 score with A-E grade, plus per-category breakdown and explanatory details for every check
 * 16 exclusive internal checks impossible from the outside: PHP end-of-life status, pending updates, inactive plugins, closed or removed plugins, Vigilant self-protection, file permissions, default salts detection, `wp_` table prefix, `admin` username, administrators without 2FA enrolled, module status, recent audit errors, last File Integrity scan result and whether audit alerts are configured
 * DNS-only reputation lookup against Spamhaus ZEN, Barracuda BRBL and SpamCop SCBL (informational - listings are flagged but don't deduct from the score)
@@ -228,14 +229,14 @@ Utilities included:
 * **Database Backup** - Download a full or partial database backup as ZIP with table selection
 * **Database Prefix Change** - Change the default wp_ prefix to a random secure prefix
 * **Export/Import Settings** - Transfer your configuration between sites
-* **Manual Backup** - Create backups of .htaccess and wp-config.php on demand
+* **Configuration Backup** - Download wp-config.php, .htaccess and robots.txt as a ZIP
 * **Reset to Defaults** - Start fresh with one click
 
 == Safe by Design ==
 
-Your existing .htaccess, wp-config.php and robots.txt are automatically backed up before any modifications. Backups are stored in the WordPress database, never as files under the web root, and verified with MD5 checksums.
+Vigilant validates .htaccess and wp-config.php before writing to them, and keeps no copy of them, because they hold your database password: download a backup from Settings & Tools first.
 
-When you deactivate Vigilant, all security rules are automatically removed and your original configuration files are restored. No leftover code, no broken sites.
+Deactivating removes its blocks from both files and brings back the lines it had commented out. Switch Under Attack mode off before deactivating.
 
 Vigilant checks its own files too, and tells you how to check them yourself: every release ships a MANIFEST.sha256 that sha256sum can verify, and WordPress.org publishes the same checksums for comparison.
 
@@ -269,11 +270,20 @@ No. Vigilant is optimized for performance. The firewall uses efficient pattern m
 
 = What happens when I activate the plugin? =
 
-Vigilant immediately backs up your existing .htaccess and wp-config.php to the database, then applies default security settings. All modules are enabled with balanced defaults suitable for most sites.
+Vigilant applies its default settings: all modules on, with balanced values for most sites. On Apache and LiteSpeed that writes two blocks to .htaccess, and it writes one block of constants to wp-config.php.
+
+If wp-config.php already defines DISALLOW_FILE_EDIT, DISALLOW_FILE_MODS, FORCE_SSL_ADMIN, FORCE_SSL_LOGIN, DISABLE_WP_CRON, WP_DEBUG, WP_DEBUG_LOG, WP_DEBUG_DISPLAY or SCRIPT_DEBUG, Vigilant comments that line out, marks it and sets the value from its own settings in WP Hardening. If you rely on one of them, check that tab after activating. Your lines come back when you deactivate.
+
+Vigilant keeps no copy of those two files. If you want one, make it before activating.
 
 = What happens when I deactivate the plugin? =
 
-All security modifications are automatically reverted. The .htaccess rules are removed, wp-config.php constants are restored to their original values, and scheduled tasks are cleared. Your site returns to its pre-Vigilant state.
+Vigilant removes its Protection and Security Headers blocks from .htaccess, removes its constants from wp-config.php, brings back the lines it had commented out there and clears its scheduled tasks.
+
+Two things to know:
+
+* Switch Under Attack mode off first. Its .htaccess block is removed when the mode ends, not on deactivation.
+* If you delete the plugin folder by FTP instead of deactivating, nothing is reverted: remove the blocks between the Vigilante markers by hand.
 
 = How does two-factor authentication work? =
 
@@ -303,6 +313,17 @@ Access your site via FTP/SFTP and either rename the plugin folder to disable it 
 
 The firewall is configured to allow normal WordPress operations, including the block editor, REST API, and popular page builders. If you experience issues, you can whitelist specific IPs or adjust rate limiting thresholds.
 
+Block Bad Bots also stops SEO crawlers (Ahrefs, Semrush, Majestic, Screaming Frog) and command line clients (curl, wget, python-requests). To let one of them through, add its name to the User-Agent Whitelist.
+
+= Why is a blocked request missing from the Security Audit? =
+
+Requests are blocked in two places:
+
+* Rules in .htaccess (bad bots, bad query strings, unusual HTTP methods, protected files) answer 403 before WordPress loads, so nothing is logged.
+* The PHP firewall logs what it blocks. "Bad bot blocked" shows the entry of the list that matched; the full User-Agent is in its own column.
+
+A page served by a page cache or a CDN reaches neither. Read the log as a floor, not as a count of every attack.
+
 = Can I use this with other security plugins? =
 
 While Vigilant works standalone, running multiple security plugins can cause conflicts. We recommend testing in a staging environment first if you need to combine security solutions.
@@ -321,11 +342,15 @@ Use the built-in header testing tool in the Security Headers tab, or visit secur
 
 = What is Security Check? =
 
-Security Check is an on-demand audit built into the Dashboard. It runs 40+ checks across 6 categories (SSL/TLS, HTTP headers, WordPress exposure, access and authentication, sensitive files, and internal checks) and returns a 0–100 score with an A–E grade. Unlike external online scanners, it runs entirely on your server and has access to 16 exclusive internal checks: PHP end-of-life status, pending updates, closed/removed plugins, Vigilant self-protection, file permissions, default salts detection, administrators without 2FA enrolled, and more.
+Security Check is an on-demand audit built into the Dashboard. It runs more than 50 checks across 6 categories (SSL/TLS, HTTP headers, WordPress exposure, access and authentication, sensitive files, and internal checks) and returns a 0–100 score with an A–E grade. Unlike external online scanners, it runs entirely on your server and has access to 16 exclusive internal checks: PHP end-of-life status, pending updates, closed/removed plugins, Vigilant self-protection, file permissions, default salts detection, administrators without 2FA enrolled, and more.
 
 = Does Security Check send my data to an external service? =
 
-No. All checks run on your server. The only external traffic is three DNS-only lookups against public blacklists (Spamhaus, Barracuda, SpamCop) for the reputation category — these are standard DNS queries with no authentication, no API keys, and no payload beyond your site's IP address. If you disable the reputation category, Security Check makes zero external network calls.
+No. All checks run on your server. The only external traffic is three DNS lookups against public blacklists (Spamhaus, Barracuda, SpamCop) for the reputation category: standard DNS queries with no authentication, no API keys, and nothing sent beyond your site's IP address.
+
+= What does the Security Check score measure? =
+
+It adds the points of every check that passes. Some checks test the live site: HTTPS, the headers the browser receives, files that should not be reachable. Others read a Vigilant setting, such as the custom login URL, the login attempt limit or two-factor, and tell you whether it is on, not whether a CDN or your host changes the result. The Configuration Score on the Dashboard only looks at settings, so the two numbers can differ.
 
 = How often should I run Security Check? =
 
@@ -351,17 +376,80 @@ You can limit how many concurrent sessions each user can have. When the limit is
 
 Yes. The security audit log can be exported to CSV format for external analysis or compliance reporting. You can also filter logs by event type, user, or date range before exporting.
 
+= Which events are sent by email? =
+
+Every event is logged as Info, Warning or Critical. By email you get:
+
+* Security Audit alerts: Critical events by default, such as a closed plugin. Choose "Warning and Critical" to get more.
+* Admin monitoring, in Users: a new administrator, a change of role to administrator and changes to an administrator's email or password. Each has its own checkbox.
+* File Integrity: the findings of each scan, according to the level you chose.
+* Self-protection: always, when Vigilant's own files change.
+
 = What files does the integrity scanner check? =
 
-The scanner compares WordPress core files, plugin files, and theme files against official checksums from WordPress.org. Plugins and themes without available checksums are also scanned using strict obfuscation pattern detection. The uploads directory is scanned for PHP files, double extensions, and .htaccess files. Extra PHP files not present in original distributions are detected and, if they contain suspicious code, automatically flagged as suspicious.
+It checks:
+
+* WordPress core, against the checksums WordPress.org publishes, plus any file added to wp-admin or wp-includes.
+* Plugins from WordPress.org, against their checksums.
+* Themes from WordPress.org, against the package WordPress.org publishes for the installed version. It is downloaded once per version.
+* In both, files that changed, files that are missing and PHP files that are not in the published copy.
+* Plugins and themes from anywhere else, must-use plugins and drop-ins (advanced-cache.php, object-cache.php and the like). There is no official copy of them, so they are searched for obfuscated code.
+* The uploads directory, for PHP and other scripts, double extensions, .htaccess files and PHP configuration files.
+* The other folders of wp-content (languages, upgrade and the like), for hidden code in their PHP files, unless they are in Excluded Paths. A translation file has to hold text and nothing else.
+* The site root, wp-content and the plugins folder, for loose files that do not belong there, backups left within reach and a .user.ini or php.ini that loads another file.
+* wp-config.php and .htaccess, for any change since you last approved them.
+
+The results name what could not be compared. For those, a clean result means no hidden code was found, not that every file is the original one. A PHP file too large to be searched (over 8 MB) is listed as not searched.
+
+= What do the file integrity findings mean? =
+
+* Modified: the file does not match the copy on WordPress.org. Usually an update that did not finish or a manual edit. Reinstalling the plugin, theme or WordPress fixes it.
+* Suspicious: code where none is expected (PHP in uploads or in the site root) or obfuscated code. Real infections land here, and so do the cache or template files some plugins generate.
+* Extra: a file that WordPress, the plugin or the theme does not ship. Often legitimate. A copy of wp-config.php or a database dump in the site root should be moved out.
+* Critical config: wp-config.php or .htaccess changed since you last approved them.
+* Closed or removed: WordPress.org closed the plugin. Replace it.
+
+= I got an email saying wp-config.php or .htaccess changed. Was I hacked? =
+
+Usually not. Cache, security and redirection plugins rewrite their own blocks in those files, often on every update, and Vigilant reports every change it did not make itself.
+
+Open File Integrity, press Review changes and read the lines. If they belong to a plugin you use, press Approve: that records the current content as the reference and does not touch the file. Lines you cannot explain need a closer look, above all the ones that load a file (auto_prepend_file, include) or send requests to a PHP file.
+
+You get that email once per change, not after every scan. The change stays listed in File Integrity until you approve it.
+
+= The scan keeps reporting files that are fine. What can I do? =
+
+* Ignore hides one file.
+* For a folder where a plugin keeps generating PHP (compiled templates, caches), add the folder to Excluded Paths, for example wp-content/uploads/cache.
+* If the scan says it ran out of time in a folder of wp-content, such as a very large cache, add that folder to Excluded Paths too.
+* A .htaccess inside uploads that only denies access protects that folder, and is not reported. WooCommerce writes several.
+
+= What does Vigilant write to .htaccess and wp-config.php? =
+
+On Apache and LiteSpeed, two blocks in .htaccess, between the lines `# BEGIN Vigilante Protection` and `# END Vigilante Protection`, and `# BEGIN Vigilante Security Headers` and `# END Vigilante Security Headers`. While Under Attack mode is on there is a third one, `# BEGIN Vigilante Under Attack`.
+
+In wp-config.php, one block between `/* BEGIN Vigilante Security Constants */` and `/* END Vigilante Security Constants */`, and the prefix `// [VIGILANTE_ORIGINAL]` on any line of yours that defined one of the same constants.
+
+Vigilant writes these blocks when you save its settings and after it updates, not in between. If another plugin or a person removes one, save that tab again to write it back.
 
 = I updated from a version that stored wp-config.php in the database. Is there anything else to do? =
 
 Previous versions kept a copy of wp-config.php in an option so the integrity scan could show which lines had changed, and that copy carried the database password and the eight authentication keys and salts. Updating removes the copy, but no update can undo an exposure that already happened. So if your database, or any backup of it, may have been read by somebody else while that copy was stored, replace the eight keys and salts in your wp-config.php with fresh ones from the WordPress.org secret-key service, and change the database password if your host lets you. Replacing the salts signs everybody out, yourself included, which is the whole point of doing it.
 
+= Does a scan always check the whole site? =
+
+Not on a very large one. A scan runs for 60 seconds at most and starts from the beginning each time. With many plugins, a large uploads folder or a large cache, it may not reach every plugin and theme, and it is the same part that is left out on every scan.
+
+* File Integrity says when the last scan was partial, and names the plugins, the themes and the areas it did not reach. The scan email says it too.
+* Security Check does not count a partial scan as a clean one.
+* If the server stops the scan before it ends, or WordPress does not run its scheduled tasks, nothing is stored. File Integrity and Security Check then say that no scan has finished since the date shown.
+* To check what was left out, File Integrity lists the folders the scan did check: add them to Excluded Paths, run a scan by hand, and take them out again.
+* While the whole folder of a plugin or of a theme, or the uploads folder, is in Excluded Paths, File Integrity and Security Check keep saying so: no scan looks inside it.
+* Adding large folders that do not need checking to Excluded Paths leaves more time for the rest.
+
 = How often does the file integrity scan run? =
 
-You can configure automatic scans to run daily or weekly. You can also run manual scans at any time. Email notifications support three levels: all issues, suspicious files only, or disabled.
+You can configure automatic scans to run daily or weekly. You can also run manual scans at any time. Email notifications support three levels: every finding, serious findings only (suspicious and extra files, changes in wp-config.php or .htaccess and closed plugins), or disabled. The email goes out when a scan finds something new, so a finding you were already told about is not repeated.
 
 = How do I know Vigilant itself has not been tampered with? =
 
@@ -381,7 +469,7 @@ Standard applies balanced settings suitable for most sites. Maximum applies stri
 
 = Where are backups stored? =
 
-Configuration backups (.htaccess, wp-config.php, robots.txt) are stored in the WordPress database, not as files under the web root, so they can never be served over HTTP. A database backup you download is generated as a temporary ZIP with an unguessable name and removed right after the download.
+Nowhere on the server. The configuration backup (wp-config.php, .htaccess and robots.txt) is a ZIP built on the fly and sent to your browser, and Vigilant keeps no copy of those files, because they hold your database password and other secrets. A database backup you download is generated as a temporary ZIP with an unguessable name and removed right after the download.
 
 = What is Under Attack mode? =
 
@@ -441,6 +529,41 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 3.0.3 =
+File Integrity now compares themes with their WordPress.org package, searches all the code that has no official copy, and looks at must-use plugins, drop-ins, wp-admin, wp-includes and the rest of wp-content. Scan emails are sent once per new finding.
+
+* Improved: File Integrity compares themes from WordPress.org with the package WordPress.org publishes for the installed version. WordPress.org has no checksums for themes, so until now no theme file was compared with anything. The package is downloaded once per version.
+* Improved: File Integrity searches every PHP file of a plugin or theme with no official copy for hidden code, not only the first 50, and reads files of up to 8 MB. A file over 512,000 bytes was not opened, so it passed as clean. One over 8 MB is listed as not searched.
+* Improved: File Integrity looks at files added to wp-admin and wp-includes, at must-use plugins and drop-ins, at loose PHP files in wp-content, and at folders with PHP among the plugins or the themes that WordPress does not list as one.
+* Improved: File Integrity searches the PHP files of the other folders of wp-content (languages, upgrade and the like) for hidden code. A translation file that holds anything other than text is reported, because WordPress loads translation files on every request.
+* Improved: a new installation no longer starts with wp-content/cache among the excluded paths, so that folder is searched too. A site that already has it there keeps it.
+* Improved: File Integrity reports a .htaccess, .user.ini or php.ini outside uploads that makes the server run code or load a file.
+* Improved: File Integrity finds, in code with no official copy, request data run as code or as a command, a function chosen by the request and a file included from another server. The same text in a comment is not reported.
+* Improved: a file on which the search for hidden code cannot finish is listed as not searched instead of passing as clean.
+* Improved: File Integrity now compares wp-includes/version.php, and compares sites that are not in English with the English checksums while WordPress.org has none for their language, instead of leaving the core unchecked.
+* Improved: File Integrity reports files deleted from a plugin or a theme, and reports a failed request to WordPress.org as an error instead of treating the plugin as one with no official copy.
+* Improved: File Integrity reports more file types in uploads (.pht, .php8, names such as shell.php.suspected, .user.ini, php.ini, shell and CGI scripts), a .user.ini or php.ini in the site root that loads a file on every request, and backups left in the site root.
+* Improved: the File Integrity tab says what each kind of finding usually is and what to do about it, names the plugins and themes that could not be compared, and says when a scan was partial instead of saying that every file passed.
+* Improved: when a scan runs out of time, File Integrity and the scan email name the plugins, the themes and the areas it did not reach, and File Integrity lists the folders to exclude so that a scan run by hand reaches the rest. A scan runs for 60 seconds at most and starts from the beginning each time, so on a very large site the same part is left unchecked on every scan.
+* Improved: File Integrity and Security Check say when Excluded Paths holds the whole folder of a plugin or of a theme, or the uploads folder. No scan looks inside them, and Security Check no longer counts such a scan as clean.
+* Improved: File Integrity and Security Check say when no scheduled scan has finished for longer than the schedule allows. A scan the server stops halfway stores no result, and neither does one WordPress never starts, so the last one that did finish kept showing as the current one.
+* Improved: the scan email is sent when a scan finds something new, not after every scan, and its subject names wp-config.php or .htaccess when that is all that changed.
+* Improved: two-factor events can be filtered in Security Audit, and PHP 8.5 is in the end-of-life table of Security Check.
+* Fix: a .htaccess in uploads that only denies access is no longer reported, and neither is the rule that forbids PHP or a commented line. Options +ExecCGI and CGI or SSI handlers, which were listed as custom rules, are now suspicious.
+* Fix: the two-line index.php placeholder WordPress ships is no longer reported as PHP in uploads or as an extra file.
+* Fix: the bundled themes and Akismet no longer show as modified or missing core files when they update or are deleted.
+* Fix: a hexadecimal string of some 12,000 characters or more was not found by the search for hidden code. The longer the payload, the less it was found.
+* Fix: a function name split in pieces was not found when a long chain of joined strings came before it in the file.
+* Fix: a file built for the purpose could keep the search for hidden code busy long enough to cut the scan short.
+* Fix: the scan of uploads stopped after 10,000 files without saying so.
+* Fix: a folder the scan could not read stopped the scan of uploads, of a plugin or of a theme without saying so, and nothing after it was checked. The scan now goes on and reports the folder.
+* Fix: Scan now stored only the second half of the scan in the score history of Security Check.
+* Fix: Security Check passed a file integrity scan that had not checked everything, as long as it had found nothing in what it did check.
+* Fix: the Limit HTTP Methods label, and the comment written to .htaccess, described a rule that is not the one applied.
+* Fix: the alert setting of Security Audit said a new administrator is logged as Critical. It is logged as Warning, and has its own email in Users.
+* Fix: the readme described automatic backups of .htaccess and wp-config.php that no longer exist.
+* Fix: removed 11 strings and a method that nothing used.
+
 = 3.0.2 =
 Fixes addresses with accents or non-Latin letters in the HTTPS redirect, the Under Attack check and a custom login address, stops the www alias landing on the dashboard, saves File Integrity paths as written, and stops the default CSP from breaking the styles of sites served over http.
 
@@ -488,8 +611,8 @@ For older changelog entries, please check the [changelog.txt](https://plugins.sv
 
 == Upgrade Notice ==
 
-= 3.0.2 =
-Fixes addresses with accents or non-Latin letters in the HTTPS redirect, the Under Attack check and a custom login address, stops the www alias landing on the dashboard, saves File Integrity paths as written, and stops the default CSP from breaking the styles of sites served over http.
+= 3.0.3 =
+File Integrity now compares themes with their WordPress.org package, searches all the code that has no official copy, and looks at must-use plugins, drop-ins, wp-admin, wp-includes and the rest of wp-content. Scan emails are sent once per new finding.
 
 == Support ==
 

@@ -69,11 +69,46 @@ class Vigilante_File_Integrity {
     private $scan_start_time = 0;
 
     /**
+     * Seconds a scan runs for at most
+     *
+     * A scan is one request, and it starts from the beginning every time. On
+     * a site too large for this, what comes last is left unchecked on every
+     * scan, so the results say what was not reached (see not_checked_lines()).
+     */
+    const MAX_SCAN_SECONDS = 60;
+
+    /**
      * Maximum scan time in seconds (default 60s for thorough scanning)
      *
      * @var int
      */
-    private $max_scan_time = 60;
+    private $max_scan_time = self::MAX_SCAN_SECONDS;
+
+    /**
+     * Largest file the search for hidden code reads, in bytes
+     *
+     * It used to be 512,000, and a larger file was not opened at all: in a
+     * plugin with no official copy that left it out of the results as if it
+     * were clean. There is still a cap because the file is read whole, but
+     * what is above it is reported as not searched instead of being passed
+     * over (see search_file()).
+     */
+    const MAX_SEARCHED_BYTES = 8388608;
+
+    /**
+     * Seconds a scan gives to the folders of wp-content that belong to nothing
+     *
+     * @var int
+     */
+    private $content_folders_time = 10;
+
+    /**
+     * Whether an expression of the search for hidden code gave up on the file
+     * being searched (see found())
+     *
+     * @var bool
+     */
+    private $search_failed = false;
 
     /**
      * Option name for critical files baseline hashes.
@@ -1553,14 +1588,23 @@ class Vigilante_File_Integrity {
     );
 
     /**
+     * Whether the core is being compared with the English checksums because
+     * WordPress.org has none for the language of the site. Set by
+     * get_core_checksums().
+     *
+     * @var bool
+     */
+    private $core_checksums_are_english = false;
+
+    /**
      * Core files known to produce false positives in checksum comparison.
-     * These are skipped during core scanning (e.g. version.php is rewritten
-     * during auto-updates and localized installs, readme files vary by locale).
+     * These are skipped during core scanning: the readme and the license vary
+     * by locale and are not code. version.php used to be here too, and is now
+     * compared (see matches_core_of_other_locale()).
      *
      * @var array
      */
     private $core_known_false_positives = array(
-        'wp-includes/version.php',
         'readme.html',
         'license.txt',
         'licencia.txt',
@@ -2044,18 +2088,38 @@ class Vigilante_File_Integrity {
             }
         }
 
+        // What the time does not reach. A scan that runs out of time used to
+        // say only that it was partial, and it starts from the beginning
+        // every time, so on a large site the same plugins and themes were
+        // left out on every scan with nobody told which. They are named.
+        $not_checked = array(
+            'areas'   => array(),
+            'plugins' => array(),
+            'themes'  => array(),
+        );
+
+        // And the folders of the plugins and themes it did check, which is
+        // what the tab offers to exclude so that a scan by hand reaches the
+        // rest (see folders_to_exclude()).
+        $checked_folders = array();
+
         // Scan uploads for suspicious files FIRST (highest security priority)
         // PHP files in uploads are almost always malware
         if ( ! empty( $options['scan_uploads'] ) && ! $this->is_time_exceeded() ) {
             $upload_results = $this->scan_uploads();
             $results['suspicious'] = array_merge( $results['suspicious'], $upload_results['suspicious'] );
             $results['extra'] = array_merge( $results['extra'], $upload_results['extra'] );
+            $results['errors'] = array_merge( $results['errors'], $upload_results['errors'] ?? array() );
+        } elseif ( ! empty( $options['scan_uploads'] ) ) {
+            $not_checked['areas'][] = 'uploads';
         }
 
         // Scan core files
         if ( ! empty( $options['scan_core'] ) && ! $this->is_time_exceeded() ) {
             $core_results = $this->scan_core_files();
             $results = $this->merge_results( $results, $core_results );
+        } elseif ( ! empty( $options['scan_core'] ) ) {
+            $not_checked['areas'][] = 'core';
         }
 
         // Scan root directory for non-core files (PHP = suspicious, others = additional)
@@ -2064,30 +2128,93 @@ class Vigilante_File_Integrity {
             $root_results = $this->scan_root_files();
             $results['suspicious'] = array_merge( $results['suspicious'], $root_results['suspicious'] );
             $results['extra'] = array_merge( $results['extra'], $root_results['extra'] );
+        } elseif ( ! empty( $options['scan_core'] ) ) {
+            $not_checked['areas'][] = 'core';
+        }
+
+        // Files added to wp-admin or wp-includes, which the comparison with
+        // the checksums never visits because the checksums do not name them.
+        if ( ! empty( $options['scan_core'] ) && ! $this->is_time_exceeded() ) {
+            $folder_results = $this->scan_core_folders();
+            $results['suspicious'] = array_merge( $results['suspicious'], $folder_results['suspicious'] );
+            $results['extra'] = array_merge( $results['extra'], $folder_results['extra'] );
+            $results['errors'] = array_merge( $results['errors'], $folder_results['errors'] );
+        } elseif ( ! empty( $options['scan_core'] ) ) {
+            $not_checked['areas'][] = 'core';
         }
 
         // Scan critical config files (wp-config.php, .htaccess) against stored baseline
         if ( ! empty( $options['scan_critical_config'] ) && ! $this->is_time_exceeded() ) {
             $critical_results = $this->scan_critical_root_files();
             $results['modified'] = array_merge( $results['modified'], $critical_results );
+        } elseif ( ! empty( $options['scan_critical_config'] ) ) {
+            $not_checked['areas'][] = 'config';
+        }
+
+        // The other folders of wp-content (cache, languages, upgrade and
+        // whatever else is there), which belong to no plugin and no theme and
+        // had no turn. Before the plugins and the themes, which on a large
+        // site can use up the whole scan, and with a share of the time of
+        // their own, so a cache of a hundred thousand files cannot do the
+        // same to them.
+        $content_results = null;
+        if ( ! empty( $options['scan_plugins'] ) && ! $this->is_time_exceeded() ) {
+            $content_results       = $this->scan_content_folders();
+            $results['suspicious'] = array_merge( $results['suspicious'], $content_results['suspicious'] );
+            $results['extra']      = array_merge( $results['extra'], $content_results['extra'] );
+            $results['errors']     = array_merge( $results['errors'], $content_results['errors'] );
+        } elseif ( ! empty( $options['scan_plugins'] ) ) {
+            $not_checked['areas'][] = 'content';
         }
 
         // Scan plugins
         if ( ! empty( $options['scan_plugins'] ) && ! $this->is_time_exceeded() ) {
             $plugin_results = $this->scan_plugins();
             $results = $this->merge_results( $results, $plugin_results );
+
+            $not_checked['plugins'] = $plugin_results['not_checked'] ?? array();
+            $checked_folders        = $plugin_results['checked'] ?? array();
+
+            if ( empty( $plugin_results['unlisted_checked'] ) ) {
+                $not_checked['areas'][] = 'unlisted';
+            }
+        } elseif ( ! empty( $options['scan_plugins'] ) ) {
+            $not_checked['areas'][] = 'plugins';
+            $not_checked['areas'][] = 'unlisted';
         }
 
         // Scan themes
         if ( ! empty( $options['scan_themes'] ) && ! $this->is_time_exceeded() ) {
             $theme_results = $this->scan_themes();
             $results = $this->merge_results( $results, $theme_results );
+
+            $not_checked['themes'] = $theme_results['not_checked'] ?? array();
+            $checked_folders       = array_merge( $checked_folders, $theme_results['checked'] ?? array() );
+        } elseif ( ! empty( $options['scan_themes'] ) ) {
+            $not_checked['areas'][] = 'themes';
+        }
+
+        // What could only be searched for hidden code: plugins and themes
+        // first, as they are found, and the folders of wp-content after them.
+        if ( null !== $content_results ) {
+            $results['unverified'] = array_values( array_unique( array_merge( $results['unverified'] ?? array(), $content_results['unverified'] ) ) );
         }
 
         // Mark as incomplete if time was exceeded
         if ( $this->is_time_exceeded() ) {
             $results['incomplete'] = true;
             $results['errors'][] = __( 'Scan was incomplete due to time limit. Results may be partial.', 'vigilante' );
+        }
+
+        // Stored after the last merge: merge_results() keeps only the keys it
+        // knows.
+        $not_checked['areas']   = array_values( array_unique( $not_checked['areas'] ) );
+        $results['not_checked'] = $not_checked;
+
+        // Only with plugins or themes left out: a scan that reached them all
+        // has nothing to make room for.
+        if ( ! empty( $not_checked['plugins'] ) || ! empty( $not_checked['themes'] ) || array_intersect( array( 'plugins', 'themes' ), $not_checked['areas'] ) ) {
+            $results['checked_folders'] = array_values( array_unique( $checked_folders ) );
         }
 
         // Filter out ignored files from all result categories
@@ -2102,12 +2229,19 @@ class Vigilante_File_Integrity {
             $has_issues = ! empty( $results['modified'] ) || ! empty( $results['suspicious'] ) || ! empty( $results['extra'] );
             $severity   = $has_issues ? 'warning' : 'info';
             
+            /* translators: 1: Scanned count, 2: Modified count, 3: Suspicious count, 4: Extra files count */
+            $log_text = __( 'File integrity scan completed: %1$d files scanned, %2$d modified, %3$d suspicious, %4$d extra', 'vigilante' );
+
+            if ( $results['incomplete'] ) {
+                /* translators: 1: Scanned count, 2: Modified count, 3: Suspicious count, 4: Extra files count */
+                $log_text = __( 'File integrity scan ran out of time, so its result is partial: %1$d files scanned, %2$d modified, %3$d suspicious, %4$d extra', 'vigilante' );
+            }
+
             $this->activity_log->log(
                 'file',
                 'integrity_scan',
                 sprintf(
-                    /* translators: 1: Scanned count, 2: Modified count, 3: Suspicious count, 4: Extra files count */
-                    __( 'File integrity scan completed: %1$d files scanned, %2$d modified, %3$d suspicious, %4$d extra', 'vigilante' ),
+                    $log_text,
                     $results['scanned'],
                     count( $results['modified'] ),
                     count( $results['suspicious'] ),
@@ -2164,11 +2298,41 @@ class Vigilante_File_Integrity {
         );
 
         // Get official checksums from WordPress.org
-        $checksums = $this->get_core_checksums();
+        $this->core_checksums_are_english = false;
+        $checksums                        = $this->get_core_checksums();
 
         if ( is_wp_error( $checksums ) ) {
             $results['errors'][] = $checksums->get_error_message();
             return $results;
+        }
+
+        // The plugins and themes that get a turn of their own in this scan.
+        $own_turn = array(
+            'plugins' => array(),
+            'themes'  => array(),
+        );
+
+        if ( ! empty( $this->options['scan_plugins'] ) ) {
+            if ( ! function_exists( 'get_plugins' ) ) {
+                require_once ABSPATH . 'wp-admin/includes/plugin.php';
+            }
+
+            foreach ( array_keys( get_plugins() ) as $plugin_file ) {
+                $slash = strpos( $plugin_file, '/' );
+
+                if ( false !== $slash ) {
+                    $own_turn['plugins'][ substr( $plugin_file, 0, $slash ) ] = true;
+                }
+            }
+        }
+
+        if ( ! empty( $this->options['scan_themes'] ) ) {
+            foreach ( array_keys( wp_get_themes() ) as $stylesheet ) {
+                $stylesheet = (string) $stylesheet;
+                $slash      = strpos( $stylesheet, '/' );
+
+                $own_turn['themes'][ false === $slash ? $stylesheet : substr( $stylesheet, 0, $slash ) ] = true;
+            }
         }
 
         foreach ( $checksums as $file => $expected_hash ) {
@@ -2189,7 +2353,7 @@ class Vigilante_File_Integrity {
                 continue;
             }
 
-            // Skip known false positives (e.g. version.php, readme.html)
+            // Skip known false positives (e.g. readme.html, license.txt)
             if ( in_array( $file, $this->core_known_false_positives, true ) ) {
                 continue;
             }
@@ -2206,6 +2370,28 @@ class Vigilante_File_Integrity {
                 continue;
             }
 
+            // The bundled themes and plugins have their own turn. Akismet and
+            // the default themes are in this list at the version WordPress
+            // shipped, and they update on their own cycle: every one of those
+            // updates showed as a modified core file, and deleting one that is
+            // not in use as missing core files. The plugin and theme scans
+            // compare them with their own published copy, so they are left to
+            // those whenever those are on and have them in their list.
+            if ( preg_match( '#^wp-content/(plugins|themes)/([^/]+)/#', $file, $bundled ) ) {
+                // Deleted on purpose: nothing to compare and nothing missing.
+                if ( ! is_dir( ABSPATH . 'wp-content/' . $bundled[1] . '/' . $bundled[2] ) ) {
+                    continue;
+                }
+
+                // Its own scan compares it, but only what WordPress lists as a
+                // plugin or as a theme gets that turn. A folder that is there
+                // and is not listed (a plugin without its header, a theme
+                // without its style.css) stays with the core.
+                if ( isset( $own_turn[ $bundled[1] ][ $bundled[2] ] ) ) {
+                    continue;
+                }
+            }
+
             $results['scanned']++;
 
             if ( ! file_exists( $file_path ) ) {
@@ -2218,7 +2404,20 @@ class Vigilante_File_Integrity {
 
             $actual_hash = md5_file( $file_path );
 
-            if ( $actual_hash !== $expected_hash ) {
+            if ( $actual_hash !== $expected_hash && ! $this->matches_core_of_other_locale( $file, $actual_hash ) ) {
+                // The two files a translated package changes cannot be told
+                // from a modified one while only the English list exists. Said
+                // as what it is, a file that could not be verified, instead of
+                // as a modified core file.
+                if ( $this->core_checksums_are_english && in_array( $file, array( 'wp-includes/version.php', 'wp-config-sample.php' ), true ) ) {
+                    $results['errors'][] = sprintf(
+                        /* translators: %s: File name */
+                        __( '%s differs from the English package of WordPress, and WordPress.org has not published the checksums for the language of this site yet, so it could not be verified.', 'vigilante' ),
+                        $file
+                    );
+                    continue;
+                }
+
                 $results['modified'][] = array(
                     'file'          => $file,
                     'type'          => 'core',
@@ -2334,7 +2533,7 @@ class Vigilante_File_Integrity {
         // Also add wp-config.php which is not in checksums but is core
         $core_root_files[] = 'wp-config.php';
 
-        $php_extensions = array( 'php', 'php3', 'php4', 'php5', 'php7', 'phtml', 'phar', 'phps' );
+        $php_extensions = self::php_extensions();
 
         // Scan only direct children of ABSPATH (not recursive)
         $root_path = untrailingslashit( ABSPATH );
@@ -2354,7 +2553,20 @@ class Vigilante_File_Integrity {
                 continue;
             }
 
-            // Skip dotfiles (.htaccess, .user.ini, .env, etc.) — handled by firewall protection
+            // PHP reads .user.ini and php.ini from the folder of the script, and
+            // either can make it load a file before every request: the same
+            // door as .htaccess, for servers that run PHP outside Apache.
+            if ( in_array( strtolower( $entry ), array( '.user.ini', 'php.ini' ), true ) ) {
+                $config = $this->is_path_excluded( $root_path . '/' . $entry ) ? null : self::server_config_finding( $root_path . '/' . $entry, $entry );
+
+                if ( $config ) {
+                    $config['item']['type'] = 'php_config_in_root';
+                    $found['extra'][]       = $config['item'];
+                }
+                continue;
+            }
+
+            // Skip dotfiles (.htaccess, .env, etc.): handled by firewall protection
             if ( 0 === strpos( $entry, '.' ) ) {
                 continue;
             }
@@ -2381,6 +2593,11 @@ class Vigilante_File_Integrity {
                 continue;
             }
 
+            // Site verification files and sitemaps that are what their name says.
+            if ( self::is_harmless_root_file( $entry, $full_path ) ) {
+                continue;
+            }
+
             $extension = strtolower( pathinfo( $entry, PATHINFO_EXTENSION ) );
 
             if ( in_array( $extension, $php_extensions, true ) ) {
@@ -2404,13 +2621,10 @@ class Vigilante_File_Integrity {
                 $reason = __( 'Non-core PHP file in WordPress root directory', 'vigilante' );
 
                 // Scan content for specific patterns
-                if ( filesize( $full_path ) < 512000 ) {
-                    $content = file_get_contents( $full_path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
-                    $pattern = $this->detect_suspicious_pattern( $content );
-                    if ( $pattern ) {
-                        /* translators: %s: Suspicious pattern found */
-                        $reason = sprintf( __( 'Non-core PHP in root with suspicious code: %s', 'vigilante' ), $pattern );
-                    }
+                $pattern = $this->search_file( $full_path );
+                if ( $pattern ) {
+                    /* translators: %s: Suspicious pattern found */
+                    $reason = sprintf( __( 'Non-core PHP in root with suspicious code: %s', 'vigilante' ), $pattern );
                 }
 
                 $found['suspicious'][] = array(
@@ -2419,6 +2633,18 @@ class Vigilante_File_Integrity {
                     'reason' => $reason,
                 );
             } else {
+                // A copy of the configuration, a database dump or an archive
+                // is not one more loose file: whoever guesses its name can
+                // download it.
+                if ( false !== stripos( $entry, 'wp-config' ) || preg_match( '/\.(?:sql|bak|old|orig|save|swp|dump|zip|gz|tgz|tar|7z|rar)$/i', $entry ) ) {
+                    $found['extra'][] = array(
+                        'file'   => $entry,
+                        'type'   => 'backup_in_root',
+                        'reason' => __( 'Backup or copy of a sensitive file in the site root, where it can be downloaded', 'vigilante' ),
+                    );
+                    continue;
+                }
+
                 // Non-PHP, non-known-safe file = additional (informational)
                 $found['extra'][] = array(
                     'file'   => $entry,
@@ -2431,6 +2657,862 @@ class Vigilante_File_Integrity {
         closedir( $handle );
 
         return $found;
+    }
+
+    /**
+     * The line of a .user.ini or php.ini that makes PHP load a file by itself
+     *
+     * @param string $path Absolute path of the file.
+     * @return string|null The line, an empty string when there is none, or
+     *                     null when the file is too large to be read, which
+     *                     the caller reports instead of taking for clean.
+     */
+    private static function php_ini_loads( $path ) {
+        // PHP runs as the same user: what it cannot read here it cannot apply.
+        if ( ! is_readable( $path ) ) {
+            return '';
+        }
+
+        if ( filesize( $path ) > MB_IN_BYTES ) {
+            return null;
+        }
+
+        $content = file_get_contents( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reads a local file to look at its directives; nothing is written.
+
+        foreach ( preg_split( '/\r\n|\r|\n/', (string) $content ) as $line ) {
+            $line = trim( $line );
+
+            if ( '' === $line || ';' === $line[0] || '#' === $line[0] ) {
+                continue;
+            }
+
+            if ( preg_match( '/^(auto_prepend_file|auto_append_file)\s*=\s*(.*)$/i', $line, $parts ) ) {
+                $value = trim( $parts[2], " \t\"'" );
+
+                if ( '' !== $value && 'none' !== strtolower( $value ) ) {
+                    return strtolower( $parts[1] ) . ' = ' . substr( $value, 0, 200 );
+                }
+            }
+        }
+
+        return '';
+    }
+
+    /**
+     * What a .htaccess, .user.ini or php.ini outside uploads makes the server do
+     *
+     * Inside a plugin, a theme, wp-content or a WordPress folder, one of these
+     * files is a finding only when it makes the server run code or load a file.
+     * One that denies access, or does nothing of the kind, is left alone.
+     *
+     * @param string $file_path Absolute path.
+     * @param string $relative  Path for display.
+     * @return array|null Array with 'category' and 'item', or null.
+     */
+    private static function server_config_finding( $file_path, $relative ) {
+        $item = array(
+            'file' => $relative,
+            'type' => 'server_config',
+        );
+
+        if ( '.htaccess' === strtolower( basename( $file_path ) ) ) {
+            if ( ! is_readable( $file_path ) ) {
+                return null;
+            }
+
+            if ( filesize( $file_path ) >= 65536 ) {
+                $item['reason'] = __( '.htaccess file that is too large to be read', 'vigilante' );
+
+                return array(
+                    'category' => 'extra',
+                    'item'     => $item,
+                );
+            }
+
+            $facts = self::read_htaccess_rules( file_get_contents( $file_path ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reads a local file to look at its directives; nothing is written.
+
+            if ( empty( $facts['runs'] ) ) {
+                return null;
+            }
+
+            $item['reason'] = self::htaccess_run_reason( $facts );
+
+            return array(
+                'category' => 'suspicious',
+                'item'     => $item,
+            );
+        }
+
+        $loads = self::php_ini_loads( $file_path );
+
+        if ( '' === $loads ) {
+            return null;
+        }
+
+        $item['reason'] = null === $loads
+            ? __( 'PHP configuration file that is too large to be read', 'vigilante' )
+            /* translators: %s: The line of the file that does it */
+            : sprintf( __( 'PHP configuration file that loads a file on every request: %s', 'vigilante' ), $loads );
+
+        return array(
+            'category' => 'extra',
+            'item'     => $item,
+        );
+    }
+
+    /**
+     * Whether a loose file in the site root is a verification file or a sitemap
+     *
+     * By what it contains or by its kind, never by its name alone: a Google
+     * verification file is one line that repeats its own name, and a sitemap
+     * is XML, which no server runs.
+     *
+     * @param string $entry     File name.
+     * @param string $full_path Absolute path.
+     * @return bool
+     */
+    private static function is_harmless_root_file( $entry, $full_path ) {
+        if ( preg_match( '/^[a-z0-9_-]*sitemap[a-z0-9_-]*\.xml(?:\.gz)?$/i', $entry ) ) {
+            return true;
+        }
+
+        if ( preg_match( '/^google[0-9a-f]{16}\.html$/', $entry ) && is_readable( $full_path ) && filesize( $full_path ) < 200 ) {
+            $content = file_get_contents( $full_path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reads a local file to compare it with its own name; nothing is written.
+
+            return 'google-site-verification: ' . $entry === trim( (string) $content );
+        }
+
+        return false;
+    }
+
+    /**
+     * Walk a folder and everything under it without stopping at what cannot be read
+     *
+     * A folder PHP cannot open used to end the whole walk in silence, which is
+     * all it took to blind a scan: one unreadable folder early in the order,
+     * and nothing after it was looked at. Now the walk goes past it, and the
+     * caller reports it (see unreadable_folder_error()).
+     *
+     * @param string        $directory Folder to walk.
+     * @param callable|null $skip      Given the path of a folder, whether to leave
+     *                                 it and everything under it out of the walk.
+     * @return RecursiveIteratorIterator Folders included: the caller skips them.
+     */
+    private static function walk_folder( $directory, $skip = null ) {
+        $folder = new RecursiveDirectoryIterator( $directory, RecursiveDirectoryIterator::SKIP_DOTS );
+
+        if ( null !== $skip ) {
+            $folder = new RecursiveCallbackFilterIterator(
+                $folder,
+                static function ( $current ) use ( $skip ) {
+                    return ! ( $current->isDir() && call_user_func( $skip, $current->getPathname() ) );
+                }
+            );
+        }
+
+        return new RecursiveIteratorIterator(
+            $folder,
+            RecursiveIteratorIterator::SELF_FIRST,
+            RecursiveIteratorIterator::CATCH_GET_CHILD
+        );
+    }
+
+    /**
+     * What the scan says about a folder it could not read
+     *
+     * @param string $path Absolute path of the folder.
+     * @return string
+     */
+    private static function unreadable_folder_error( $path ) {
+        return sprintf(
+            /* translators: %s: Folder path */
+            __( 'The folder %s could not be read, so what is inside it was not checked.', 'vigilante' ),
+            str_replace( ABSPATH, '', $path )
+        );
+    }
+
+    /**
+     * Extensions a server may be set up to run as PHP
+     *
+     * One list for uploads, the site root, the core folders and the plugin and
+     * theme folders. Each had its own until now, and none had them all.
+     *
+     * @return array
+     */
+    private static function php_extensions() {
+        return array( 'php', 'php2', 'php3', 'php4', 'php5', 'php6', 'php7', 'php8', 'phtml', 'pht', 'phar', 'phps', 'inc' );
+    }
+
+    /**
+     * Look in wp-admin and wp-includes for files WordPress does not ship
+     *
+     * The comparison with the official checksums only visits the files the
+     * checksums name, so a file added to either folder was never looked at. A
+     * PHP file there that is not part of the installed version is reported as
+     * suspicious. A file that changes how the server runs code (.htaccess,
+     * .user.ini, php.ini) is reported as extra, or as suspicious when it
+     * makes the server run code. Anything else that is not code, such as an
+     * error log the host writes there, is left alone.
+     *
+     * @return array Array with 'suspicious', 'extra' and 'errors' sub-arrays.
+     */
+    private function scan_core_folders() {
+        $found = array(
+            'suspicious' => array(),
+            'extra'      => array(),
+            'errors'     => array(),
+        );
+
+        $checksums = $this->get_core_checksums();
+        if ( is_wp_error( $checksums ) ) {
+            return $found;
+        }
+
+        $php_extensions = self::php_extensions();
+        $config_files   = array( '.htaccess', '.user.ini', 'php.ini' );
+
+        foreach ( array( 'wp-admin', 'wp-includes' ) as $folder ) {
+            $directory = ABSPATH . $folder;
+
+            if ( ! is_dir( $directory ) ) {
+                continue;
+            }
+
+            try {
+                foreach ( self::walk_folder( $directory ) as $file ) {
+                    if ( $this->is_time_exceeded() ) {
+                        break 2;
+                    }
+
+                    $file_path = $file->getPathname();
+
+                    if ( $file->isDir() ) {
+                        if ( ! $file->isReadable() ) {
+                            $found['errors'][] = self::unreadable_folder_error( $file_path );
+                        }
+                        continue;
+                    }
+
+                    $relative = $this->normalize_rel_path( str_replace( '\\', '/', str_replace( ABSPATH, '', $file_path ) ) );
+
+                    if ( isset( $checksums[ $relative ] ) || $this->is_path_excluded( $file_path ) ) {
+                        continue;
+                    }
+
+                    $extension = strtolower( pathinfo( $file_path, PATHINFO_EXTENSION ) );
+
+                    if ( in_array( $extension, $php_extensions, true ) ) {
+                        // The placeholder some hosts and tools drop in every folder.
+                        if ( $this->is_silence_golden_file( $file_path ) ) {
+                            continue;
+                        }
+
+                        // Translation files, on the installations old enough
+                        // to keep them in wp-includes/languages: text and
+                        // nothing else, which is checked and not assumed.
+                        if ( self::is_inside_languages( $file_path ) && true === $this->is_literal_data( $file_path ) ) {
+                            continue;
+                        }
+
+                        /* translators: %s: Folder name, wp-admin or wp-includes */
+                        $reason = sprintf( __( 'File in %s that is not part of the installed WordPress version', 'vigilante' ), $folder );
+
+                        $pattern = $this->search_file( $file_path );
+                        if ( $pattern ) {
+                            /* translators: 1: Folder name, wp-admin or wp-includes, 2: Suspicious pattern found */
+                            $reason = sprintf( __( 'File in %1$s that is not part of WordPress, with suspicious code: %2$s', 'vigilante' ), $folder, $pattern );
+                        }
+
+                        $found['suspicious'][] = array(
+                            'file'   => $relative,
+                            'type'   => 'php_in_core',
+                            'reason' => $reason,
+                        );
+                    } elseif ( in_array( strtolower( basename( $file_path ) ), $config_files, true ) ) {
+                        $config = self::server_config_finding( $file_path, $relative );
+
+                        if ( $config && 'suspicious' === $config['category'] ) {
+                            $found['suspicious'][] = $config['item'];
+                            continue;
+                        }
+
+                        $found['extra'][] = array(
+                            'file'   => $relative,
+                            'type'   => 'config_in_core',
+                            /* translators: %s: Folder name, wp-admin or wp-includes */
+                            'reason' => $config ? $config['item']['reason'] : sprintf( __( 'Server configuration file in %s', 'vigilante' ), $folder ),
+                        );
+                    }
+                }
+            } catch ( Exception $e ) {
+                $found['errors'][] = self::unreadable_folder_error( $directory );
+            }
+        }
+
+        return $found;
+    }
+
+    /**
+     * Look for code where there is no official copy to compare with
+     *
+     * Must-use plugins, drop-ins, the loose PHP files of wp-content, of the
+     * plugins folder and of the themes folder, and the folders in those two
+     * that WordPress does not list as a plugin or as a theme, were not opened
+     * by any part of the scan, although WordPress loads some of them on every
+     * request and the rest can be reached by their address. They are searched
+     * the way a plugin from outside WordPress.org is, for code written the way
+     * malware hides itself. A loose PHP file or a folder with PHP that is
+     * neither a plugin, a theme nor a drop-in is listed as extra, and so is a
+     * .htaccess, .user.ini or php.ini there that makes the server run code or
+     * load a file.
+     *
+     * @return array Array with 'suspicious', 'extra', 'unverified' and 'errors' sub-arrays.
+     */
+    private function scan_unlisted_code() {
+        $found = array(
+            'suspicious' => array(),
+            'extra'      => array(),
+            'unverified' => array(),
+            'errors'     => array(),
+        );
+
+        // Must-use plugins: the whole folder.
+        if ( defined( 'WPMU_PLUGIN_DIR' ) && is_dir( WPMU_PLUGIN_DIR ) ) {
+            $mu = $this->detect_extra_files( WPMU_PLUGIN_DIR, array(), 'plugin', __( 'Must-use plugins', 'vigilante' ), true );
+
+            $found['suspicious'] = array_merge( $found['suspicious'], $mu['suspicious'] );
+            $found['extra']      = array_merge( $found['extra'], $mu['extra'] );
+            $found['errors']     = array_merge( $found['errors'], $mu['errors'] );
+
+            if ( $mu['php_files'] > 0 ) {
+                $found['unverified'][] = __( 'Must-use plugins', 'vigilante' );
+            }
+        }
+
+        if ( ! function_exists( '_get_dropins' ) || ! function_exists( 'get_plugins' ) ) {
+            require_once ABSPATH . 'wp-admin/includes/plugin.php';
+        }
+
+        $php_extensions = self::php_extensions();
+        $config_files   = array( '.htaccess', '.user.ini', 'php.ini' );
+        $dropins        = array_keys( _get_dropins() );
+
+        // What WordPress lists as a plugin or as a theme, by the file or the
+        // folder it lives in.
+        $single_plugins = array();
+        $plugin_folders = array();
+        foreach ( get_plugins() as $plugin_file => $plugin_data ) {
+            if ( false === strpos( $plugin_file, '/' ) ) {
+                $single_plugins[ $plugin_file ] = $plugin_data['Name'] ?? $plugin_file;
+            } else {
+                $plugin_folders[ substr( $plugin_file, 0, strpos( $plugin_file, '/' ) ) ] = true;
+            }
+        }
+
+        // The themes by where they really are, because there can be more
+        // than one folder of themes and the same name in two of them.
+        $theme_folders = array();
+        foreach ( wp_get_themes() as $stylesheet => $theme ) {
+            $stylesheet = (string) $stylesheet;
+            $slash      = strpos( $stylesheet, '/' );
+            $real       = realpath( untrailingslashit( $theme->get_theme_root() ) . '/' . ( false === $slash ? $stylesheet : substr( $stylesheet, 0, $slash ) ) );
+
+            if ( false !== $real ) {
+                $theme_folders[ wp_normalize_path( $real ) ] = true;
+            }
+        }
+
+        $roots = array(
+            array( 'content', WP_CONTENT_DIR ),
+            array( 'plugins', WP_PLUGIN_DIR ),
+        );
+
+        // Every folder themes are registered in, not only the usual one. One
+        // that is inside a plugin belongs to that plugin, and has its turn
+        // with it.
+        global $wp_theme_directories;
+
+        $plugin_roots = array();
+        foreach ( array( WP_PLUGIN_DIR, defined( 'WPMU_PLUGIN_DIR' ) ? WPMU_PLUGIN_DIR : '' ) as $plugin_root ) {
+            $real = '' === (string) $plugin_root ? false : realpath( $plugin_root );
+
+            if ( false !== $real ) {
+                $plugin_roots[ wp_normalize_path( $real ) ] = true;
+            }
+        }
+
+        $theme_roots = array();
+        foreach ( array_merge( array( get_theme_root() ), is_array( $wp_theme_directories ) ? $wp_theme_directories : array() ) as $theme_root ) {
+            $real = '' === (string) $theme_root ? false : realpath( $theme_root );
+            $real = false === $real ? '' : wp_normalize_path( $real );
+
+            if ( '' === $real || isset( $theme_roots[ $real ] ) || self::is_inside_any( $real, $plugin_roots ) ) {
+                continue;
+            }
+
+            $theme_roots[ $real ] = true;
+            $roots[]              = array( 'themes', untrailingslashit( $theme_root ) );
+        }
+
+        foreach ( $roots as $root ) {
+            list( $kind, $directory ) = $root;
+
+            $entries = is_dir( $directory ) ? scandir( $directory ) : false;
+
+            if ( ! is_array( $entries ) ) {
+                continue;
+            }
+
+            foreach ( $entries as $entry ) {
+                if ( '.' === $entry || '..' === $entry ) {
+                    continue;
+                }
+
+                if ( $this->is_time_exceeded() ) {
+                    break 2;
+                }
+
+                $path = $directory . '/' . $entry;
+
+                if ( $this->is_path_excluded( $path ) ) {
+                    continue;
+                }
+
+                $relative = str_replace( ABSPATH, '', $path );
+
+                // A folder among the plugins or the themes that WordPress does
+                // not list as one: no scan had a turn for it.
+                if ( is_dir( $path ) ) {
+                    $real   = realpath( $path );
+                    $listed = 'plugins' === $kind ? isset( $plugin_folders[ $entry ] ) : ( 'themes' === $kind ? ( false !== $real && isset( $theme_folders[ wp_normalize_path( $real ) ] ) ) : true );
+
+                    // A link is followed like any other folder, because what
+                    // is behind it is reached by its address just the same,
+                    // unless it leads back to wp-content or above it, which
+                    // would be walking the site a second time.
+                    if ( $listed || ( is_link( $path ) && self::leads_back( $path ) ) ) {
+                        continue;
+                    }
+
+                    $inside = $this->detect_extra_files( $path, array(), 'themes' === $kind ? 'theme' : 'plugin', $entry, true );
+
+                    $found['suspicious'] = array_merge( $found['suspicious'], $inside['suspicious'] );
+                    $found['extra']      = array_merge( $found['extra'], $inside['extra'] );
+                    $found['errors']     = array_merge( $found['errors'], $inside['errors'] );
+
+                    if ( $inside['php_files'] > 0 ) {
+                        $found['extra'][] = array(
+                            'file'   => $relative,
+                            'type'   => 'php_in_content',
+                            'reason' => 'themes' === $kind
+                                ? __( 'Folder with PHP files that WordPress does not list as a theme', 'vigilante' )
+                                : __( 'Folder with PHP files that WordPress does not list as a plugin', 'vigilante' ),
+                        );
+                    }
+                    continue;
+                }
+
+                if ( in_array( strtolower( $entry ), $config_files, true ) ) {
+                    $config = self::server_config_finding( $path, $relative );
+
+                    if ( $config ) {
+                        $found[ $config['category'] ][] = $config['item'];
+                    }
+                    continue;
+                }
+
+                $extension = strtolower( pathinfo( $entry, PATHINFO_EXTENSION ) );
+
+                if ( ! in_array( $extension, $php_extensions, true ) || $this->is_silence_golden_file( $path ) ) {
+                    continue;
+                }
+
+                // hello.php comes with WordPress and is compared with it.
+                if ( 'plugins' === $kind && 'hello.php' === $entry ) {
+                    continue;
+                }
+
+                $pattern = $this->search_file( $path, true );
+
+                $known = ( 'plugins' === $kind && isset( $single_plugins[ $entry ] ) ) || ( 'content' === $kind && in_array( $entry, $dropins, true ) );
+
+                if ( $known ) {
+                    $found['unverified'][] = 'plugins' === $kind ? $single_plugins[ $entry ] : __( 'Drop-ins', 'vigilante' );
+                }
+
+                if ( $pattern ) {
+                    $found['suspicious'][] = array(
+                        'file'   => $relative,
+                        'type'   => 'suspicious_plugin',
+                        /* translators: 1: Plugin or theme name, or the folder the file is in, 2: Suspicious pattern found */
+                        'reason' => sprintf( __( 'File in %1$s with suspicious code: %2$s', 'vigilante' ), dirname( $relative ), $pattern ),
+                    );
+                } elseif ( ! $known ) {
+                    $found['extra'][] = array(
+                        'file'   => $relative,
+                        'type'   => 'php_in_content',
+                        'reason' => __( 'PHP file that is not a plugin, a theme or a WordPress drop-in', 'vigilante' ),
+                    );
+                } elseif ( null === $pattern ) {
+                    $found['extra'][] = $this->not_searched_item( $path, $relative );
+                }
+            }
+        }
+
+        $found['unverified'] = array_values( array_unique( $found['unverified'] ) );
+
+        return $found;
+    }
+
+    /**
+     * Look in the folders of wp-content that belong to no plugin and no theme
+     *
+     * cache, languages, upgrade and whatever else is there were not opened by
+     * any part of the scan, and a PHP file in any of them can be reached by
+     * its address like one anywhere else. Every PHP file in them is searched
+     * for hidden code, the way a plugin from outside WordPress.org is, and a
+     * .htaccess, .user.ini or php.ini is reported when it makes the server run
+     * code or load a file. A folder with PHP files that could only be
+     * searched is named among what has no official copy.
+     *
+     * Translation files are the exception, because what they must hold is
+     * known: text. WordPress loads the .l10n.php files of the site language
+     * with include on every request
+     * (wp-includes/l10n/class-wp-translation-file-php.php:24), so one that
+     * holds anything else is reported whatever the code looks like, and any
+     * other PHP file among the translations is listed. A PHP file that holds
+     * literal data and nothing else cannot run anything, and is left alone
+     * wherever it is (see is_literal_data()).
+     *
+     * Plugins, themes, must-use plugins and uploads have their own scans and
+     * are skipped here. The folders whose name says cache go last, and the
+     * whole walk has a share of the scan time of its own, so a cache with a
+     * hundred thousand files costs that share and no more.
+     *
+     * @return array Array with 'suspicious', 'extra', 'unverified' and 'errors' sub-arrays.
+     */
+    private function scan_content_folders() {
+        $found = array(
+            'suspicious' => array(),
+            'extra'      => array(),
+            'unverified' => array(),
+            'errors'     => array(),
+        );
+
+        $entries = is_dir( WP_CONTENT_DIR ) ? scandir( WP_CONTENT_DIR ) : false;
+
+        if ( ! is_array( $entries ) ) {
+            return $found;
+        }
+
+        // The folders with a scan of their own, by where they really are.
+        global $wp_theme_directories;
+
+        $uploads      = wp_get_upload_dir();
+        $uploads_real = empty( $uploads['basedir'] ) ? false : realpath( $uploads['basedir'] );
+        $uploads_real = false === $uploads_real ? '' : wp_normalize_path( $uploads_real );
+        $own          = array();
+        $roots        = array_merge(
+            array( WP_PLUGIN_DIR, defined( 'WPMU_PLUGIN_DIR' ) ? WPMU_PLUGIN_DIR : '', get_theme_root() ),
+            is_array( $wp_theme_directories ) ? $wp_theme_directories : array()
+        );
+
+        foreach ( $roots as $root ) {
+            $real = '' === (string) $root ? false : realpath( $root );
+
+            if ( false !== $real ) {
+                $own[ wp_normalize_path( $real ) ] = true;
+            }
+        }
+
+        if ( '' !== $uploads_real ) {
+            $own[ $uploads_real ] = true;
+        }
+
+        // On a site of a network that is not the main one, the uploads of the
+        // site live inside the uploads of the network, which are the main
+        // site's turn.
+        $network_uploads = is_multisite() && ! is_main_site() ? $uploads_real : '';
+
+        $folders = array();
+
+        foreach ( $entries as $entry ) {
+            $path = WP_CONTENT_DIR . '/' . $entry;
+
+            if ( '.' === $entry || '..' === $entry || ! is_dir( $path ) ) {
+                continue;
+            }
+
+            $real = realpath( $path );
+            $real = false === $real ? '' : wp_normalize_path( $real );
+
+            // A folder with a scan of its own, or a link into one. A link to
+            // anywhere else is walked like the folder it stands for: deploy
+            // tools keep languages or a cache behind one, and what is there
+            // is reached by its address all the same.
+            if ( '' === $real || self::is_inside_any( $real, $own ) || ( is_link( $path ) && self::leads_back( $path ) ) ) {
+                continue;
+            }
+
+            if ( '' !== $network_uploads && 0 === strpos( $network_uploads, $real . '/' ) ) {
+                continue;
+            }
+
+            if ( $this->is_path_excluded( $path . '/.' ) ) {
+                continue;
+            }
+
+            $folders[] = $entry;
+        }
+
+        usort(
+            $folders,
+            static function ( $a, $b ) {
+                $a_cache = false !== stripos( $a, 'cache' );
+                $b_cache = false !== stripos( $b, 'cache' );
+
+                return $a_cache === $b_cache ? strcmp( $a, $b ) : ( $a_cache ? 1 : -1 );
+            }
+        );
+
+        $php_extensions = self::php_extensions();
+        $config_files   = array( '.htaccess', '.user.ini', 'php.ini' );
+        $deadline       = microtime( true ) + $this->content_folders_time;
+
+        // A folder with a scan of its own nested further down, or one the
+        // user left out, is not walked at all.
+        $skip = function ( $folder ) use ( $own ) {
+            $real = realpath( $folder );
+
+            return ( false !== $real && isset( $own[ wp_normalize_path( $real ) ] ) ) || $this->is_path_excluded( $folder . '/.' );
+        };
+
+        foreach ( $folders as $entry ) {
+            $path      = WP_CONTENT_DIR . '/' . $entry;
+            $php_files = 0;
+
+            try {
+                foreach ( self::walk_folder( $path, $skip ) as $file ) {
+                    if ( $this->is_time_exceeded() ) {
+                        break 2;
+                    }
+
+                    if ( microtime( true ) > $deadline ) {
+                        $found['errors'][] = sprintf(
+                            /* translators: %s: Folder path */
+                            __( 'The folders of wp-content outside plugins, themes and uploads were not checked completely: the time for them ran out in %s. If that folder only holds files that change all the time, such as a cache, add it to Excluded Paths.', 'vigilante' ),
+                            str_replace( ABSPATH, '', $path )
+                        );
+                        break 2;
+                    }
+
+                    $file_path = $file->getPathname();
+
+                    if ( $file->isDir() ) {
+                        if ( ! $file->isReadable() ) {
+                            $found['errors'][] = self::unreadable_folder_error( $file_path );
+                        }
+                        continue;
+                    }
+
+                    $basename = strtolower( basename( $file_path ) );
+
+                    if ( in_array( $basename, $config_files, true ) ) {
+                        $config = $this->is_path_excluded( $file_path ) ? null : self::server_config_finding( $file_path, str_replace( ABSPATH, '', $file_path ) );
+
+                        if ( $config ) {
+                            $found[ $config['category'] ][] = $config['item'];
+                        }
+                        continue;
+                    }
+
+                    if ( ! in_array( strtolower( pathinfo( $file_path, PATHINFO_EXTENSION ) ), $php_extensions, true ) ) {
+                        continue;
+                    }
+
+                    if ( $this->is_path_excluded( $file_path ) || $this->is_silence_golden_file( $file_path ) ) {
+                        continue;
+                    }
+
+                    $literal = $this->is_literal_data( $file_path );
+
+                    if ( true === $literal ) {
+                        continue;
+                    }
+
+                    $relative = str_replace( ABSPATH, '', $file_path );
+
+                    if ( false === $literal && '.l10n.php' === substr( $basename, -9 ) ) {
+                        // Reported whatever the search finds, like a PHP file
+                        // in uploads: WordPress loads it on every request, and
+                        // no tool writes anything but the table of texts in
+                        // it. What the search finds is said next to it.
+                        $pattern = $this->search_file( $file_path, true );
+                        $reason  = __( 'Translation file that holds something other than translations', 'vigilante' );
+
+                        if ( $pattern ) {
+                            /* translators: %s: Suspicious pattern found */
+                            $reason = sprintf( __( 'Translation file with suspicious code: %s', 'vigilante' ), $pattern );
+                        }
+
+                        $found['suspicious'][] = array(
+                            'file'   => $relative,
+                            'type'   => 'translation_with_code',
+                            'reason' => $reason,
+                        );
+                        continue;
+                    }
+
+                    $pattern = $this->search_file( $file_path, true );
+
+                    if ( $pattern ) {
+                        $found['suspicious'][] = array(
+                            'file'   => $relative,
+                            'type'   => 'suspicious_content',
+                            /* translators: 1: Plugin or theme name, or the folder the file is in, 2: Suspicious pattern found */
+                            'reason' => sprintf( __( 'File in %1$s with suspicious code: %2$s', 'vigilante' ), str_replace( ABSPATH, '', $path ), $pattern ),
+                        );
+                    } elseif ( null === $pattern ) {
+                        $found['extra'][] = $this->not_searched_item( $file_path, $relative );
+                    } elseif ( self::is_inside_languages( $file_path ) ) {
+                        $found['extra'][] = array(
+                            'file'   => $relative,
+                            'type'   => 'php_in_content',
+                            'reason' => __( 'PHP file among the translations that is not a translation file', 'vigilante' ),
+                        );
+                    } else {
+                        $php_files++;
+                    }
+                }
+            } catch ( Exception $e ) {
+                $found['errors'][] = self::unreadable_folder_error( $path );
+            }
+
+            if ( $php_files > 0 ) {
+                $found['unverified'][] = str_replace( ABSPATH, '', $path );
+            }
+        }
+
+        return $found;
+    }
+
+    /**
+     * Whether a real path is one of a set of folders or lies inside one of them
+     *
+     * @param string $real    Real path, with forward slashes.
+     * @param array  $folders Real paths with forward slashes, as keys.
+     * @return bool
+     */
+    private static function is_inside_any( $real, $folders ) {
+        foreach ( array_keys( $folders ) as $folder ) {
+            if ( $real === $folder || 0 === strpos( $real, $folder . '/' ) ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Whether a link leads to wp-content itself or to a folder above it
+     *
+     * @param string $path Path of the link.
+     * @return bool True also when where it leads cannot be worked out.
+     */
+    private static function leads_back( $path ) {
+        $real    = realpath( $path );
+        $content = realpath( WP_CONTENT_DIR );
+
+        if ( false === $real || false === $content ) {
+            return true;
+        }
+
+        return 0 === strpos( wp_normalize_path( $content ) . '/', wp_normalize_path( $real ) . '/' );
+    }
+
+    /**
+     * Whether a path is inside the folder WordPress keeps its translations in
+     *
+     * @param string $path Absolute path.
+     * @return bool
+     */
+    private static function is_inside_languages( $path ) {
+        if ( ! defined( 'WP_LANG_DIR' ) ) {
+            return false;
+        }
+
+        return 0 === strpos( wp_normalize_path( $path ), untrailingslashit( wp_normalize_path( WP_LANG_DIR ) ) . '/' );
+    }
+
+    /**
+     * Whether a PHP file holds literal data and nothing else
+     *
+     * A file such as "<?php return [ 'a' => 'b' ];" cannot run anything. It is
+     * how WordPress, GlotPress, WP-CLI and Loco Translate write translation
+     * files, and how plugins keep small tables. The file is read one piece at
+     * a time, and every piece has to be a quoted string with nothing
+     * interpolated in it, a number, true, false, null, return, an array
+     * bracket, a comma, "=>", a dot or a semicolon. A parenthesis is
+     * accepted only as part of "array(" and to close it, so
+     * nothing can be called, and with those pieces there is no way to name a
+     * variable, a function, a class or a file.
+     *
+     * Anything else, a comment included, and the answer is no. Saying no to a
+     * harmless file only means it is searched like any other; saying yes to
+     * a file with code would hide it. So this reads less than PHP does, on
+     * purpose. Each piece is also one PHP would cut the same way: a minus
+     * sign only in front of a number and a dot never in front of "=", or
+     * "-=>" and ".=>" would be read here as an arrow and by PHP as an
+     * assignment. What it accepts is checked against PHP's own reading of
+     * the same file, at random, in the release checks.
+     *
+     * @param string $file_path Absolute path.
+     * @return bool|null True when it holds only data, false when it holds
+     *                   anything else, null when it could not be read whole.
+     */
+    private function is_literal_data( $file_path ) {
+        if ( ! is_file( $file_path ) || ! is_readable( $file_path ) ) {
+            return null;
+        }
+
+        // With another source encoding set (zend.multibyte), a string does
+        // not end for PHP where it ends byte by byte: nothing is vouched for.
+        if ( ini_get( 'zend.multibyte' ) ) {
+            return null;
+        }
+
+        $size = filesize( $file_path );
+
+        if ( false === $size || $size > self::MAX_SEARCHED_BYTES ) {
+            return null;
+        }
+
+        $content = file_get_contents( $file_path, false, null, 0, self::MAX_SEARCHED_BYTES + 1 ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reads a local file to see whether it holds anything but data; nothing is written.
+
+        if ( false === $content || strlen( $content ) > self::MAX_SEARCHED_BYTES ) {
+            return null;
+        }
+
+        if ( 1 !== preg_match( '/\A<\?php[ \t\r\n]/', $content ) ) {
+            return false;
+        }
+
+        $piece  = '/\G(?:[ \t\r\n]++|\'[^\'\\\\]*+(?:\\\\.[^\'\\\\]*+)*+\'|"[^"\\\\$]*+(?:\\\\.[^"\\\\$]*+)*+"|-?+\d++(?:\.\d++)?+(?:e[+-]?+\d++)?+|=>|\.(?!=)|[\[\],;)]|(?:true|false|null|return)(?![a-z0-9_\x80-\xff])|array[ \t\r\n]*+\()/is';
+        $length = strlen( $content );
+        $offset = 6;
+
+        while ( $offset < $length ) {
+            $match  = array();
+            $result = preg_match( $piece, $content, $match, 0, $offset );
+
+            if ( 1 !== $result ) {
+                return false === $result ? null : false;
+            }
+
+            $offset += strlen( $match[0] );
+        }
+
+        return true;
     }
 
     // =========================================================================
@@ -3482,8 +4564,8 @@ class Vigilante_File_Integrity {
      * @param bool $force_refresh Skip the cached copy and ask wp.org again.
      * @return array|WP_Error Checksums or error.
      */
-    private function get_core_checksums( $force_refresh = false ) {
-        $locale = get_locale();
+    private function get_core_checksums( $force_refresh = false, $locale = null, $english_fallback = true ) {
+        $locale = null === $locale ? get_locale() : $locale;
         $version = $this->wp_version;
         
         // Check cache first
@@ -3514,6 +4596,24 @@ class Vigilante_File_Integrity {
         $body = json_decode( wp_remote_retrieve_body( $response ), true );
 
         if ( empty( $body['checksums'] ) ) {
+            /*
+             * WordPress.org has no list for this version in this language. That
+             * is the normal state of every site that is not in English for the
+             * hours or days after a release, until the package of its language
+             * is built, and of the languages that never get one. Until now the
+             * core was then not compared at all. Those sites run the English
+             * files, so the English list is the one to compare with. It is not
+             * kept under this language, so the next scan asks again.
+             */
+            if ( 'en_US' !== $locale && $english_fallback ) {
+                $english = $this->get_core_checksums( $force_refresh, 'en_US' );
+
+                if ( is_array( $english ) ) {
+                    $this->core_checksums_are_english = true;
+                    return $english;
+                }
+            }
+
             return new WP_Error( 'no_checksums', __( 'Could not retrieve WordPress core checksums', 'vigilante' ) );
         }
 
@@ -3528,6 +4628,50 @@ class Vigilante_File_Integrity {
         set_transient( $cache_key, $checksums, DAY_IN_SECONDS );
 
         return $checksums;
+    }
+
+    /**
+     * Whether a core file is the official copy of another language
+     *
+     * The checksums are asked for in the language of the site, and a site does
+     * not always run the package of its language: one installed in English and
+     * switched to Spanish afterwards keeps the English files, so its
+     * version.php and its wp-config-sample.php do not match the Spanish list.
+     * That is why version.php used to be left out of the comparison altogether,
+     * which left a file WordPress loads on every request unchecked. A file that
+     * matches the official copy of the same version in English, or in the
+     * language its own package declares, is an official file. The language
+     * only chooses which official list to look at: a file that was tampered
+     * with matches none of them.
+     *
+     * @param string $file        Path relative to the WordPress root.
+     * @param string $actual_hash md5 of the file on disk.
+     * @return bool
+     */
+    private function matches_core_of_other_locale( $file, $actual_hash ) {
+        $current = get_locale();
+        $others  = array( 'en_US' );
+
+        if ( ! empty( $GLOBALS['wp_local_package'] ) && is_string( $GLOBALS['wp_local_package'] ) ) {
+            $others[] = $GLOBALS['wp_local_package'];
+        }
+
+        foreach ( array_unique( $others ) as $locale ) {
+            if ( $locale === $current || ! preg_match( '/^[A-Za-z0-9_]{2,24}$/', $locale ) ) {
+                continue;
+            }
+
+            // Without the English list in its place: asking about another
+            // language must not leave the scan believing that the list of the
+            // site itself was missing.
+            $checksums = $this->get_core_checksums( false, $locale, false );
+
+            if ( is_array( $checksums ) && isset( $checksums[ $file ] ) && $checksums[ $file ] === $actual_hash ) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -3550,7 +4694,8 @@ class Vigilante_File_Integrity {
             require_once ABSPATH . 'wp-admin/includes/plugin.php';
         }
 
-        $plugins = get_plugins();
+        $plugins  = get_plugins();
+        $finished = array();
 
         foreach ( $plugins as $plugin_file => $plugin_data ) {
             // Check time limit
@@ -3560,25 +4705,7 @@ class Vigilante_File_Integrity {
 
             $plugin_slug = dirname( $plugin_file );
 
-            // Skip single-file plugins
-            if ( '.' === $plugin_slug ) {
-                continue;
-            }
-
-            // With the self-check on, Vigilant itself is verified by the
-            // sha256 triple-anchor block at the start of run_scan(): scanning
-            // it here again would duplicate findings and the md5 fetch. With
-            // the check off by filter, Vigilant is a regular plugin (legacy
-            // behaviour).
-            if ( dirname( VIGILANTE_PLUGIN_BASENAME ) === $plugin_slug && Vigilante_Self_Integrity::is_on() ) {
-                continue;
-            }
-
-            // Skip slugs in their post-update grace window: wp.org may still be
-            // publishing the new version's checksums, so a scheduled scan here
-            // would raise benign "modified/extra" noise. The dedicated post-update
-            // verifier (vigilante_fi_postupdate_verify) handles these instead.
-            if ( $this->in_post_update_grace( 'plugin', $plugin_slug ) ) {
+            if ( ! $this->plugin_has_turn( $plugin_slug ) ) {
                 continue;
             }
 
@@ -3587,6 +4714,20 @@ class Vigilante_File_Integrity {
             $checksums = $this->get_plugin_checksums( $plugin_slug, $version );
 
             $has_checksums = ! is_wp_error( $checksums ) && 'not_found' !== $checksums;
+
+            // Say which plugins could not be compared, and why. A plugin that
+            // is not on WordPress.org is named as such; a failed request is an
+            // error of this scan, not a plugin without an official copy.
+            if ( is_wp_error( $checksums ) ) {
+                $results['errors'][] = sprintf(
+                    /* translators: 1: Plugin name, 2: What went wrong */
+                    __( 'The plugin %1$s could not be compared with its copy on WordPress.org: %2$s', 'vigilante' ),
+                    $plugin_data['Name'] ?? $plugin_slug,
+                    $checksums->get_error_message()
+                );
+            } elseif ( ! $has_checksums ) {
+                $results['unverified'][] = $plugin_data['Name'] ?? $plugin_slug;
+            }
 
             $plugin_dir = WP_PLUGIN_DIR . '/' . $plugin_slug;
 
@@ -3618,7 +4759,15 @@ class Vigilante_File_Integrity {
                 $results['scanned']++;
 
                 if ( ! file_exists( $file_path ) ) {
-                    continue; // Some files might not be installed
+                    // Reported, and not just skipped: a file that is in the
+                    // published copy and not on the server is part of what
+                    // the scan found.
+                    $results['missing'][] = array(
+                        'file'   => 'plugins/' . $plugin_slug . '/' . $file,
+                        'type'   => 'plugin',
+                        'plugin' => $plugin_data['Name'] ?? $plugin_slug,
+                    );
+                    continue;
                 }
 
                 if ( ! $this->hash_matches_published( $file_path, $expected_hash ) ) {
@@ -3644,10 +4793,79 @@ class Vigilante_File_Integrity {
                 $extra_results  = $this->detect_extra_files( $plugin_dir, $known_files, 'plugin', $plugin_data['Name'], $suspicious_only );
                 $results['extra'] = array_merge( $results['extra'] ?? array(), $extra_results['extra'] );
                 $results['suspicious'] = array_merge( $results['suspicious'] ?? array(), $extra_results['suspicious'] );
+                $results['errors'] = array_merge( $results['errors'] ?? array(), $extra_results['errors'] ?? array() );
+            }
+
+            // The plugin had its whole turn. The one the time runs out on
+            // does not get here with time left, and is named with the ones
+            // behind it.
+            if ( ! $this->is_time_exceeded() ) {
+                $finished[ $plugin_file ] = true;
+
+                // Its folder, as a line for Excluded Paths: what a partial
+                // scan offers so that the next one spends its time on the
+                // rest. One that is already excluded was not looked at.
+                if ( ! $this->is_path_excluded( $plugin_dir . '/.' ) ) {
+                    $results['checked'][] = $this->relative_path( $plugin_dir );
+                }
             }
         }
 
+        // The plugins the time did not reach, by name.
+        $results['not_checked'] = array();
+
+        foreach ( $plugins as $plugin_file => $plugin_data ) {
+            if ( isset( $finished[ $plugin_file ] ) || ! $this->plugin_has_turn( dirname( $plugin_file ) ) ) {
+                continue;
+            }
+
+            $results['not_checked'][] = (string) ( $plugin_data['Name'] ?? dirname( $plugin_file ) );
+        }
+
+        // Must-use plugins, drop-ins and loose PHP files, which have no
+        // official copy and no entry in the list above.
+        $results['unlisted_checked'] = false;
+
+        if ( ! $this->is_time_exceeded() ) {
+            $unlisted = $this->scan_unlisted_code();
+
+            $results['extra']      = array_merge( $results['extra'] ?? array(), $unlisted['extra'] );
+            $results['suspicious'] = array_merge( $results['suspicious'] ?? array(), $unlisted['suspicious'] );
+            $results['unverified'] = array_merge( $results['unverified'] ?? array(), $unlisted['unverified'] );
+            $results['errors']     = array_merge( $results['errors'] ?? array(), $unlisted['errors'] );
+
+            $results['unlisted_checked'] = ! $this->is_time_exceeded();
+        }
+
         return $results;
+    }
+
+    /**
+     * Whether a plugin gets a turn of its own in scan_plugins()
+     *
+     * @param string $plugin_slug Folder of the plugin, or "." for a single file.
+     * @return bool
+     */
+    private function plugin_has_turn( $plugin_slug ) {
+        // Single-file plugins are loose PHP files: scan_unlisted_code().
+        if ( '.' === $plugin_slug ) {
+            return false;
+        }
+
+        // With the self-check on, Vigilant itself is verified by the
+        // sha256 triple-anchor block at the start of run_scan(): scanning
+        // it here again would duplicate findings and the md5 fetch. With
+        // the check off by filter, Vigilant is a regular plugin (legacy
+        // behaviour).
+        if ( dirname( VIGILANTE_PLUGIN_BASENAME ) === $plugin_slug && Vigilante_Self_Integrity::is_on() ) {
+            return false;
+        }
+
+        // Skip slugs in their post-update grace window: wp.org may still be
+        // publishing the new version's checksums, so a scheduled scan here
+        // would raise benign "modified/extra" noise. The dedicated post-update
+        // verifier (vigilante_fi_postupdate_verify) handles these instead.
+        return ! $this->in_post_update_grace( 'plugin', $plugin_slug );
     }
 
     /**
@@ -3782,12 +5000,23 @@ class Vigilante_File_Integrity {
         }
 
         $status = wp_remote_retrieve_response_code( $response );
-        if ( 200 !== $status ) {
+        if ( 404 === (int) $status ) {
             // Cache "not found" to avoid repeated requests (never during grace).
             if ( ! $grace ) {
                 set_transient( $cache_key, 'not_found', HOUR_IN_SECONDS );
             }
             return 'not_found';
+        }
+
+        if ( 200 !== (int) $status ) {
+            // WordPress.org answered, but not with the checksums. An outage is
+            // not a plugin with no published copy, and until now it passed
+            // for one: the plugin was quietly left uncompared.
+            return new WP_Error(
+                'http_error',
+                /* translators: %d: HTTP status code */
+                sprintf( __( 'WordPress.org answered with status %d', 'vigilante' ), (int) $status )
+            );
         }
 
         $body = json_decode( wp_remote_retrieve_body( $response ), true );
@@ -3830,7 +5059,8 @@ class Vigilante_File_Integrity {
             'errors'     => array(),
         );
 
-        $themes = wp_get_themes();
+        $themes   = wp_get_themes();
+        $finished = array();
 
         foreach ( $themes as $theme_slug => $theme ) {
             // Check time limit
@@ -3847,6 +5077,18 @@ class Vigilante_File_Integrity {
             $checksums = $this->get_theme_checksums( $theme_slug, $version );
 
             $has_checksums = ! is_wp_error( $checksums ) && 'not_found' !== $checksums;
+
+            // Same as for plugins: name what could not be compared, and why.
+            if ( is_wp_error( $checksums ) && 'not_found' !== $checksums->get_error_code() ) {
+                $results['errors'][] = sprintf(
+                    /* translators: 1: Theme name, 2: What went wrong */
+                    __( 'The theme %1$s could not be compared with its copy on WordPress.org: %2$s', 'vigilante' ),
+                    $theme->get( 'Name' ),
+                    $checksums->get_error_message()
+                );
+            } elseif ( ! $has_checksums ) {
+                $results['unverified'][] = $theme->get( 'Name' );
+            }
 
             $theme_dir = $theme->get_stylesheet_directory();
 
@@ -3878,6 +5120,11 @@ class Vigilante_File_Integrity {
                 $results['scanned']++;
 
                 if ( ! file_exists( $file_path ) ) {
+                    $results['missing'][] = array(
+                        'file'  => 'themes/' . $theme_slug . '/' . $file,
+                        'type'  => 'theme',
+                        'theme' => $theme->get( 'Name' ),
+                    );
                     continue;
                 }
 
@@ -3902,7 +5149,28 @@ class Vigilante_File_Integrity {
                 $extra_results  = $this->detect_extra_files( $theme_dir, $known_files, 'theme', $theme->get( 'Name' ), $suspicious_only );
                 $results['extra'] = array_merge( $results['extra'] ?? array(), $extra_results['extra'] );
                 $results['suspicious'] = array_merge( $results['suspicious'] ?? array(), $extra_results['suspicious'] );
+                $results['errors'] = array_merge( $results['errors'] ?? array(), $extra_results['errors'] ?? array() );
             }
+
+            // Same as for plugins: a whole turn, with time left.
+            if ( ! $this->is_time_exceeded() ) {
+                $finished[ $theme_slug ] = true;
+
+                if ( ! $this->is_path_excluded( $theme_dir . '/.' ) ) {
+                    $results['checked'][] = $this->relative_path( $theme_dir );
+                }
+            }
+        }
+
+        // The themes the time did not reach, by name.
+        $results['not_checked'] = array();
+
+        foreach ( $themes as $theme_slug => $theme ) {
+            if ( isset( $finished[ $theme_slug ] ) || $this->in_post_update_grace( 'theme', $theme_slug ) ) {
+                continue;
+            }
+
+            $results['not_checked'][] = (string) $theme->get( 'Name' );
         }
 
         return $results;
@@ -3916,7 +5184,7 @@ class Vigilante_File_Integrity {
      * @return array|WP_Error
      */
     private function get_theme_checksums( $slug, $version ) {
-        $cache_key = 'vigilante_theme_checksums_' . md5( $slug . $version );
+        $cache_key = 'vigilante_theme_package_' . md5( $slug . $version );
 
         // Bypass the cache during the post-update grace window (see plugin path).
         $grace = $this->in_post_update_grace( 'theme', $slug );
@@ -3928,46 +5196,101 @@ class Vigilante_File_Integrity {
             }
         }
 
-        $url = sprintf(
-            'https://downloads.wordpress.org/theme-checksums/%s/%s.json',
-            $slug,
-            $version
-        );
-
-        $response = wp_remote_get( $url, array( 'timeout' => 10 ) );
-
-        if ( is_wp_error( $response ) ) {
-            return $response;
-        }
-
-        $status = wp_remote_retrieve_response_code( $response );
-        if ( 200 !== $status ) {
-            // Cache "not found" to avoid repeated requests (never during grace).
-            if ( ! $grace ) {
-                set_transient( $cache_key, 'not_found', HOUR_IN_SECONDS );
-            }
+        /*
+         * WordPress.org publishes checksums for plugins and for core, and none
+         * for themes: the address this method asked until now answers 404 for
+         * every theme, so no theme was ever compared with anything and they
+         * were all treated as themes from elsewhere. What WordPress.org does
+         * publish is the package of each version, so the checksums are taken
+         * from there: the package is downloaded once per version, each file in
+         * it is hashed straight from the archive, nothing is unpacked to disk,
+         * and the result is kept for a month.
+         */
+        if ( '' === (string) $version || ! preg_match( '/^[A-Za-z0-9._-]+$/', (string) $slug ) ) {
             return new WP_Error( 'not_found', __( 'Checksums not available', 'vigilante' ) );
         }
 
-        $body = json_decode( wp_remote_retrieve_body( $response ), true );
-
-        if ( empty( $body['files'] ) ) {
-            return new WP_Error( 'no_checksums', __( 'No checksums found', 'vigilante' ) );
+        if ( ! class_exists( 'ZipArchive' ) ) {
+            return new WP_Error( 'no_zip', __( 'the zip extension of PHP is missing on this server', 'vigilante' ) );
         }
 
-        // Store the full per-file record (md5 + sha256), either of which may be a
-        // string or an array; hash_matches_published() handles both shapes.
+        if ( ! function_exists( 'download_url' ) ) {
+            require_once ABSPATH . 'wp-admin/includes/file.php';
+        }
+
+        $package = download_url(
+            sprintf( 'https://downloads.wordpress.org/theme/%s.%s.zip', rawurlencode( $slug ), rawurlencode( (string) $version ) ),
+            30
+        );
+
+        if ( is_wp_error( $package ) ) {
+            $data = $package->get_error_data();
+
+            // WordPress.org has no such theme or no such version: a theme from
+            // somewhere else. Anything other than a 404 is a failed download,
+            // and is reported as that instead of passing for a theme with no
+            // official copy.
+            if ( is_array( $data ) && isset( $data['code'] ) && 404 === (int) $data['code'] ) {
+                if ( ! $grace ) {
+                    set_transient( $cache_key, 'not_found', 12 * HOUR_IN_SECONDS );
+                }
+                return new WP_Error( 'not_found', __( 'Checksums not available', 'vigilante' ) );
+            }
+
+            return $package;
+        }
+
         $checksums = array();
-        foreach ( $body['files'] as $file => $data ) {
-            $checksums[ $file ] = array(
-                'md5'    => isset( $data['md5'] ) ? $data['md5'] : null,
-                'sha256' => isset( $data['sha256'] ) ? $data['sha256'] : null,
-            );
+        $archive   = new ZipArchive();
+
+        if ( true === $archive->open( $package ) ) {
+            $prefix    = $slug . '/';
+            $max_entry = 16 * MB_IN_BYTES;
+
+            for ( $i = 0; $i < $archive->numFiles; $i++ ) {
+                $entry = $archive->statIndex( $i );
+                $name  = is_array( $entry ) ? (string) $entry['name'] : '';
+
+                // Everything in the package lives under the folder of the theme.
+                // Folders, anything outside it and any path with a ".."
+                // segment are not files of the theme.
+                if ( '' === $name || '/' === substr( $name, -1 ) || 0 !== strpos( $name, $prefix ) || preg_match( '#(?:^|/)\.\.(?:/|$)#', $name ) ) {
+                    continue;
+                }
+
+                // Read up to a limit: an entry larger than this is not code,
+                // and is left out of the comparison instead of being loaded
+                // whole into memory.
+                $content = $archive->getFromIndex( $i, $max_entry + 1 );
+
+                if ( false === $content ) {
+                    $checksums = array();
+                    break;
+                }
+
+                if ( strlen( $content ) > $max_entry ) {
+                    continue;
+                }
+
+                $checksums[ substr( $name, strlen( $prefix ) ) ] = array(
+                    'md5'    => md5( $content ),
+                    'sha256' => hash( 'sha256', $content ),
+                );
+            }
+
+            $archive->close();
         }
 
-        // Cache for 24 hours (never during grace).
+        wp_delete_file( $package );
+
+        if ( empty( $checksums ) ) {
+            return new WP_Error( 'no_checksums', __( 'the package from WordPress.org could not be read', 'vigilante' ) );
+        }
+
+        // The package of a published version does not change, so it is kept
+        // for a month (never during grace).
         if ( ! $grace ) {
-            set_transient( $cache_key, $checksums, DAY_IN_SECONDS );
+            set_transient( $cache_key, $checksums, MONTH_IN_SECONDS );
         }
 
         return $checksums;
@@ -3982,34 +5305,54 @@ class Vigilante_File_Integrity {
         $found = array(
             'suspicious' => array(),
             'extra'      => array(),
+            'errors'     => array(),
         );
         $upload_dir = wp_upload_dir();
         $base_dir = $upload_dir['basedir'];
-        $max_files = 10000; // Increased limit for thorough scanning
         $files_checked = 0;
 
+        // The walk used to stop after 10,000 files without saying so, and a
+        // media library passes that with a few thousand images. Now it goes on
+        // for as long as its share of the scan time lasts, and says so when it
+        // is cut short. The share keeps a huge library from leaving the core
+        // and the plugins without their turn.
+        $deadline = $this->scan_start_time > 0 ? $this->scan_start_time + ( 0.4 * $this->max_scan_time ) : 0;
+
         // Executable extensions that should never be in uploads
-        $dangerous_extensions = array( 'php', 'php3', 'php4', 'php5', 'php7', 'phtml', 'phar', 'phps' );
+        $dangerous_extensions = self::php_extensions();
+
+        // Files that change how PHP runs in the folder they are in.
+        $php_config_files = array( '.user.ini', 'php.ini' );
+
+        // Scripts a server can be told to run through CGI.
+        $script_extensions = array( 'cgi', 'pl', 'py', 'sh', 'shtml' );
 
         if ( ! is_dir( $base_dir ) ) {
             return $found;
         }
 
         try {
-            $iterator = new RecursiveIteratorIterator(
-                new RecursiveDirectoryIterator( $base_dir, RecursiveDirectoryIterator::SKIP_DOTS ),
-                RecursiveIteratorIterator::LEAVES_ONLY
-            );
-
-            foreach ( $iterator as $file ) {
+            foreach ( self::walk_folder( $base_dir ) as $file ) {
                 // Check global time limit
                 if ( $this->is_time_exceeded() ) {
                     break;
                 }
 
-                // Check file limit
+                if ( $file->isDir() ) {
+                    if ( ! $file->isReadable() ) {
+                        $found['errors'][] = self::unreadable_folder_error( $file->getPathname() );
+                    }
+                    continue;
+                }
+
+                // Check the share of the scan time (every 500 files)
                 $files_checked++;
-                if ( $files_checked > $max_files ) {
+                if ( $deadline > 0 && 0 === $files_checked % 500 && microtime( true ) > $deadline ) {
+                    $found['errors'][] = sprintf(
+                        /* translators: %s: Number of files */
+                        __( 'The uploads folder was not checked completely: the time for it ran out after %s files.', 'vigilante' ),
+                        number_format_i18n( $files_checked )
+                    );
                     break;
                 }
 
@@ -4036,13 +5379,10 @@ class Vigilante_File_Integrity {
                     $reason = __( 'PHP file found in uploads directory', 'vigilante' );
 
                     // Scan content for specific suspicious patterns
-                    if ( $file->getSize() < 512000 ) { // Only scan files < 500KB
-                        $content = file_get_contents( $file_path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
-                        $pattern = $this->detect_suspicious_pattern( $content );
-                        if ( $pattern ) {
-                            /* translators: %s: Suspicious pattern found */
-                            $reason = sprintf( __( 'PHP in uploads with suspicious code: %s', 'vigilante' ), $pattern );
-                        }
+                    $pattern = $this->search_file( $file_path );
+                    if ( $pattern ) {
+                        /* translators: %s: Suspicious pattern found */
+                        $reason = sprintf( __( 'PHP in uploads with suspicious code: %s', 'vigilante' ), $pattern );
                     }
 
                     $found['suspicious'][] = array(
@@ -4054,7 +5394,10 @@ class Vigilante_File_Integrity {
                 }
 
                 // 2. Check for double extensions (image.php.jpg, file.phtml.png)
-                if ( preg_match( '/\.(' . implode( '|', $dangerous_extensions ) . ')\.[a-z]{2,4}$/i', $basename ) ) {
+                // The second extension can be anything: a script renamed by a
+                // malware cleaner (shell.php.suspected) or numbered (shell.php.1)
+                // is as much of a finding as one dressed up as an image.
+                if ( preg_match( '/\.(' . implode( '|', $dangerous_extensions ) . ')\.[a-z0-9_~-]{1,16}$/i', $basename ) ) {
                     $found['suspicious'][] = array(
                         'file'   => $relative,
                         'type'   => 'double_extension',
@@ -4063,15 +5406,39 @@ class Vigilante_File_Integrity {
                     continue;
                 }
 
+                // 2b. Files that change how PHP runs in this folder
+                if ( in_array( strtolower( $basename ), $php_config_files, true ) ) {
+                    $found['suspicious'][] = array(
+                        'file'   => $relative,
+                        'type'   => 'php_config_in_uploads',
+                        'reason' => __( 'PHP configuration file in uploads', 'vigilante' ),
+                    );
+                    continue;
+                }
+
+                // 2c. Scripts in other languages
+                if ( in_array( $extension, $script_extensions, true ) ) {
+                    $found['extra'][] = array(
+                        'file'   => $relative,
+                        'type'   => 'script_in_uploads',
+                        'reason' => __( 'Script file in uploads', 'vigilante' ),
+                    );
+                    continue;
+                }
+
                 // 3. Check for .htaccess files in uploads
-                // Read content to classify: dangerous rules = suspicious, protective rules = extra
+                // Read content to classify (see classify_htaccess_in_uploads())
                 if ( '.htaccess' === $basename ) {
                     $htaccess_result = $this->classify_htaccess_in_uploads( $file_path, $relative );
-                    $found[ $htaccess_result['category'] ][] = $htaccess_result['item'];
+
+                    // One that only denies access, or does nothing, is not a finding.
+                    if ( 'none' !== $htaccess_result['category'] ) {
+                        $found[ $htaccess_result['category'] ][] = $htaccess_result['item'];
+                    }
                 }
             }
         } catch ( Exception $e ) {
-            // Ignore iterator errors
+            $found['errors'][] = self::unreadable_folder_error( $base_dir );
         }
 
         return $found;
@@ -4080,92 +5447,513 @@ class Vigilante_File_Integrity {
     /**
      * Classify a .htaccess file found in uploads directory
      *
-     * Reads the file content to determine if it contains dangerous rules
-     * (enabling PHP execution, rewriting to executables) or protective rules
-     * (deny access, disable indexes). Dangerous = suspicious, protective = extra.
+     * The file is read the way Apache reads it: continued lines are joined,
+     * comments are dropped and each directive is looked at on its own. That
+     * replaces a handful of expressions run over the whole text, which took a
+     * commented line for a live one and the rule that forbids PHP for one that
+     * runs it, and let through the directives that turn CGI on.
+     *
+     * - Something that makes the server run code: suspicious.
+     * - Only directives that deny or switch something off: not reported.
+     * - Rewrite rules of its own and nothing that denies PHP: extra, because in
+     *   that folder they replace the rules of the site root, the one that
+     *   blocks PHP in uploads included (measured on Apache, 3 Oct 2026).
+     * - Anything else: extra, with what it contains.
      *
      * @param string $file_path Absolute file path.
      * @param string $relative  Relative file path for display.
-     * @return array Array with 'category' ('suspicious' or 'extra') and 'item' data.
+     * @return array Array with 'category' ('suspicious', 'extra' or 'none') and 'item' data.
      */
     private function classify_htaccess_in_uploads( $file_path, $relative ) {
-        $content = '';
+        $content = false;
 
         if ( filesize( $file_path ) < 65536 ) { // Only read files < 64KB
             $content = file_get_contents( $file_path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
         }
 
-        // If we can't read it or it's empty, treat as suspicious (unknown)
-        if ( empty( trim( $content ) ) ) {
+        $item = array(
+            'file' => $relative,
+            'type' => 'htaccess_in_uploads',
+        );
+
+        // A file that cannot be read cannot be vouched for.
+        if ( false === $content ) {
+            $item['reason'] = __( '.htaccess file in uploads directory that could not be read', 'vigilante' );
+
             return array(
                 'category' => 'suspicious',
-                'item'     => array(
-                    'file'   => $relative,
-                    'type'   => 'htaccess_in_uploads',
-                    'reason' => __( '.htaccess file in uploads directory (empty or unreadable)', 'vigilante' ),
-                ),
+                'item'     => $item,
             );
         }
 
-        // Dangerous patterns: rules that enable code execution or rewrite to executables
-        $dangerous_patterns = array(
-            '/AddHandler\s+.*(php|cgi|pl|py)/i'          => 'AddHandler enabling script execution',
-            '/AddType\s+application\/x-httpd-php/i'       => 'AddType enabling PHP execution',
-            '/SetHandler\s+.*(php|cgi)/i'                 => 'SetHandler enabling script execution',
-            '/php_flag\s+engine\s+on/i'                   => 'PHP engine enabled',
-            '/php_admin_flag\s+engine\s+on/i'             => 'PHP admin engine enabled',
-            '/RewriteRule\s+.*\.(php|phtml|phar)/i'       => 'Rewrite rule targeting PHP files',
-            '/auto_prepend_file/i'                        => 'auto_prepend_file directive',
-            '/auto_append_file/i'                         => 'auto_append_file directive',
-        );
+        $facts = self::read_htaccess_rules( $content );
 
-        foreach ( $dangerous_patterns as $pattern => $label ) {
-            if ( preg_match( $pattern, $content ) ) {
-                return array(
-                    'category' => 'suspicious',
-                    'item'     => array(
-                        'file'   => $relative,
-                        'type'   => 'htaccess_in_uploads',
-                        /* translators: %s: Dangerous rule description */
-                        'reason' => sprintf( __( '.htaccess with dangerous rule: %s', 'vigilante' ), $label ),
-                    ),
-                );
-            }
+        if ( ! empty( $facts['runs'] ) ) {
+            $item['reason'] = self::htaccess_run_reason( $facts );
+
+            return array(
+                'category' => 'suspicious',
+                'item'     => $item,
+            );
         }
 
-        // Identify what protective/benign rules it contains for informational display
-        $found_rules = array();
+        if ( $facts['rewrite'] && ! $facts['denies_php'] ) {
+            $item['reason'] = __( '.htaccess in uploads with rewrite rules of its own: in this folder they replace the ones of the site root, the rule that blocks PHP in uploads included', 'vigilante' );
 
-        $benign_patterns = array(
-            '/Deny\s+from\s+all/i'             => 'Deny from all',
-            '/Require\s+all\s+denied/i'        => 'Require all denied',
-            '/Options\s+.*-Indexes/i'          => 'Options -Indexes',
-            '/Header\s+set/i'                  => 'Header rules',
-            '/ExpiresActive/i'                 => 'Expires/cache rules',
-            '/RewriteEngine/i'                 => 'Rewrite rules',
-            '/FilesMatch/i'                    => 'FilesMatch rules',
-            '/ForceType\s+application\/octet/i' => 'ForceType (force download)',
-        );
-
-        foreach ( $benign_patterns as $pattern => $label ) {
-            if ( preg_match( $pattern, $content ) ) {
-                $found_rules[] = $label;
-            }
+            return array(
+                'category' => 'extra',
+                'item'     => $item,
+            );
         }
 
-        $rules_summary = ! empty( $found_rules )
-            ? implode( ', ', $found_rules )
-            : __( 'Custom rules', 'vigilante' );
+        // Empty, or nothing in it that does not deny or switch something off:
+        // it protects the folder, or does nothing, and is not a finding.
+        if ( empty( $facts['other'] ) ) {
+            return array(
+                'category' => 'none',
+                'item'     => null,
+            );
+        }
+
+        $kinds = array(
+            'access'  => __( 'access rules', 'vigilante' ),
+            'rewrite' => __( 'rewrite rules', 'vigilante' ),
+            'headers' => __( 'cache or header rules', 'vigilante' ),
+            'other'   => __( 'other rules', 'vigilante' ),
+        );
+
+        /* translators: %s: Summary of rules found in the .htaccess file */
+        $item['reason'] = sprintf( __( '.htaccess in uploads (likely from plugin). Contains: %s', 'vigilante' ), implode( ', ', array_intersect_key( $kinds, $facts['other'] ) ) );
 
         return array(
             'category' => 'extra',
-            'item'     => array(
-                'file'   => $relative,
-                'type'   => 'htaccess_in_uploads',
-                /* translators: %s: Summary of rules found in the .htaccess file */
-                'reason' => sprintf( __( '.htaccess in uploads (likely from plugin). Contains: %s', 'vigilante' ), $rules_summary ),
-            ),
+            'item'     => $item,
         );
+    }
+
+    /**
+     * The reason shown for a .htaccess that makes the server run code
+     *
+     * @param array $facts What read_htaccess_rules() found.
+     * @return string
+     */
+    private static function htaccess_run_reason( $facts ) {
+        $labels = array(
+            'run'     => __( 'makes the server run files of this folder as code', 'vigilante' ),
+            'load'    => __( 'loads a file on every PHP request', 'vigilante' ),
+            'rewrite' => __( 'sends requests to a PHP file', 'vigilante' ),
+            'cgi'     => __( 'turns on CGI or server-side includes', 'vigilante' ),
+        );
+
+        /* translators: %s: What the rule does */
+        return sprintf( __( '.htaccess with a rule that affects how code runs: %s', 'vigilante' ), implode( '; ', array_intersect_key( $labels, $facts['runs'] ) ) );
+    }
+
+    /**
+     * What a section of a .htaccess says about the directives inside it
+     *
+     * @param string $name Section name, in lower case.
+     * @param string $args What follows the name, as written.
+     * @return string '' when it changes nothing (<RequireAll>), 'rewrite' for
+     *                <IfModule mod_rewrite.c>, 'maybe' for any other test of
+     *                what the server has, 'files-php' for a <Files> or
+     *                <FilesMatch> that names PHP files, 'files' for one that
+     *                names other files, and 'condition' for the rest (<Limit>,
+     *                <If>, <RequireAny>...), which apply to some requests only.
+     */
+    private static function htaccess_section_kind( $name, $args ) {
+        $args = trim( rtrim( trim( $args ), '>' ) );
+
+        if ( 'requireall' === $name ) {
+            return '';
+        }
+
+        if ( 'ifmodule' === $name ) {
+            return in_array( strtolower( trim( $args, '"\' ' ) ), array( 'mod_rewrite.c', 'rewrite_module' ), true ) ? 'rewrite' : 'maybe';
+        }
+
+        if ( in_array( $name, array( 'ifdefine', 'ifversion' ), true ) ) {
+            return 'maybe';
+        }
+
+        if ( 'files' === $name || 'filesmatch' === $name ) {
+            $regex = 'filesmatch' === $name;
+
+            if ( ! $regex && '~' === substr( $args, 0, 1 ) ) {
+                $regex = true;
+                $args  = trim( substr( $args, 1 ) );
+            }
+
+            return true === self::extension_pattern_names_php( trim( $args, '"\'' ), $regex, false ) ? 'files-php' : 'files';
+        }
+
+        return 'condition';
+    }
+
+    /**
+     * Whether a pattern that goes only by the extension of a file names the PHP ones
+     *
+     * "Every PHP file" cannot be asked of a sample name. A sample is public,
+     * so a section can be written for it and nothing else, and an expression
+     * can name every file but one ("all but shell.php") in more ways than can
+     * be tried. So the pattern has to be of a kind that cannot tell one name
+     * from another: any name, a dot and a list of extensions, to the end. In
+     * that kind there is nothing to make an exception with, and whether .php
+     * is on the list is then a fair question for a sample. Anything else is
+     * not taken for a denial of PHP, which only means the .htaccess is listed.
+     *
+     * @param string $pattern Pattern, without its quotes.
+     * @param bool   $regex   Whether it is an expression (FilesMatch, "Files ~",
+     *                        RewriteRule) or a wildcard (Files).
+     * @param bool   $nocase  Whether it ignores case.
+     * @return bool|null True when it names every .php file, false when it goes
+     *                   by the extension and .php is not one of them, null
+     *                   when it is not of that kind.
+     */
+    private static function extension_pattern_names_php( $pattern, $regex, $nocase ) {
+        if ( ! $regex ) {
+            if ( 1 !== preg_match( '/^\*\.[a-z0-9*?]+$/i', $pattern ) ) {
+                return null;
+            }
+
+            return function_exists( 'fnmatch' ) ? fnmatch( $pattern, 'x.php' ) : '*.php' === $pattern;
+        }
+
+        $rest = $pattern;
+
+        if ( 0 === stripos( $rest, '(?i)' ) ) {
+            $rest   = substr( $rest, 4 );
+            $nocase = true;
+        }
+
+        // "Any name" in front, written out or left out, and then a dot, the
+        // extensions and the end, written out or left out too. The extensions
+        // are letters, digits, groups, alternatives and classes of letters and
+        // digits: no dot, no "any character", nothing negated and nothing
+        // that looks around.
+        $rest = preg_replace( '/^\^?\.[*+]/', '', $rest, 1 );
+
+        if ( 1 !== preg_match( '/^\\\\\.(?:[a-z0-9|?*+)]|\\\\d|\[[a-z0-9-]+\]|\((?:\?i?:)?)+\$?$/i', (string) $rest ) ) {
+            return null;
+        }
+
+        // The dot has to be there: with "?" or "*" after it, what follows
+        // would be looked for anywhere in the name. And an alternative
+        // outside a group is a second pattern with no dot in front of it,
+        // which goes by the name again.
+        if ( 1 === preg_match( '/^\\\\\.[?*+]/', $rest ) ) {
+            return null;
+        }
+
+        $depth = 0;
+
+        for ( $i = 0, $length = strlen( $rest ); $i < $length; $i++ ) {
+            if ( '(' === $rest[ $i ] ) {
+                $depth++;
+            } elseif ( ')' === $rest[ $i ] ) {
+                $depth--;
+            }
+
+            if ( $depth < 0 || ( 0 === $depth && '|' === $rest[ $i ] ) ) {
+                return null;
+            }
+        }
+
+        if ( 0 !== $depth ) {
+            return null;
+        }
+
+        $expression = '~' . str_replace( '~', '\\~', $pattern ) . '~' . ( $nocase ? 'i' : '' );
+
+        foreach ( array( 'x.php', 'a/b/x.php' ) as $sample ) {
+            $matched = @preg_match( $expression, $sample ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A pattern Apache would refuse names nothing.
+
+            if ( false === $matched ) {
+                return null;
+            }
+
+            if ( 0 === $matched ) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Whether a RewriteRule that refuses requests refuses every PHP file
+     *
+     * A pattern with a "!" in front refuses what it does not match, so it
+     * refuses PHP when it goes by the extension and .php is not one of them
+     * ("!\.(jpe?g|png)$": everything but the images).
+     *
+     * @param string $pattern Pattern of the rule.
+     * @param string $flags   Flags of the rule, in lower case.
+     * @return bool
+     */
+    private static function rewrite_rule_refuses_php( $pattern, $flags ) {
+        $pattern = trim( $pattern, '"\'' );
+        $negated = '' !== $pattern && '!' === $pattern[0];
+
+        if ( $negated ) {
+            $pattern = substr( $pattern, 1 );
+        }
+
+        if ( '' === $pattern ) {
+            return false;
+        }
+
+        $names = self::extension_pattern_names_php( $pattern, true, (bool) preg_match( '/[\[,]\s*(?:nc|nocase)\s*[,\]]/', $flags ) );
+
+        return $negated ? false === $names : true === $names;
+    }
+
+    /**
+     * What the directives of a .htaccess do, as far as running code goes
+     *
+     * @param string $content Content of the file.
+     * @return array {
+     *     @type array $runs       Ways it makes the server run code, as keys:
+     *                             'run', 'load', 'rewrite', 'cgi'.
+     *     @type array $other      Kinds of directive that neither run code nor
+     *                             only deny, as keys: 'access', 'rewrite',
+     *                             'headers', 'other'.
+     *     @type bool  $rewrite    Whether it has rewrite directives of its own.
+     *     @type bool  $denies_php Whether it denies access to every PHP file
+     *                             itself, for every request and whatever the
+     *                             server has loaded.
+     * }
+     */
+    private static function read_htaccess_rules( $content ) {
+        $facts = array(
+            'runs'       => array(),
+            'other'      => array(),
+            'rewrite'    => false,
+            'denies_php' => false,
+        );
+
+        // A line that ends in a backslash goes on in the next one, and Apache
+        // joins the two before it looks at anything else, comments included.
+        $content = str_replace( array( "\r\n", "\r" ), "\n", (string) $content );
+        $content = preg_replace( '/(?<!\\\\)\\\\\n/', '', $content );
+
+        // "script" as a word of its own: cgi-script and php-script are
+        // handlers that run code, application/javascript is a kind of file.
+        $scripts     = '/php|cgi|(?<![a-z])script|lsapi|server-parsed|proxy:|python-program/';
+        $php_target  = '/\.(?:ph(?:p\d*|tml|t|ar|ps)|inc)(?![a-z0-9])/';
+        $containers  = array();
+        $cgi_handler = false;
+        $execcgi_on  = false;
+        $execcgi_off = false;
+
+        foreach ( explode( "\n", (string) $content ) as $line ) {
+            $line = trim( $line );
+
+            if ( '' === $line || '#' === $line[0] ) {
+                continue;
+            }
+
+            // Sections are remembered, to know what a directive inside them
+            // applies to (see htaccess_section_kind()).
+            if ( '<' === $line[0] ) {
+                if ( preg_match( '/^<\s*\//', $line ) ) {
+                    array_pop( $containers );
+                } elseif ( preg_match( '/^<\s*([A-Za-z]+)\b(.*)$/', $line, $section ) ) {
+                    $containers[] = self::htaccess_section_kind( strtolower( $section[1] ), $section[2] );
+                }
+                continue;
+            }
+
+            if ( ! preg_match( '/^([A-Za-z_]+)\s*(.*)$/', $line, $parts ) ) {
+                $facts['other']['other'] = true;
+                continue;
+            }
+
+            $name  = strtolower( $parts[1] );
+            $args  = trim( $parts[2] );
+            $low   = strtolower( $args );
+            $words = preg_split( '/\s+/', $low, -1, PREG_SPLIT_NO_EMPTY );
+            $first = isset( $words[0] ) ? trim( $words[0], '"\'' ) : '';
+
+            // The sections around this line that put a condition on it.
+            $inside = array_values( array_diff( $containers, array( '' ) ) );
+
+            switch ( $name ) {
+                case 'sethandler':
+                case 'addhandler':
+                case 'addtype':
+                case 'forcetype':
+                    if ( preg_match( $scripts, $first ) ) {
+                        // "AddHandler cgi-script" next to "Options -ExecCGI" is
+                        // the old recipe that hands every script to CGI and
+                        // forbids CGI. Which of the two it is gets decided
+                        // once the whole file has been read.
+                        if ( 'addhandler' === $name && false !== strpos( $first, 'cgi' ) ) {
+                            $cgi_handler = true;
+                        } else {
+                            $facts['runs']['run'] = true;
+                        }
+                    } elseif ( ! in_array( $first, array( 'none', 'default-handler', 'text/plain', 'application/octet-stream' ), true ) ) {
+                        $facts['other']['other'] = true;
+                    }
+                    break;
+
+                case 'php_flag':
+                case 'php_admin_flag':
+                case 'php_value':
+                case 'php_admin_value':
+                    $value = isset( $words[1] ) ? trim( $words[1], '"\'' ) : '';
+
+                    if ( 'engine' === $first ) {
+                        if ( ! in_array( $value, array( 'off', '0', 'false', 'no' ), true ) ) {
+                            $facts['runs']['run'] = true;
+                        }
+                    } elseif ( in_array( $first, array( 'auto_prepend_file', 'auto_append_file' ), true ) ) {
+                        if ( '' !== $value && 'none' !== $value ) {
+                            $facts['runs']['load'] = true;
+                        }
+                    } else {
+                        $facts['other']['other'] = true;
+                    }
+                    break;
+
+                case 'options':
+                    foreach ( $words as $option ) {
+                        // Only a ban on CGI that holds for everybody counts as one.
+                        if ( '-execcgi' === $option && empty( $inside ) ) {
+                            $execcgi_off = true;
+                        }
+
+                        if ( '-' === $option[0] || 'none' === $option ) {
+                            continue;
+                        }
+
+                        $option = ltrim( $option, '+' );
+
+                        if ( in_array( $option, array( 'execcgi', 'includes', 'all' ), true ) ) {
+                            $facts['runs']['cgi'] = true;
+                            $execcgi_on           = true;
+                        } else {
+                            $facts['other']['other'] = true;
+                        }
+                    }
+                    break;
+
+                case 'addoutputfilter':
+                case 'setoutputfilter':
+                case 'addoutputfilterbytype':
+                    if ( false !== strpos( $low, 'includes' ) ) {
+                        $facts['runs']['cgi'] = true;
+                    } else {
+                        $facts['other']['other'] = true;
+                    }
+                    break;
+
+                case 'action':
+                    $facts['runs']['cgi'] = true;
+                    break;
+
+                case 'xbithack':
+                    // Server-side includes for every file with the execute bit.
+                    if ( 'off' !== $first ) {
+                        $facts['runs']['cgi'] = true;
+                    }
+                    break;
+
+                case 'deny':
+                case 'require':
+                    $denies = 'deny' === $name ? ( 'from' === $first && isset( $words[1] ) && 'all' === $words[1] ) : ( 'all' === $first && isset( $words[1] ) && 'denied' === $words[1] );
+
+                    if ( ! $denies || in_array( 'condition', $inside, true ) ) {
+                        $facts['other']['access'] = true;
+                    } elseif ( ! array_diff( $inside, array( 'rewrite', 'files-php' ) ) ) {
+                        // For every request, on any server, and for every file
+                        // or for the PHP ones. A denial that depends on a
+                        // module being there, or that names other files, still
+                        // protects, but it does not make up for rewrite rules
+                        // that switch off the ones of the site root.
+                        $facts['denies_php'] = true;
+                    }
+                    break;
+
+                case 'order':
+                case 'indexignore':
+                    break;
+
+                case 'allow':
+                case 'satisfy':
+                case 'authtype':
+                case 'authname':
+                case 'authuserfile':
+                case 'authgroupfile':
+                    $facts['other']['access'] = true;
+                    break;
+
+                case 'rewriteengine':
+                case 'rewritebase':
+                case 'rewriteoptions':
+                    $facts['rewrite'] = true;
+                    break;
+
+                case 'rewritecond':
+                    // A condition makes the rule after it apply to some
+                    // requests and not to others, a denial included.
+                    $facts['rewrite']          = true;
+                    $facts['other']['rewrite'] = true;
+                    break;
+
+                case 'rewriterule':
+                    $facts['rewrite'] = true;
+
+                    $rule    = preg_split( '/\s+/', $args, 3 );
+                    $pattern = isset( $rule[0] ) ? $rule[0] : '';
+                    $target  = isset( $rule[1] ) ? strtolower( trim( $rule[1], '"\'' ) ) : '';
+                    $flags   = isset( $rule[2] ) ? strtolower( $rule[2] ) : '';
+
+                    if ( preg_match( '/[\[,]\s*h=/', $flags ) || preg_match( '/[\[,]\s*t=[^,\]]*(?:php|cgi|(?<![a-z])script)/', $flags ) ) {
+                        // A handler or a type forced from the rule itself.
+                        $facts['runs']['run'] = true;
+                    } elseif ( '-' === $target && preg_match( '/[\[,]\s*(?:f|forbidden|g|gone)\s*[,\]]/', $flags ) ) {
+                        // Rewrites nothing and refuses the request. It stands
+                        // for the rule of the site root only when it refuses
+                        // every PHP file, for every request.
+                        if ( ! array_diff( $inside, array( 'rewrite' ) ) && self::rewrite_rule_refuses_php( $pattern, $flags ) ) {
+                            $facts['denies_php'] = true;
+                        } else {
+                            $facts['other']['rewrite'] = true;
+                        }
+                    } elseif ( '-' === $target ) {
+                        // Rewrites nothing and lets the request through, which
+                        // can be the way to keep one file out of the denial
+                        // that follows: it is not part of a file that only
+                        // protects.
+                        $facts['other']['rewrite'] = true;
+                    } elseif ( preg_match( $php_target, $target ) && '/index.php' !== $target ) {
+                        $facts['runs']['rewrite'] = true;
+                    } else {
+                        $facts['other']['rewrite'] = true;
+                    }
+                    break;
+
+                case 'header':
+                case 'requestheader':
+                case 'expiresactive':
+                case 'expiresbytype':
+                case 'expiresdefault':
+                case 'fileetag':
+                    $facts['other']['headers'] = true;
+                    break;
+
+                default:
+                    $facts['other']['other'] = true;
+            }
+        }
+
+        if ( $cgi_handler && ( $execcgi_on || ! $execcgi_off ) ) {
+            $facts['runs']['cgi'] = true;
+        }
+
+        return $facts;
     }
 
     /**
@@ -4211,23 +5999,43 @@ class Vigilante_File_Integrity {
             // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_decode -- Decoding pattern definitions, not user input.
             $needle = base64_decode( $encoded_needle );
             if ( $this->needle_present( $content, $needle ) ) {
-                return $label;
+                // The labels live in the pattern file, in English: "$_GET access"
+                // becomes "$_GET", which needs no translation.
+                return preg_replace( '/ access$/', '', (string) $label );
             }
         }
 
-        // Check for preg_replace with /e modifier (code execution)
-        if ( preg_match( '/preg_replace\s*\(\s*[\'"].*\/e[\'"]/i', $content ) ) {
-            return 'preg_replace /e modifier';
+        return $this->detect_common_pattern( $content );
+    }
+
+    /**
+     * The three checks both levels of the search share
+     *
+     * @param string $content File content.
+     * @return string|false The pattern found, or false.
+     */
+    private function detect_common_pattern( $content ) {
+        // preg_replace with the /e modifier (arbitrary code execution,
+        // deprecated). The modifier is looked for on the same line and within
+        // 300 characters of the opening quote. With ".*" every preg_replace of
+        // a long line cost a pass over the whole line: 88 seconds for a file
+        // of 500 KB made for it, measured without the PCRE compiler.
+        if ( $this->found( '/preg_replace\s*+\(\s*+[\'"][^\n]{0,300}?\/e[\'"]/i', $content ) ) {
+            return __( 'preg_replace with the /e modifier, which runs code', 'vigilante' );
         }
 
-        // Check for long hex-encoded strings (obfuscated payloads)
-        if ( preg_match( '/\\\\x[0-9a-f]{2}(\\\\x[0-9a-f]{2}){10,}/i', $content ) ) {
-            return 'hex-encoded string';
+        // Long hex-encoded strings (obfuscated payloads). Eleven escapes in a
+        // row and not "ten or more after the first": asked to take them all,
+        // PCRE gave up on a run of some 12,000, and a search that gave up
+        // read as "nothing found". The longer the payload, the less it was
+        // found.
+        if ( $this->found( '/(?:\\\\x[0-9a-f]{2}){11}/i', $content ) ) {
+            return __( 'a long string written in hexadecimal', 'vigilante' );
         }
 
-        // Check for heavily concatenated chr() calls (char-by-char obfuscation)
-        if ( preg_match( '/chr\s*\(\s*\d+\s*\)\s*\.\s*chr\s*\(\s*\d+\s*\)\s*\.\s*chr/i', $content ) ) {
-            return 'chr() concatenation obfuscation';
+        // Heavily concatenated chr() calls (char-by-char obfuscation)
+        if ( $this->found( '/chr\s*+\(\s*+\d++\s*+\)\s*+\.\s*+chr\s*+\(\s*+\d++\s*+\)\s*+\.\s*+chr/i', $content ) ) {
+            return __( 'text built character by character with chr()', 'vigilante' );
         }
 
         return false;
@@ -4266,27 +6074,92 @@ class Vigilante_File_Integrity {
         $ss = $fragments['ss'] ?? '';
         $cf = $fragments['cf'] ?? '';
 
-        // Obfuscation combos: dangerous function wrapping decoded content
+        // Obfuscation combos: dangerous function wrapping decoded content.
+        // The labels name the two functions side by side and not one inside
+        // the other. Written the way the code is written, a label was itself
+        // a match: the results of a scan, kept in a cache that stores options
+        // as PHP files under wp-content, would have been the next finding.
+        // The possessive quantifiers ("*+") change nothing in what matches,
+        // because what follows each run of spaces is never a space. They keep
+        // PCRE from walking a long run back one space at a time, which is
+        // where it gives up when it runs without its compiler.
         $obfuscation_combos = array(
-            '/' . $ev . '\s*\(\s*' . $b6 . '\s*\(/i'  => $ev . '(' . $b6 . '())',
-            '/' . $ev . '\s*\(\s*' . $gz . '\s*\(/i'   => $ev . '(' . $gz . '())',
-            '/' . $ev . '\s*\(\s*' . $gu . '\s*\(/i'   => $ev . '(' . $gu . '())',
-            '/' . $ev . '\s*\(\s*' . $sr . '\s*\(/i'   => $ev . '(' . $sr . '())',
-            '/' . $ev . '\s*\(\s*' . $hb . '\s*\(/i'   => $ev . '(' . $hb . '())',
-            '/' . $as . '\s*\(\s*' . $b6 . '\s*\(/i'   => $as . '(' . $b6 . '())',
-            '/' . $ev . '\s*\(\s*\$[a-z_]+\s*\(/i'     => $ev . '($variable())',
-            '/' . $ev . '\s*\(\s*' . $ss . '\s*\(/i'   => $ev . '(' . $ss . '())',
+            '/' . $ev . '\s*+\(\s*+' . $b6 . '\s*+\(/i'  => $ev . '() + ' . $b6 . '()',
+            '/' . $ev . '\s*+\(\s*+' . $gz . '\s*+\(/i'  => $ev . '() + ' . $gz . '()',
+            '/' . $ev . '\s*+\(\s*+' . $gu . '\s*+\(/i'  => $ev . '() + ' . $gu . '()',
+            '/' . $ev . '\s*+\(\s*+' . $sr . '\s*+\(/i'  => $ev . '() + ' . $sr . '()',
+            '/' . $ev . '\s*+\(\s*+' . $hb . '\s*+\(/i'  => $ev . '() + ' . $hb . '()',
+            '/' . $as . '\s*+\(\s*+' . $b6 . '\s*+\(/i'  => $as . '() + ' . $b6 . '()',
+            '/' . $ev . '\s*+\(\s*+\$[a-z_]++\s*+\(/i' => $ev . '() + $variable()',
+            '/' . $ev . '\s*+\(\s*+' . $ss . '\s*+\(/i'  => $ev . '() + ' . $ss . '()',
         );
 
         foreach ( $obfuscation_combos as $regex => $label ) {
-            if ( preg_match( $regex, $content ) ) {
+            if ( $this->found( $regex, $content ) ) {
                 return $label;
             }
         }
 
+        // The plain backdoor, with nothing to hide: data from the request
+        // handed straight to code or to the system, a function the request
+        // chooses, or a file included from another server. The names come
+        // from the list the concatenation check below uses, minus the decoders,
+        // so they are not written here either. That list is decoded once, for both.
+        $dangerous_names = array();
+        if ( ! empty( $patterns_data['dangerous_names'] ) ) {
+            foreach ( $patterns_data['dangerous_names'] as $encoded_name ) {
+                // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_decode
+                $dangerous_names[] = base64_decode( $encoded_name );
+            }
+        }
+
+        $runners = array_merge( array_filter( array( $ev, $as ) ), array_diff( $dangerous_names, array( $b6, $gz, $gu, $sr, $hb ) ) );
+
+        // These three read as code what PHP reads as code, so they are
+        // searched with the comments of the file turned into blank space
+        // (blank_comments()). A comment that quotes one of them ("never do
+        // this: ...") is then not a finding, and a comment slipped between a
+        // name and its parenthesis hides nothing. The first two cannot match
+        // without a superglobal of the request, so only the files that name
+        // one are prepared that way, about one in twenty. The third is looked
+        // for in the file as it is and checked again that way when it matches.
+        $code = null;
+
+        if ( $this->found( '/\$_(?:GET|POST|REQUEST|COOKIE|SERVER)\b/', $content ) ) {
+            $code = $this->blank_comments( $content );
+
+            // When PHP cannot be asked what is a comment, the file is
+            // searched as it is: a comment may then be reported, and nothing
+            // that runs is left out.
+            $subject = false === $code ? $content : $code;
+
+            if ( ! empty( $runners ) ) {
+                $names        = implode( '|', array_map( 'preg_quote', $runners ) );
+                // What the visitor sends, when it is not just being asked about
+                // with isset() or empty(). The path of an uploaded file is not in
+                // the list: handing it to a command is how images get processed.
+                $from_request = '(?<!isset\()(?<!isset\( )(?<!empty\()(?<!empty\( )(?:\$_(?:GET|POST|REQUEST|COOKIE)\b|\$_SERVER\s*\[\s*[\'"]HTTP_)';
+
+                // The possessive quantifiers keep a file made of spaces from
+                // costing a try per space.
+                if ( $this->found( '/(?<![a-z0-9_>:$])(?:' . $names . ')\s*+\(\s*+[^;\n]{0,80}?' . $from_request . '/i', $subject ) ) {
+                    return __( 'data from the request is run as code or as a command', 'vigilante' );
+                }
+            }
+
+            if ( $this->found( '/\$_(?:GET|POST|REQUEST|COOKIE)\s*+\[[^\]\n]{1,60}\]\s*+\(/', $subject ) ) {
+                return __( 'a function chosen by the request is called', 'vigilante' );
+            }
+        }
+
+        if ( $this->found_in_code( '/(?<![a-z0-9_>$])(?:include|require)(?:_once)?\s*+(?:\(\s*+)?[\'"]https?:\/\//i', $content, $code ) ) {
+            return __( 'a file from another server is included', 'vigilante' );
+        }
+
         // Deprecated dynamic function constructor, nearly always malicious in modern code
         if ( ! empty( $cf ) && $this->needle_present( $content, $cf ) ) {
-            return $cf . ')';
+            // The name alone, for the same reason as the labels above.
+            return rtrim( $cf, '(' );
         }
 
         // Remote fetch piped into unserialize: a PHP object-injection / supply-chain
@@ -4298,9 +6171,19 @@ class Vigilante_File_Integrity {
         // false-positived on legitimate code using both in unrelated methods
         // (e.g. a theme reading a transient with maybe_unserialize() while
         // fetching its public IP with wp_remote_get()).
-        $us = $fragments['us'] ?? '';
-        if ( '' !== $us ) {
-            $us_regex        = '/(?<![a-z0-9_])' . preg_quote( $us, '/' ) . '\s*\(/i';
+        //
+        // The search runs on a copy of the file in lower case, with
+        // expressions that tell the case apart, and only when the file names
+        // the function at all. PCRE without its compiler looks ahead for the
+        // first letter of an expression in both cases before each try, and
+        // when one of the two is not in the file that look runs to the end of
+        // it. pattern_near() asks once per match, so a file with thousands of
+        // them cost thousands of passes (26 seconds for 8 MB, measured). With
+        // one case to look for, each look stops at the next candidate.
+        $us = self::lower_ascii( $fragments['us'] ?? '' );
+        if ( '' !== $us && false !== stripos( $content, $us ) ) {
+            $lower           = self::lower_ascii( $content );
+            $us_regex        = '/(?<![a-z0-9_])' . preg_quote( $us, '/' ) . '\s*+\(/';
             $remote_fetchers = array(
                 $fragments['wr'] ?? '', // wp_remote_get
                 $fragments['rb'] ?? '', // wp_remote_retrieve_body
@@ -4310,9 +6193,10 @@ class Vigilante_File_Integrity {
                 if ( '' === $rf ) {
                     continue;
                 }
-                $rf_regex = '/(?<![a-z0-9_])' . preg_quote( $rf, '/' ) . '\s*\(/i';
-                if ( $this->pattern_near( $content, $us_regex, $rf_regex, 600 ) ) {
-                    return $rf . '() + ' . $us . '() remote deserialization';
+                $rf_regex = '/(?<![a-z0-9_])' . preg_quote( self::lower_ascii( $rf ), '/' ) . '\s*+\(/';
+                if ( $this->pattern_near( $lower, $us_regex, $rf_regex, 600 ) ) {
+                    /* translators: 1: Function that downloads, 2: Function that unserializes */
+                    return sprintf( __( 'data downloaded from another server is unserialized (%1$s and %2$s)', 'vigilante' ), $rf, $us );
                 }
             }
 
@@ -4327,49 +6211,104 @@ class Vigilante_File_Integrity {
             // remote-scheme literal near the call before it fires.
             $fg = $fragments['fg'] ?? '';
             if ( '' !== $fg ) {
-                $fg_regex     = '/(?<![a-z0-9_])' . preg_quote( $fg, '/' ) . '\s*\(/i';
-                $scheme_regex = '/(?:https?|ftps?):\/\/|php:\/\/input/i';
+                $fg_regex     = '/(?<![a-z0-9_])' . preg_quote( self::lower_ascii( $fg ), '/' ) . '\s*+\(/';
+                $scheme_regex = '/(?:https?|ftps?):\/\/|php:\/\/input/';
 
-                if ( $this->pattern_near( $content, $us_regex, $fg_regex, 600 )
-                    && $this->pattern_near( $content, $fg_regex, $scheme_regex, 600 ) ) {
-                    return $fg . '() + ' . $us . '() remote deserialization';
+                if ( $this->pattern_near( $lower, $us_regex, $fg_regex, 600 )
+                    && $this->pattern_near( $lower, $fg_regex, $scheme_regex, 600 ) ) {
+                    /* translators: 1: Function that downloads, 2: Function that unserializes */
+                    return sprintf( __( 'data downloaded from another server is unserialized (%1$s and %2$s)', 'vigilante' ), $fg, $us );
                 }
             }
         }
 
-        // preg_replace with /e modifier (arbitrary code execution, deprecated)
-        if ( preg_match( '/preg_replace\s*\(\s*[\'"].*\/e[\'"]/i', $content ) ) {
-            return 'preg_replace /e modifier';
+        $common = $this->detect_common_pattern( $content );
+        if ( $common ) {
+            return $common;
         }
 
-        // Long hex-encoded strings (obfuscated payloads)
-        if ( preg_match( '/\\\\x[0-9a-f]{2}(\\\\x[0-9a-f]{2}){10,}/i', $content ) ) {
-            return 'hex-encoded string';
-        }
+        // Dangerous function names built from string concatenation: a variable
+        // given a name in pieces and then called. The assignments are taken
+        // one at a time and the calls are looked up in one pass. Collecting
+        // every assignment of the file first, and then searching the whole
+        // file again for each one, took memory and time that grew with the
+        // square of the file.
+        $split  = array();
+        $capped = false;
+        $offset = 0;
 
-        // Heavily concatenated chr() calls (char-by-char obfuscation)
-        if ( preg_match( '/chr\s*\(\s*\d+\s*\)\s*\.\s*chr\s*\(\s*\d+\s*\)\s*\.\s*chr/i', $content ) ) {
-            return 'chr() concatenation obfuscation';
-        }
+        while ( true ) {
+            // A variable, "=" and a quoted piece followed by a dot: where a
+            // string put together from pieces starts.
+            $start = $this->next_match( '/\$([a-z_]\w*)\s*+=\s*+(?=["\'][a-z0-9_]*+["\']\s*+\.)/i', $content, $offset );
 
-        // Detect dangerous function names built from string concatenation
-        if ( preg_match_all( '/\$([a-z_]\w*)\s*=\s*((?:["\'][a-z0-9_]*["\']\s*\.\s*)+["\'][a-z0-9_]*["\'])\s*;/i', $content, $matches, PREG_SET_ORDER ) ) {
-            $dangerous_names = array();
-            if ( ! empty( $patterns_data['dangerous_names'] ) ) {
-                foreach ( $patterns_data['dangerous_names'] as $encoded_name ) {
-                    // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_decode
-                    $dangerous_names[] = base64_decode( $encoded_name );
+            if ( null === $start ) {
+                break;
+            }
+
+            // The pieces are taken one by one, however many there are: a name
+            // can be padded with as many empty ones as its author likes, and
+            // asking PCRE for the whole chain at once is what made it give up.
+            $position = $start[0][1] + strlen( $start[0][0] );
+            $combined = '';
+            $closed   = false;
+
+            while ( true ) {
+                $piece = $this->next_match( '/\G["\']([a-z0-9_]*+)["\']\s*+(\.\s*+|;)?+/i', $content, $position );
+
+                if ( null === $piece ) {
+                    break;
+                }
+
+                // No name on the list is this long: past it, the letters are
+                // not kept, and the chain is still walked to its end.
+                if ( strlen( $combined ) <= 64 ) {
+                    $combined .= self::lower_ascii( $piece[1][0] );
+                }
+
+                $position = $piece[0][1] + strlen( $piece[0][0] );
+                $after    = isset( $piece[2] ) && $piece[2][1] >= 0 ? $piece[2][0] : '';
+
+                if ( '' === $after || ';' === $after ) {
+                    $closed = ';' === $after;
+                    break;
                 }
             }
 
-            foreach ( $matches as $match ) {
-                $combined = strtolower( preg_replace( '/["\'\s\.]/', '', $match[2] ) );
-                if ( in_array( $combined, $dangerous_names, true ) ) {
-                    $var_pattern = '/\$' . preg_quote( $match[1], '/' ) . '\s*\(/';
-                    if ( preg_match( $var_pattern, $content ) ) {
-                        return 'obfuscated ' . $combined . '() call';
-                    }
+            $offset = max( $position, $start[0][1] + 1 );
+
+            if ( $closed && in_array( $combined, $dangerous_names, true ) && ! isset( $split[ $start[1][0] ] ) ) {
+                $split[ $start[1][0] ] = $combined;
+
+                if ( count( $split ) >= 500 ) {
+                    $capped = true;
+                    break;
                 }
+            }
+        }
+
+        if ( ! empty( $split ) ) {
+            $offset = 0;
+
+            while ( true ) {
+                $call = $this->next_match( '/\$([a-z_]\w*)\s*+\(/i', $content, $offset );
+
+                if ( null === $call ) {
+                    break;
+                }
+
+                if ( isset( $split[ $call[1][0] ] ) ) {
+                    /* translators: %s: Function name */
+                    return sprintf( __( 'call to %s() with its name split in pieces', 'vigilante' ), $split[ $call[1][0] ] );
+                }
+
+                $offset = $call[0][1] + strlen( $call[0][0] );
+            }
+
+            // More names in pieces than a file has any reason to hold, and
+            // not every one was followed: not searched, rather than clean.
+            if ( $capped ) {
+                $this->search_failed = true;
             }
         }
 
@@ -4397,7 +6336,7 @@ class Vigilante_File_Integrity {
         }
         if ( preg_match( '/^[a-z_][a-z0-9_]*\($/i', $needle ) ) {
             $fn = rtrim( $needle, '(' );
-            return (bool) preg_match( '/(?<![a-z0-9_])' . preg_quote( $fn, '/' ) . '\s*\(/i', $content );
+            return $this->found( '/(?<![a-z0-9_])' . preg_quote( $fn, '/' ) . '\s*+\(/i', $content );
         }
         return stripos( $content, $needle ) !== false;
     }
@@ -4417,20 +6356,261 @@ class Vigilante_File_Integrity {
      * @return bool
      */
     private function pattern_near( $content, $regex_a, $regex_b, $window ) {
-        if ( ! preg_match_all( $regex_a, $content, $m_a, PREG_OFFSET_CAPTURE ) ) {
-            return false;
-        }
-        if ( ! preg_match_all( $regex_b, $content, $m_b, PREG_OFFSET_CAPTURE ) ) {
-            return false;
-        }
-        foreach ( $m_a[0] as $a ) {
-            foreach ( $m_b[0] as $b ) {
-                if ( abs( $a[1] - $b[1] ) <= $window ) {
-                    return true;
-                }
+        // Both lists come in order, so they are walked together: the match
+        // that is behind moves on, and no pair is compared twice. Every match
+        // of one used to be compared with every match of the other.
+        $a = $this->next_match( $regex_a, $content, 0 );
+        $b = $this->next_match( $regex_b, $content, 0 );
+
+        while ( null !== $a && null !== $b ) {
+            if ( abs( $a[0][1] - $b[0][1] ) <= $window ) {
+                return true;
+            }
+
+            if ( $a[0][1] < $b[0][1] ) {
+                $a = $this->next_match( $regex_a, $content, $a[0][1] + 1 );
+            } else {
+                $b = $this->next_match( $regex_b, $content, $b[0][1] + 1 );
             }
         }
+
         return false;
+    }
+
+    /**
+     * A text with its capital letters from A to Z in lower case, and nothing else
+     *
+     * strtolower() follows the language of the server until PHP 8.2, and in
+     * Turkish a capital I does not become an i: a function name written in
+     * capitals would not be found there.
+     *
+     * @param string $text Text.
+     * @return string
+     */
+    private static function lower_ascii( $text ) {
+        return strtr( (string) $text, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz' );
+    }
+
+    /**
+     * Whether an expression matches, without taking a search that gave up for a "no"
+     *
+     * preg_match() answers false, and not 0, when PCRE stops before the end
+     * because a long run used up the stack of its compiler or its
+     * backtracking limit. Read as "nothing found", that is a file that passes
+     * as clean without having been searched. Measured on what was published
+     * until now: a hexadecimal string of some 12,000 characters made the
+     * expression that looks for hexadecimal strings give up. Every expression
+     * of the search goes through here or through next_match(), and a file on
+     * which one of them gave up is reported as not searched (search_file()).
+     *
+     * @param string $regex   Expression, with delimiters and flags.
+     * @param string $content Text to search.
+     * @return bool
+     */
+    private function found( $regex, $content ) {
+        $result = preg_match( $regex, $content );
+
+        if ( false === $result ) {
+            $this->search_failed = true;
+        }
+
+        return 1 === $result;
+    }
+
+    /**
+     * The next match of an expression from a position on
+     *
+     * For the checks that walk every match. Asked for one at a time they take
+     * no memory to speak of, where preg_match_all() held every match of the
+     * file at once.
+     *
+     * @param string $regex   Expression, with delimiters and flags.
+     * @param string $content Text to search.
+     * @param int    $offset  Where to start.
+     * @return array|null The match as PREG_OFFSET_CAPTURE gives it, or null.
+     */
+    private function next_match( $regex, $content, $offset ) {
+        $match  = array();
+        $result = preg_match( $regex, $content, $match, PREG_OFFSET_CAPTURE, $offset );
+
+        if ( false === $result ) {
+            $this->search_failed = true;
+        }
+
+        return 1 === $result ? $match : null;
+    }
+
+    /**
+     * Whether an expression matches in the code of a file and not only in its comments
+     *
+     * @param string            $regex   Expression, with delimiters and flags.
+     * @param string            $content File content.
+     * @param string|false|null $code    The content with its comments blanked. Worked
+     *                                   out here the first time it is needed and kept
+     *                                   by the caller; false when it cannot be.
+     * @return bool
+     */
+    private function found_in_code( $regex, $content, &$code ) {
+        if ( ! $this->found( $regex, $content ) ) {
+            return false;
+        }
+
+        if ( null === $code ) {
+            $code = $this->blank_comments( $content );
+        }
+
+        // When PHP cannot be asked what is a comment, the match stands.
+        return false === $code || $this->found( $regex, $code );
+    }
+
+    /**
+     * The content of a PHP file with its comments turned into blank space
+     *
+     * PHP itself says what is a comment (token_get_all()), so nothing that
+     * runs can be taken for one: a "//" comment ends at "?>", a string that
+     * holds "/*" opens nothing, and so on, without a second reader of the
+     * language here to get any of it wrong. Each comment is replaced by as
+     * many spaces as it had characters, line breaks kept, so the result is as
+     * long as the original and what was on one line stays on one line.
+     *
+     * Three cases are left as they are, and then the match stands:
+     *
+     * - A file with a "<?" that is not "<?php" or "<?=". Whether PHP reads
+     *   that as an opening tag depends on short_open_tag, which may not be
+     *   set the same for the PHP that runs this scan as for the one that
+     *   serves the site, and with it changes where the code starts and so
+     *   what is a comment.
+     * - A comment that starts with "#[". PHP 8 reads that as an attribute and
+     *   runs what follows it on the line; PHP 7 reads the whole line as a
+     *   comment.
+     * - A file whose tokens would not fit in the memory that is left, or
+     *   would take more than 64 MB. PHP returns one array per token, up to
+     *   450 bytes each, and a file can be written so that every byte is one:
+     *   400 KB of that took 180 MB with PHP 7.4 (measured). How many tokens
+     *   there can be is counted first, without making them.
+     * - Any file, when PHP is set to read its source in another encoding
+     *   (zend.multibyte). In Shift JIS, Big5 or GBK the second byte of a
+     *   character can be a backslash, so where a string ends is not where
+     *   it ends for a reader that goes byte by byte.
+     *
+     * @param string $content File content.
+     * @return string|false The content without its comments, or false when it
+     *                      cannot be told what is a comment.
+     */
+    private function blank_comments( $content ) {
+        if ( ! function_exists( 'token_get_all' ) || ini_get( 'zend.multibyte' ) || preg_match( '/<\?(?!php[ \t\r\n]|=)/i', $content ) ) {
+            return false;
+        }
+
+        // No more tokens than this: each character that is not part of a
+        // word can be one, and so can each run of digits and each word.
+        $words  = 0;
+        $others = preg_replace( '/[a-z_\x80-\xff][a-z0-9_\x80-\xff]*+|[0-9]++/i', '', $content, -1, $words );
+
+        if ( null === $others ) {
+            return false;
+        }
+
+        $needed = 450 * ( strlen( $others ) + $words + 2 ) + strlen( $content );
+        $limit  = wp_convert_hr_to_bytes( ini_get( 'memory_limit' ) );
+        unset( $others );
+
+        if ( $needed > 64 * MB_IN_BYTES || ( $limit > 0 && ( $limit - memory_get_usage() ) < $needed ) ) {
+            return false;
+        }
+
+        $tokens = @token_get_all( $content ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- PHP 7 warns about what it cannot read in the file being scanned, such as a comment left open; the warning says nothing about this code.
+        $code   = '';
+        $length = 0;
+
+        foreach ( $tokens as $token ) {
+            $text    = is_array( $token ) ? $token[1] : $token;
+            $length += strlen( $text );
+
+            if ( is_array( $token ) && ( T_COMMENT === $token[0] || T_DOC_COMMENT === $token[0] ) && 0 !== strpos( $text, '#[' ) ) {
+                $text = preg_replace( '/[^\n]/', ' ', $text );
+            }
+
+            $code .= $text;
+        }
+
+        // The pieces have to add up to the file. If they do not, the
+        // positions cannot be trusted and neither can the result.
+        if ( strlen( $content ) !== $length || strlen( $code ) !== $length ) {
+            return false;
+        }
+
+        return $code;
+    }
+
+    /**
+     * Search one file for hidden code
+     *
+     * The one place where a file is read for that. Each scan used to read it
+     * by itself, and only when it was under 512,000 bytes: a larger file was
+     * not opened, and where the file was not going to be listed anyway (a
+     * plugin or a theme with no official copy) that was the same as calling
+     * it clean. Padding a file was enough to keep it out of the results.
+     *
+     * @param string $file_path Absolute path.
+     * @param bool   $strict    Use strict mode (see detect_suspicious_pattern()).
+     * @return string|false|null The pattern found, false when the file was
+     *                           searched and has none, or null when it could
+     *                           not be searched: it is larger than
+     *                           MAX_SEARCHED_BYTES, it cannot be read, or an
+     *                           expression gave up on it. The caller reports
+     *                           that instead of taking it for clean.
+     */
+    private function search_file( $file_path, $strict = false ) {
+        if ( ! is_file( $file_path ) || ! is_readable( $file_path ) ) {
+            return null;
+        }
+
+        $size = filesize( $file_path );
+
+        if ( false === $size || $size > self::MAX_SEARCHED_BYTES ) {
+            return null;
+        }
+
+        // One byte past the cap and no more, whatever the size said: a file
+        // that grew since it was measured is not read whole.
+        $content = file_get_contents( $file_path, false, null, 0, self::MAX_SEARCHED_BYTES + 1 ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reads a local file to look for hidden code; nothing is written.
+
+        if ( false === $content || strlen( $content ) > self::MAX_SEARCHED_BYTES ) {
+            return null;
+        }
+
+        $this->search_failed = false;
+        $pattern             = $this->detect_suspicious_pattern( $content, $strict );
+
+        if ( $pattern ) {
+            return $pattern;
+        }
+
+        return $this->search_failed ? null : false;
+    }
+
+    /**
+     * The finding for a PHP file with no official copy that could not be searched
+     *
+     * @param string $file_path Absolute path.
+     * @param string $relative  Path for display.
+     * @return array
+     */
+    private function not_searched_item( $file_path, $relative ) {
+        $size   = is_file( $file_path ) ? filesize( $file_path ) : false;
+        $reason = __( 'PHP file that could not be searched for hidden code', 'vigilante' );
+
+        if ( false !== $size && $size > self::MAX_SEARCHED_BYTES ) {
+            /* translators: %s: File size, such as 12 MB */
+            $reason = sprintf( __( 'PHP file of %s, too large to be searched for hidden code', 'vigilante' ), size_format( $size ) );
+        }
+
+        return array(
+            'file'   => $relative,
+            'type'   => 'not_searched',
+            'reason' => $reason,
+        );
     }
 
     /**
@@ -4519,12 +6699,20 @@ class Vigilante_File_Integrity {
         $found = array(
             'suspicious' => array(),
             'extra'      => array(),
+            'errors'     => array(),
+            'php_files'  => 0,
         );
-        $max_extra = 50; // Limit to prevent timeout on large plugins
-        $count = 0;
+        // Every PHP file is examined. Until now the walk stopped after 50, which
+        // in a plugin or theme with no official copy meant the first 50 files
+        // of the folder and nothing else. Only the list of plain extra files is
+        // bounded, so a folder full of generated PHP cannot fill the results;
+        // hidden code is reported wherever it is.
+        $max_listed = 500;
+        $listed     = 0;
+        $truncated  = false;
 
         // Only check PHP files for performance
-        $php_extensions = array( 'php', 'php3', 'php4', 'php5', 'php7', 'phtml', 'phar' );
+        $php_extensions = self::php_extensions();
 
         // Pre-normalize the checksum keys once so path-shape differences
         // (Windows backslashes, a leading "./", doubled slashes) don't make a
@@ -4535,18 +6723,36 @@ class Vigilante_File_Integrity {
         }
 
         try {
-            $iterator = new RecursiveIteratorIterator(
-                new RecursiveDirectoryIterator( $directory, RecursiveDirectoryIterator::SKIP_DOTS ),
-                RecursiveIteratorIterator::LEAVES_ONLY
-            );
-
-            foreach ( $iterator as $file ) {
-                if ( $this->is_time_exceeded() || $count >= $max_extra ) {
+            foreach ( self::walk_folder( $directory ) as $file ) {
+                if ( $this->is_time_exceeded() ) {
                     break;
                 }
 
                 $file_path = $file->getPathname();
+
+                if ( $file->isDir() ) {
+                    if ( ! $file->isReadable() ) {
+                        $found['errors'][] = self::unreadable_folder_error( $file_path );
+                    }
+                    continue;
+                }
+
                 $extension = strtolower( pathinfo( $file_path, PATHINFO_EXTENSION ) );
+
+                // A .htaccess, .user.ini or php.ini that is not part of the
+                // published copy is looked at for what it makes the server do.
+                if ( in_array( strtolower( basename( $file_path ) ), array( '.htaccess', '.user.ini', 'php.ini' ), true ) ) {
+                    $config_path = $this->normalize_rel_path( str_replace( str_replace( '\\', '/', $directory ) . '/', '', str_replace( '\\', '/', $file_path ) ) );
+
+                    if ( ! isset( $known_normalized[ $config_path ] ) && ! $this->is_path_excluded( $file_path ) ) {
+                        $config = self::server_config_finding( $file_path, str_replace( ABSPATH, '', $file_path ) );
+
+                        if ( $config ) {
+                            $found[ $config['category'] ][] = $config['item'];
+                        }
+                    }
+                    continue;
+                }
 
                 // Only check PHP files
                 if ( ! in_array( $extension, $php_extensions, true ) ) {
@@ -4577,16 +6783,13 @@ class Vigilante_File_Integrity {
                     continue;
                 }
 
-                $count++;
+                $found['php_files']++;
+
                 $relative = str_replace( ABSPATH, '', $file_path );
-                $pattern  = false;
 
                 // Check for suspicious content in extra files
                 // Use strict mode for plugins without checksums to avoid false positives
-                if ( $file->getSize() < 512000 ) { // Only scan files < 500KB
-                    $content = file_get_contents( $file_path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
-                    $pattern = $this->detect_suspicious_pattern( $content, $suspicious_only );
-                }
+                $pattern = $this->search_file( $file_path, $suspicious_only );
 
                 $item = array(
                     'file' => $relative,
@@ -4596,19 +6799,47 @@ class Vigilante_File_Integrity {
                 if ( $pattern ) {
                     // Suspicious content: promote to suspicious category
                     $item['type']   = 'suspicious_' . $type;
-                    /* translators: 1: Plugin or theme name, 2: Suspicious pattern found */
-                    $item['reason'] = sprintf( __( 'Injected file in %1$s with suspicious code: %2$s', 'vigilante' ), $name, $pattern );
+
+                    // With an official copy to compare with, the file is known
+                    // not to belong to it. Without one it may well be the
+                    // plugin's own, so it is not called injected.
+                    if ( $suspicious_only ) {
+                        /* translators: 1: Plugin or theme name, or the folder the file is in, 2: Suspicious pattern found */
+                        $item['reason'] = sprintf( __( 'File in %1$s with suspicious code: %2$s', 'vigilante' ), $name, $pattern );
+                    } else {
+                        /* translators: 1: Plugin or theme name, 2: Suspicious pattern found */
+                        $item['reason'] = sprintf( __( 'File that is not part of %1$s, with suspicious code: %2$s', 'vigilante' ), $name, $pattern );
+                    }
+
                     $found['suspicious'][] = $item;
                 } elseif ( ! $suspicious_only ) {
                     // No suspicious patterns and checksums available: report as extra
                     // Skipped in suspicious_only mode (no checksums) to avoid noise
+                    if ( $listed >= $max_listed ) {
+                        if ( ! $truncated ) {
+                            $truncated         = true;
+                            $found['errors'][] = sprintf(
+                                /* translators: 1: Plugin or theme name, 2: Number of files */
+                                __( '%1$s has more extra files than can be listed: only the first %2$d are shown.', 'vigilante' ),
+                                $name,
+                                $max_listed
+                            );
+                        }
+                        continue;
+                    }
+
+                    $listed++;
                     $item['type']   = 'extra_' . $type;
                     $item['reason'] = __( 'PHP file not present in original distribution', 'vigilante' );
                     $found['extra'][] = $item;
+                } elseif ( null === $pattern ) {
+                    // No official copy to compare with, and the search could
+                    // not look inside either: said, not passed over.
+                    $found['extra'][] = $this->not_searched_item( $file_path, $relative );
                 }
             }
         } catch ( Exception $e ) {
-            // Ignore iterator errors
+            $found['errors'][] = self::unreadable_folder_error( $directory );
         }
 
         return $found;
@@ -4643,7 +6874,12 @@ class Vigilante_File_Integrity {
             return false;
         }
 
-        $normalized = strtolower( trim( str_replace( array( "\r\n", "\r" ), "\n", $content ) ) );
+        // Every run of whitespace counts as one space, so the placeholder
+        // WordPress itself ships (the opening tag, a line break and the comment)
+        // matches the same entries as the one-line form. The comparison is
+        // still against the whole file: nothing can follow these few words, and
+        // no arrangement of them on several lines is code that runs.
+        $normalized = strtolower( trim( preg_replace( '/\s+/', ' ', $content ) ) );
 
         $known = array(
             '',
@@ -4655,6 +6891,389 @@ class Vigilante_File_Integrity {
         );
 
         return in_array( $normalized, $known, true );
+    }
+
+    /**
+     * Folders of the installation that hold plugins or themes
+     *
+     * @return array Relative path => true, for the plugins folder and every
+     *               theme root that lies inside the WordPress directory.
+     */
+    private function code_roots() {
+        global $wp_theme_directories;
+
+        $roots = array();
+
+        foreach ( array_merge( array( WP_PLUGIN_DIR, get_theme_root() ), is_array( $wp_theme_directories ) ? $wp_theme_directories : array() ) as $root ) {
+            $root = untrailingslashit( str_replace( '\\', '/', (string) $root ) );
+
+            if ( '' !== $root && 0 === strpos( $root . '/', str_replace( '\\', '/', ABSPATH ) ) ) {
+                $roots[ $this->relative_path( $root ) ] = true;
+            }
+        }
+
+        return $roots;
+    }
+
+    /**
+     * What a partial scan offers to exclude, so that the next one reaches the rest
+     *
+     * The folders of the plugins and themes the scan did check, as lines for
+     * Excluded Paths, less the ones that are excluded by now. A scan starts
+     * from the beginning every time, so with these out of the way a scan
+     * run by hand spends its time on what the last one never got to. They
+     * have to come out of the list afterwards, and the tab says so for as
+     * long as they are there (see excluded_code_folders()).
+     *
+     * The list comes from stored results, and whoever reads it is told to
+     * paste it into the exclusions, so only what can be the folder of a
+     * plugin or of a theme is let through: one line with anything else in it
+     * would exclude far more than it says.
+     *
+     * @param mixed $results Scan results, as run_scan() returns them.
+     * @return array Relative paths, one per folder.
+     */
+    public function folders_to_exclude( $results ) {
+        $stored = is_array( $results ) && isset( $results['checked_folders'] ) && is_array( $results['checked_folders'] ) ? $results['checked_folders'] : array();
+        $roots  = $this->code_roots();
+        $lines  = array();
+
+        foreach ( $stored as $folder ) {
+            if ( ! is_string( $folder ) || 1 === preg_match( '/[\\x00-\\x1f\\x7f]/', $folder ) ) {
+                continue;
+            }
+
+            $folder = trim( str_replace( '\\', '/', $folder ), '/' );
+            $name   = basename( $folder );
+
+            if ( '' === $name || '.' === $name || '..' === $name || ! isset( $roots[ dirname( $folder ) ] ) ) {
+                continue;
+            }
+
+            if ( ! is_dir( ABSPATH . $folder ) || $this->is_path_excluded( ABSPATH . $folder . '/.' ) ) {
+                continue;
+            }
+
+            $lines[ $folder ] = true;
+        }
+
+        return array_keys( $lines );
+    }
+
+    /**
+     * Whole folders of code, or the uploads folder, that Excluded Paths keeps out of every scan
+     *
+     * A subfolder of uploads or of a plugin is an ordinary exclusion (a cache
+     * of compiled templates, say). A whole plugin, a whole theme, the
+     * must-use plugins or all of uploads is something else: the scan comes
+     * out complete and clean without having looked there. The tab and
+     * Security Check go by this list, so that nobody is left thinking those
+     * folders are being watched.
+     *
+     * @return array Relative paths. A folder that holds others (the plugins
+     *               folder, a theme root) stands for all of them.
+     */
+    public function excluded_code_folders() {
+        if ( empty( $this->options['excluded_paths'] ) || ! is_array( $this->options['excluded_paths'] ) ) {
+            return array();
+        }
+
+        if ( ! function_exists( 'get_plugins' ) ) {
+            require_once ABSPATH . 'wp-admin/includes/plugin.php';
+        }
+
+        $found = array();
+        $roots = array_keys( $this->code_roots() );
+
+        foreach ( $roots as $root ) {
+            if ( $this->is_path_excluded( ABSPATH . $root . '/.' ) ) {
+                $found[ $root ] = true;
+            }
+        }
+
+        $plugins_root = $this->relative_path( WP_PLUGIN_DIR );
+
+        if ( ! isset( $found[ $plugins_root ] ) ) {
+            foreach ( array_keys( get_plugins() ) as $plugin_file ) {
+                $slug = dirname( $plugin_file );
+
+                if ( '.' !== $slug && $this->is_path_excluded( WP_PLUGIN_DIR . '/' . $slug . '/.' ) ) {
+                    $found[ $this->relative_path( WP_PLUGIN_DIR . '/' . $slug ) ] = true;
+                }
+            }
+        }
+
+        foreach ( wp_get_themes() as $theme ) {
+            $dir = $theme->get_stylesheet_directory();
+
+            if ( ! isset( $found[ $this->relative_path( dirname( $dir ) ) ] ) && $this->is_path_excluded( $dir . '/.' ) ) {
+                $found[ $this->relative_path( $dir ) ] = true;
+            }
+        }
+
+        if ( defined( 'WPMU_PLUGIN_DIR' ) && is_dir( WPMU_PLUGIN_DIR ) && $this->is_path_excluded( WPMU_PLUGIN_DIR . '/.' ) ) {
+            $found[ $this->relative_path( WPMU_PLUGIN_DIR ) ] = true;
+        }
+
+        $uploads = wp_get_upload_dir();
+
+        if ( ! empty( $uploads['basedir'] ) && $this->is_path_excluded( $uploads['basedir'] . '/.' ) ) {
+            $found[ $this->relative_path( $uploads['basedir'] ) ] = true;
+        }
+
+        return array_keys( $found );
+    }
+
+    /**
+     * Whether a scan checked less than it was asked to
+     *
+     * Either it ran out of time, or something could not be read or compared
+     * (a folder, a plugin whose copy on WordPress.org could not be fetched).
+     * The tab, the scan email and Security Check go by this, so none of them
+     * calls clean a result that covers only part of the site.
+     *
+     * @param mixed $results Scan results, as run_scan() returns them.
+     * @return bool
+     */
+    public static function is_partial( $results ) {
+        return is_array( $results ) && ( ! empty( $results['incomplete'] ) || ! empty( $results['errors'] ) );
+    }
+
+    /**
+     * What a scan did not get to, one line per thing
+     *
+     * The one source of that text, for the tab, the scan email and anything
+     * else that shows the result of a scan. In the order of the scan.
+     *
+     * @param mixed $results Scan results, as run_scan() returns them.
+     * @return array Lines ready to show, not escaped. Empty when nothing was
+     *               left out.
+     */
+    public static function not_checked_lines( $results ) {
+        $left = is_array( $results ) && isset( $results['not_checked'] ) && is_array( $results['not_checked'] ) ? $results['not_checked'] : array();
+
+        $areas   = isset( $left['areas'] ) && is_array( $left['areas'] ) ? $left['areas'] : array();
+        $plugins = isset( $left['plugins'] ) && is_array( $left['plugins'] ) ? array_filter( array_map( 'strval', $left['plugins'] ), 'strlen' ) : array();
+        $themes  = isset( $left['themes'] ) && is_array( $left['themes'] ) ? array_filter( array_map( 'strval', $left['themes'] ), 'strlen' ) : array();
+        $lines   = array();
+
+        if ( in_array( 'uploads', $areas, true ) ) {
+            $lines[] = __( 'The uploads folder was not checked.', 'vigilante' );
+        }
+
+        if ( in_array( 'core', $areas, true ) ) {
+            $lines[] = __( 'The WordPress files were not checked completely.', 'vigilante' );
+        }
+
+        if ( in_array( 'config', $areas, true ) ) {
+            $lines[] = __( 'wp-config.php and .htaccess were not compared.', 'vigilante' );
+        }
+
+        if ( in_array( 'content', $areas, true ) ) {
+            $lines[] = __( 'The other folders of wp-content were not checked.', 'vigilante' );
+        }
+
+        if ( in_array( 'plugins', $areas, true ) ) {
+            $lines[] = __( 'No plugin was checked.', 'vigilante' );
+        } elseif ( ! empty( $plugins ) ) {
+            /* translators: %s: Comma separated list of plugin names */
+            $lines[] = sprintf( __( 'Plugins not checked: %s.', 'vigilante' ), implode( ', ', $plugins ) );
+        }
+
+        if ( in_array( 'unlisted', $areas, true ) ) {
+            $lines[] = __( 'Must-use plugins, drop-ins and loose PHP files were not checked.', 'vigilante' );
+        }
+
+        if ( in_array( 'themes', $areas, true ) ) {
+            $lines[] = __( 'No theme was checked.', 'vigilante' );
+        } elseif ( ! empty( $themes ) ) {
+            /* translators: %s: Comma separated list of theme names */
+            $lines[] = sprintf( __( 'Themes not checked: %s.', 'vigilante' ), implode( ', ', $themes ) );
+        }
+
+        return $lines;
+    }
+
+    /**
+     * Whether the scheduled scan has not finished for longer than it should
+     *
+     * A scan that PHP or the server stops halfway stores nothing, so the date
+     * of the last one that finished is the only sign left. Twice the interval
+     * and one day more, because WP-Cron only runs when the site has a visit.
+     *
+     * @param int    $last_scan Time of the last stored scan, 0 for none.
+     * @param string $frequency 'daily' or 'weekly'.
+     * @return bool
+     */
+    public static function is_scan_overdue( $last_scan, $frequency ) {
+        $last_scan = (int) $last_scan;
+
+        if ( $last_scan <= 0 ) {
+            return false;
+        }
+
+        $every = 'weekly' === $frequency ? WEEK_IN_SECONDS : DAY_IN_SECONDS;
+
+        return ( time() - $last_scan ) > ( 2 * $every + DAY_IN_SECONDS );
+    }
+
+    /**
+     * What a kind of finding usually is, and what to do about it
+     *
+     * The one source of the text shown next to the findings of a scan, so the
+     * File Integrity tab and anything else that explains them say the same.
+     * Vigilant's own files have their own source,
+     * Vigilante_Self_Integrity_Guidance.
+     *
+     * @param string $type Finding type as stored in the scan results.
+     * @return array {
+     *     @type string $label  Name of the kind of finding, for a table cell.
+     *     @type string $advice What it usually is and what to do. Empty for a
+     *                          type this method does not know.
+     * }
+     */
+    public static function finding_guidance( $type ) {
+        switch ( $type ) {
+            case 'php_in_uploads':
+                return array(
+                    'label'  => __( 'PHP in uploads', 'vigilante' ),
+                    'advice' => __( 'Uploads is meant for media, not for code. It is normal only when a plugin you use writes PHP there, such as compiled templates or cache files: ignore the file, or add its folder to Excluded Paths if new ones keep appearing. If nothing you use explains it, treat it as malware.', 'vigilante' ),
+                );
+
+            case 'double_extension':
+                return array(
+                    'label'  => __( 'Double extension', 'vigilante' ),
+                    'advice' => __( 'A name such as photo.php.jpg is a common way to pass a script off as an image. Delete it unless you know who or what uploaded it.', 'vigilante' ),
+                );
+
+            case 'htaccess_in_uploads':
+                return array(
+                    'label'  => __( '.htaccess in uploads', 'vigilante' ),
+                    'advice' => __( 'A .htaccess here changes how the server treats this folder. One that only denies access is not listed. If it makes files run as code (AddHandler, SetHandler, php_value, Options ExecCGI) and you did not put it there, it is a sign of infection. If it only has rewrite rules, it usually belongs to an image or cache plugin, and it switches off for this folder the rule that blocks PHP in uploads.', 'vigilante' ),
+                );
+
+            case 'php_in_root':
+                return array(
+                    'label'  => __( 'PHP in the site root', 'vigilante' ),
+                    'advice' => __( 'A PHP file next to wp-config.php that WordPress does not ship. Hosting tools, firewalls and verification scripts put files here, and so do attackers. Ignore it if you know where it comes from; if you do not, look at what it contains before anything else.', 'vigilante' ),
+                );
+
+            case 'extra_root':
+                return array(
+                    'label'  => __( 'Extra file in the site root', 'vigilante' ),
+                    'advice' => __( 'WordPress does not ship this file. Verification files and the like are harmless. A copy of wp-config.php, a database dump or a backup archive here can be downloaded by anyone who guesses its name: move it out of the web root.', 'vigilante' ),
+                );
+
+            case 'legacy_core':
+                return array(
+                    'label'  => __( 'Old core file', 'vigilante' ),
+                    'advice' => __( 'Left behind by an earlier version of WordPress. Nothing uses it any more and it can be deleted.', 'vigilante' ),
+                );
+
+            case 'suspicious_plugin':
+            case 'suspicious_theme':
+                return array(
+                    'label'  => 'suspicious_theme' === $type ? __( 'Hidden code in a theme', 'vigilante' ) : __( 'Hidden code in a plugin', 'vigilante' ),
+                    'advice' => __( 'The file contains code written the way malware hides itself, and it is not part of the published copy, or there is no published copy to compare with. Some commercial plugins and themes obfuscate their own code and end up here. If you cannot tell, replace the plugin or theme with a clean copy from its author.', 'vigilante' ),
+                );
+
+            case 'extra_plugin':
+            case 'extra_theme':
+                return array(
+                    'label'  => 'extra_theme' === $type ? __( 'Extra file in a theme', 'vigilante' ) : __( 'Extra file in a plugin', 'vigilante' ),
+                    'advice' => __( 'A PHP file that is not in the copy WordPress.org publishes for the installed version. Some plugins and themes create files after they are installed, and a manual fix adds them too. If you cannot explain it, reinstall the plugin or theme: that removes everything that does not belong to it.', 'vigilante' ),
+                );
+
+            case 'php_in_core':
+                return array(
+                    'label'  => __( 'PHP in a WordPress folder', 'vigilante' ),
+                    'advice' => __( 'A PHP file in wp-admin or wp-includes that the installed version of WordPress does not ship. It is either left over from an older version or put there by someone: compare it with a clean copy of WordPress and delete it if it is not in it.', 'vigilante' ),
+                );
+
+            case 'config_in_core':
+                return array(
+                    'label'  => __( 'Configuration file in a WordPress folder', 'vigilante' ),
+                    'advice' => __( 'A .htaccess, .user.ini or php.ini in wp-admin or wp-includes. A .htaccess that asks for a password in wp-admin is a common protection, and some hosts leave a php.ini there. A line with auto_prepend_file or auto_append_file loads a file on every request: make sure you know which one.', 'vigilante' ),
+                );
+
+            case 'php_config_in_uploads':
+                return array(
+                    'label'  => __( 'PHP configuration in uploads', 'vigilante' ),
+                    'advice' => __( 'A .user.ini or php.ini here changes how PHP runs for this folder, and can make it load another file on every request. Nothing in uploads needs one: delete it unless you put it there.', 'vigilante' ),
+                );
+
+            case 'script_in_uploads':
+                return array(
+                    'label'  => __( 'Script in uploads', 'vigilante' ),
+                    'advice' => __( 'A script in another language (shell, Perl, Python, CGI). It only runs if the server is told to run it, which a .htaccess in the same folder can do. Delete it unless you know why it is there.', 'vigilante' ),
+                );
+
+            case 'php_config_in_root':
+                return array(
+                    'label'  => __( 'PHP configuration in the site root', 'vigilante' ),
+                    'advice' => __( 'This file makes PHP load another file before every request. Firewalls such as Wordfence set it up for themselves, and so do some hosts: check that the file it names is theirs. If nothing you installed needs it, that file runs before WordPress on every visit: treat it as a backdoor.', 'vigilante' ),
+                );
+
+            case 'backup_in_root':
+                return array(
+                    'label'  => __( 'Backup in the site root', 'vigilante' ),
+                    'advice' => __( 'A copy of wp-config.php, a database dump or an archive next to WordPress can be downloaded by anyone who guesses its name, and it holds passwords or the whole site. Move it out of the web root or delete it.', 'vigilante' ),
+                );
+
+            case 'php_in_content':
+                return array(
+                    'label'  => __( 'Loose PHP in wp-content', 'vigilante' ),
+                    'advice' => __( 'A PHP file, or a folder with PHP files, in wp-content or among the plugins or the themes, that WordPress does not list as a plugin, a theme or a drop-in. It does not show on the Plugins screen, and it can still be reached by its address. Some plugins keep a settings file there, WP Super Cache for one. If nothing you use explains it, look at what it contains.', 'vigilante' ),
+                );
+
+            case 'suspicious_content':
+                return array(
+                    'label'  => __( 'Hidden code in wp-content', 'vigilante' ),
+                    'advice' => __( 'The file contains code written the way malware hides itself, in a folder of wp-content that belongs to no plugin and no theme. Cache, backup and security plugins keep files in folders like these, and what they store can look like this. Find out which one the folder belongs to. If nothing you use explains the file, treat it as malware.', 'vigilante' ),
+                );
+
+            case 'translation_with_code':
+                return array(
+                    'label'  => __( 'Translation file with code', 'vigilante' ),
+                    'advice' => __( 'WordPress loads the translation files of the site language on every request, and a translation file holds text and nothing else. This one holds something more. Delete it and get the translations again from Dashboard > Updates. If it comes back, something on the site is writing it.', 'vigilante' ),
+                );
+
+            case 'not_searched':
+                return array(
+                    'label'  => __( 'File not searched', 'vigilante' ),
+                    'advice' => __( 'The search for hidden code could not look inside this file, nearly always because it is very large, and there is no official copy to compare it with. A PHP file of that size is unusual. Check that it belongs to the plugin, the theme or the folder it is in, and ignore it if it does.', 'vigilante' ),
+                );
+
+            case 'server_config':
+                return array(
+                    'label'  => __( 'Server configuration file', 'vigilante' ),
+                    'advice' => __( 'A .htaccess, .user.ini or php.ini outside uploads that makes the server run files as code or load a file on every request. Plugins rarely need one. If you cannot tell which one put it there, treat it as a sign of infection.', 'vigilante' ),
+                );
+
+            case 'core':
+                return array(
+                    'label'  => __( 'WordPress core', 'vigilante' ),
+                    'advice' => __( 'Does not match the copy WordPress.org publishes for your version and language. For a file in wp-admin, wp-includes or the site root, reinstall WordPress from Dashboard > Updates and scan again. A file of a bundled theme or of Akismet, under wp-content, appears here after that theme or plugin updates on its own, which is normal.', 'vigilante' ),
+                );
+
+            case 'plugin':
+            case 'theme':
+                return array(
+                    'label'  => 'theme' === $type ? __( 'Theme', 'vigilante' ) : __( 'Plugin', 'vigilante' ),
+                    'advice' => __( 'Does not match the copy WordPress.org publishes for the installed version. The usual causes are an update that did not finish, a release replaced on WordPress.org without a new version number, or a manual edit. Reinstall it; if the file changes again by itself, investigate.', 'vigilante' ),
+                );
+
+            case 'critical_config':
+                return array(
+                    'label'  => __( 'Configuration file', 'vigilante' ),
+                    'advice' => __( 'Changed since you last approved it. Cache, security and redirection plugins rewrite their own blocks in these files, often on every update, and that shows up here too. Review the changes and approve them if they belong to something you use. Lines you cannot explain, above all the ones that load a file or send requests to one, need a closer look.', 'vigilante' ),
+                );
+        }
+
+        return array(
+            'label'  => (string) $type,
+            'advice' => '',
+        );
     }
 
     /**
@@ -4862,38 +7481,23 @@ class Vigilante_File_Integrity {
     private function maybe_send_notification( $results ) {
         $options = is_array( $this->options ) ? $this->options : array();
 
-        // Count critical_config separately from regular modified so we can treat it
-        // as "serious" for notification level purposes (same tier as suspicious/extra).
-        $has_critical_config = false;
-        foreach ( $results['modified'] ?? array() as $item ) {
-            if ( is_array( $item ) && isset( $item['type'] ) && 'critical_config' === $item['type'] ) {
-                $has_critical_config = true;
-                break;
-            }
-        }
-
-        // Collect closed/removed plugins (excluding ignored slugs). These count
-        // as "serious" for notification purposes: a closed plugin in wp.org is
-        // a security-critical finding, same tier as a suspicious file.
+        // Closed/removed plugins (excluding ignored slugs) travel in this
+        // email, in the same tier as a suspicious file.
         $closed_plugins = $this->collect_closed_plugins_for_email();
-        $has_closed     = ! empty( $closed_plugins );
 
         /*
-         * Self-protection is not part of this decision any more. Its alert is
-         * its own and no setting switches it off, so this email is again about
-         * the files of the site: core, plugins, themes, uploads and the two
-         * shared configuration files.
+         * Self-protection is not part of this decision. Its alert is its own
+         * and no setting switches it off, so this email is about the files of
+         * the site: core, plugins, themes, uploads and the two shared
+         * configuration files. Missing files do not send it on their own: it
+         * has no section to list them in.
          */
-        $has_suspicious = ! empty( $results['suspicious'] ) || ! empty( $results['extra'] ) || $has_critical_config || $has_closed;
-        // Missing files of core, plugins or themes still do not send the email on
-        // their own: it has no section to list them in, so it would arrive empty.
-        $has_modified   = ! empty( $results['modified'] );
 
-        // Instant alert: send for suspicious, extra, critical_config, modified
-        // files, or closed plugins.
-        $instant_alert = ! empty( $options['instant_alert'] );
-        if ( $instant_alert && ( $has_suspicious || $has_modified ) ) {
-            $this->send_notification( $results, 'all', $closed_plugins );
+        // Instant alert: every finding travels, modified files included,
+        // whatever the level below says. A scan with nothing to report goes
+        // through as well, so that what was reported is forgotten.
+        if ( ! empty( $options['instant_alert'] ) ) {
+            $this->send_new_findings( $results, 'all', $closed_plugins );
             return;
         }
 
@@ -4910,20 +7514,140 @@ class Vigilante_File_Integrity {
         }
 
         if ( 'disabled' === $notify_level ) {
+            // Nothing is sent, and nothing stays on record as reported:
+            // whoever switches the email back on is told about everything
+            // that is pending then.
+            delete_option( self::NOTIFIED_OPTION );
             return;
         }
 
         // 'suspicious_only' treats suspicious/extra, critical_config AND closed
-        // plugins as serious.
-        if ( 'suspicious_only' === $notify_level && ! $has_suspicious ) {
+        // plugins as serious. A scan with nothing to send at this level still
+        // goes through send_new_findings(), which then forgets what it had
+        // reported, so a finding that goes away and comes back is new again.
+        $this->send_new_findings( $results, $notify_level, $closed_plugins );
+    }
+
+    /**
+     * What the scan email has already reported to the recipients
+     */
+    const NOTIFIED_OPTION = 'vigilante_integrity_notified';
+
+    /**
+     * Send the scan email only when the scan found something new
+     *
+     * Until now the email went out after every scan for as long as a finding
+     * was still listed, so a plugin that rewrote its block in .htaccess meant
+     * the same alert every day until somebody approved the change. Now every
+     * finding is reported once: the email goes out when a scan finds something
+     * the recipients have not been told about, and it lists everything that is
+     * pending, old and new.
+     *
+     * A finding is the file, its kind and its content (by its hash), so a
+     * file that changes again under the same name is new, also when the
+     * change keeps its size and its date. What goes away is forgotten, so it
+     * is new again if it comes back. Nothing is recorded when the email could
+     * not be sent, and the next scan tries again.
+     *
+     * @param array  $results        Scan results.
+     * @param string $notify_level   'all' or 'suspicious_only'.
+     * @param array  $closed_plugins Closed plugins, keyed by slug.
+     */
+    private function send_new_findings( $results, $notify_level, $closed_plugins ) {
+        $keys = $this->notification_keys( $results, $closed_plugins, 'all' === $notify_level );
+        $told = get_option( self::NOTIFIED_OPTION, array() );
+        $told = is_array( $told ) ? $told : array();
+
+        // A partial scan cannot tell whether what it did not reach is still
+        // there, so it forgets nothing: with the findings of an unchecked
+        // plugin forgotten, the next scan that reached it would report them
+        // again as new, and on a site whose scans are always partial that
+        // is the same email over and over.
+        $known = self::is_partial( $results ) ? array_values( array_unique( array_merge( $keys, $told ) ) ) : $keys;
+
+        // The record is bounded, and the comparison is not: what does not fit
+        // in the record is reported again, never left out. The keys come in
+        // order of importance, so what does not fit is the least of it.
+        $record = array_slice( $known, 0, 5000 );
+
+        if ( empty( array_diff( $keys, $told ) ) ) {
+            if ( count( $record ) !== count( $told ) ) {
+                update_option( self::NOTIFIED_OPTION, $record, false );
+            }
             return;
         }
 
-        if ( ! $has_suspicious && ! $has_modified ) {
-            return;
+        if ( $this->send_notification( $results, $notify_level, $closed_plugins ) ) {
+            update_option( self::NOTIFIED_OPTION, $record, false );
+        }
+    }
+
+    /**
+     * One key per finding the scan email would carry at this level
+     *
+     * @param array $results        Scan results.
+     * @param array $closed_plugins Closed plugins, keyed by slug.
+     * @param bool  $with_modified  Whether files that are only modified travel
+     *                              in the email at this level.
+     * @return array
+     */
+    private function notification_keys( $results, $closed_plugins, $with_modified ) {
+        $keys = array(
+            'config'     => array(),
+            'closed'     => array(),
+            'suspicious' => array(),
+            'modified'   => array(),
+            'extra'      => array(),
+        );
+
+        foreach ( (array) ( $results['modified'] ?? array() ) as $item ) {
+            if ( ! is_array( $item ) ) {
+                continue;
+            }
+
+            $type   = (string) ( $item['type'] ?? '' );
+            $config = 'critical_config' === $type;
+
+            // Vigilant's own files have their own alert.
+            if ( 'vigilante_self' === $type || ( ! $config && ! $with_modified ) ) {
+                continue;
+            }
+
+            $keys[ $config ? 'config' : 'modified' ][] = md5( 'modified|' . $type . '|' . (string) ( $item['file'] ?? '' ) . '|' . (string) ( $item['actual_hash'] ?? '' ) );
         }
 
-        $this->send_notification( $results, $notify_level, $closed_plugins );
+        foreach ( (array) $closed_plugins as $slug => $info ) {
+            $keys['closed'][] = md5( 'closed|' . $slug . '|' . ( is_array( $info ) ? (string) ( $info['state'] ?? '' ) : '' ) );
+        }
+
+        foreach ( array( 'suspicious', 'extra' ) as $bucket ) {
+            foreach ( (array) ( $results[ $bucket ] ?? array() ) as $item ) {
+                $type = is_array( $item ) ? (string) ( $item['type'] ?? '' ) : '';
+
+                if ( 'vigilante_self' === $type ) {
+                    continue;
+                }
+
+                $file  = is_array( $item ) ? (string) ( $item['file'] ?? '' ) : (string) $item;
+                $state = '';
+                $path  = ABSPATH . ltrim( $file, '/' );
+
+                // By content, so a file rewritten with the same size and the
+                // same date is still a different file. The ones too large to
+                // hash on every scan go by size, date and the time of their
+                // last change of any kind, which writing to a file moves and
+                // which cannot be set back the way the date can.
+                if ( '' !== $file && is_file( $path ) ) {
+                    $state = filesize( $path ) <= MB_IN_BYTES ? (string) md5_file( $path ) : filesize( $path ) . ':' . filemtime( $path ) . ':' . filectime( $path );
+                }
+
+                $keys[ $bucket ][] = md5( $bucket . '|' . $type . '|' . $file . '|' . $state );
+            }
+        }
+
+        // In order of importance: only the first 5,000 are remembered, and
+        // what is not remembered is reported again.
+        return array_values( array_unique( array_merge( $keys['config'], $keys['closed'], $keys['suspicious'], $keys['modified'], $keys['extra'] ) ) );
     }
 
     /**
@@ -4960,6 +7684,8 @@ class Vigilante_File_Integrity {
             'extra'      => array_merge( $results1['extra'] ?? array(), $results2['extra'] ?? array() ),
             'new'        => $results1['new'] ?? array(),
             'errors'     => array_merge( $results1['errors'] ?? array(), $results2['errors'] ?? array() ),
+            // Plugins and themes with no official copy to compare with.
+            'unverified' => array_merge( $results1['unverified'] ?? array(), $results2['unverified'] ?? array() ),
             'scan_time'  => $results1['scan_time'] ?? 0,
             'incomplete' => $results1['incomplete'] ?? false,
         );
@@ -5042,13 +7768,28 @@ class Vigilante_File_Integrity {
         $modified_count        = count( $regular_modified );
         $closed_count          = count( $closed_plugins );
 
-        // Use more urgent subject when suspicious files, critical config changes,
-        // closed plugins or self-integrity findings are found (all security-critical).
-        if ( $suspicious_count > 0 || $critical_config_count > 0 || $closed_count > 0 ) {
+        // The subject says what was found. Suspicious files and closed plugins
+        // keep the alert wording. A change in wp-config.php or .htaccess with
+        // nothing else next to it names the files instead: most of the time it
+        // is a plugin rewriting its own block, and "SECURITY ALERT" on every
+        // one of those taught people to read the subject as "I was hacked".
+        if ( $suspicious_count > 0 || $closed_count > 0 ) {
             $subject = sprintf(
                 /* translators: %s: Site name */
                 __( '[%s] SECURITY ALERT: File integrity issues detected', 'vigilante' ),
                 $site_name
+            );
+        } elseif ( $critical_config_count > 0 ) {
+            $changed = array();
+            foreach ( $critical_config as $item ) {
+                $changed[] = (string) ( $item['file'] ?? '' );
+            }
+
+            $subject = sprintf(
+                /* translators: 1: Site name, 2: The file that changed, or both of them, such as "wp-config.php, .htaccess" */
+                __( '[%1$s] %2$s changed: review needed', 'vigilante' ),
+                $site_name,
+                implode( ', ', array_unique( array_filter( $changed ) ) )
             );
         } else {
             $subject = sprintf(
@@ -5086,7 +7827,7 @@ class Vigilante_File_Integrity {
         if ( ! empty( $results['suspicious'] ) ) {
             $inner .= $this->get_section_html(
                 __( 'Suspicious files', 'vigilante' ),
-                __( 'These files may contain malicious code. Review immediately.', 'vigilante' ),
+                __( 'Files that can run code where none is expected, or that contain code written the way malware hides itself. Some are harmless, such as cache files a plugin generates or a .htaccess that protects a folder: check the path and the reason before acting.', 'vigilante' ),
                 $results['suspicious'],
                 '#d63638',
                 '#fef1f1',
@@ -5099,7 +7840,7 @@ class Vigilante_File_Integrity {
         if ( ! empty( $results['extra'] ) ) {
             $inner .= $this->get_section_html(
                 __( 'Extra files', 'vigilante' ),
-                __( 'PHP files not in the original WordPress.org distribution.', 'vigilante' ),
+                __( 'Files that are not part of WordPress, or of the plugin or theme they sit in. Many are legitimate. A copy of wp-config.php or a database dump in the site root should be moved out of it.', 'vigilante' ),
                 $results['extra'],
                 '#b32d2e',
                 '#fdf6f4',
@@ -5112,7 +7853,7 @@ class Vigilante_File_Integrity {
         if ( ! empty( $critical_config ) ) {
             $inner .= $this->get_section_html(
                 __( 'Critical config files modified', 'vigilante' ),
-                __( 'These files are common targets for code injection. Review the changes and approve if they are legitimate.', 'vigilante' ),
+                __( 'Changed since you last approved them. Cache, security and redirection plugins rewrite their own blocks in these files, often on every update, and attackers write to them too. Review the changes and approve them if they belong to something you use.', 'vigilante' ),
                 $critical_config,
                 '#e36210',
                 '#fdf2e6',
@@ -5125,7 +7866,7 @@ class Vigilante_File_Integrity {
         if ( 'all' === $notify_level && ! empty( $regular_modified ) ) {
             $inner .= $this->get_section_html(
                 __( 'Modified files', 'vigilante' ),
-                __( 'Checksum mismatch with WordPress.org originals.', 'vigilante' ),
+                __( 'These files do not match the copy WordPress.org publishes for the installed version. Reinstalling the plugin, the theme or WordPress brings the original back.', 'vigilante' ),
                 $regular_modified,
                 '#dba617',
                 '#fdf8e8',
@@ -5142,6 +7883,29 @@ class Vigilante_File_Integrity {
             $inner .= $this->build_closed_plugins_email_section( $closed_plugins );
         }
 
+        // A partial scan says so and names what it did not get to. With no
+        // finding in a plugin that was never looked at, silence here read as
+        // "that plugin is fine".
+        if ( self::is_partial( $results ) ) {
+            $partial_lines = array_merge(
+                array_slice( array_map( 'strval', (array) ( $results['errors'] ?? array() ) ), 0, 10 ),
+                self::not_checked_lines( $results )
+            );
+
+            $inner .= '<p style="margin:0 0 8px;font-size:13px;color:#1d2327;"><strong>' . esc_html__( 'The last scan could not check everything, so its result is partial.', 'vigilante' ) . '</strong></p>';
+            $inner .= '<ul style="margin:0 0 16px 18px;padding:0;font-size:13px;color:#50575e;">';
+
+            foreach ( $partial_lines as $partial_line ) {
+                $inner .= '<li>' . esc_html( $partial_line ) . '</li>';
+            }
+
+            $inner .= '</ul>';
+        }
+
+        // Where the explanation is. The email stays a list; what each kind of
+        // finding usually is and what to do about it lives next to the results.
+        $inner .= '<p style="margin:0 0 16px;font-size:12px;color:#50575e;">' . esc_html__( 'File Integrity explains what each kind of finding usually is and what to do about it. A finding stays listed until you approve it, ignore it or fix it.', 'vigilante' ) . '</p>';
+
         // CTA button
         $inner .= Vigilante_Email_Template::button(
             admin_url( 'admin.php?page=vigilante&tab=file-integrity#vigilante-section-fi-last-scan' ),
@@ -5149,11 +7913,18 @@ class Vigilante_File_Integrity {
         );
 
         $is_alert = ( $suspicious_count > 0 || $critical_config_count > 0 || $closed_count > 0 );
-        $title    = $is_alert
-            ? __( 'Security alert', 'vigilante' )
-            : __( 'File integrity report', 'vigilante' );
 
-        Vigilante_Email_Template::send( $to, $subject, $title, $inner, $is_alert );
+        // Same three cases as the subject.
+        if ( $suspicious_count > 0 || $closed_count > 0 ) {
+            $title = __( 'Security alert', 'vigilante' );
+        } elseif ( $critical_config_count > 0 ) {
+            $title = __( 'Configuration file changed', 'vigilante' );
+        } else {
+            $title = __( 'File integrity report', 'vigilante' );
+        }
+
+        // The caller records what was reported only when the email went out.
+        return (bool) Vigilante_Email_Template::send( $to, $subject, $title, $inner, $is_alert );
     }
 
     /**

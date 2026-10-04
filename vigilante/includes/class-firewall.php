@@ -793,22 +793,6 @@ class Vigilante_Firewall {
     }
 
     /**
-     * Check for PHP execution in uploads
-     *
-     * @return string|false Error message or false if safe.
-     */
-    private function check_php_in_uploads() {
-        $uri = $this->inspection_haystack();
-
-        // Check if accessing PHP in uploads directory
-        if ( preg_match( '/\/wp-content\/uploads\/.*\.ph(p[345s]?|tml)/i', $uri ) ) {
-            return __( 'PHP execution in uploads blocked', 'vigilante' );
-        }
-
-        return false;
-    }
-
-    /**
      * Check for bad bots
      *
      * @return string|false Error message or false if safe.
@@ -997,8 +981,8 @@ class Vigilante_Firewall {
         foreach ( $bad_bots as $bot ) {
             if ( strpos( $user_agent, $bot ) !== false ) {
                 return sprintf(
-                    /* translators: %s: Bot name */
-                    __( 'Bad bot blocked: %s', 'vigilante' ),
+                    /* translators: %s: The entry of the bad bots list that was found in the User-Agent */
+                    __( 'Bad bot blocked: the User-Agent contains "%s"', 'vigilante' ),
                     $bot
                 );
             }

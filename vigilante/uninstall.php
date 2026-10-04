@@ -166,6 +166,7 @@ function vigilante_uninstall_site() {
         'vigilante_backup_timestamp',
         'vigilante_last_integrity_scan',
         'vigilante_last_integrity_results',
+        'vigilante_integrity_notified',
         'vigilante_ignored_files',
         'vigilante_dismissed_notices',
         'vigilante_under_attack_mode',

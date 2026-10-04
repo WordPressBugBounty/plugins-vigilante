@@ -200,8 +200,14 @@ class Vigilante_Security_Analyzer {
 
         // Push to history only when the whole scan has finished (either 'all' in one call,
         // or a 'slow' phase that immediately follows a 'fast' phase within the same minute).
-        if ( 'all' === $phase || 'slow' === $phase ) {
+        if ( 'all' === $phase ) {
             $this->push_history( $report );
+        } elseif ( 'slow' === $phase ) {
+            // The slow phase closes a scan the fast one started, so what goes
+            // to the history is the two merged, as persist_scan() has just
+            // stored them. The report of this phase alone carries only its own
+            // checks, and the trend showed every manual scan as a collapse.
+            $this->push_history( $this->get_last_scan() );
         }
 
         return $report;
