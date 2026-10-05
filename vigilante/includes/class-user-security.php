@@ -174,6 +174,9 @@ class Vigilante_User_Security {
             // password cannot keep operating outside the redirect (2.11.9).
             add_filter( 'rest_authentication_errors', array( $this, 'block_expired_password_rest' ), 20 );
             add_action( 'template_redirect', array( $this, 'force_password_change_frontend' ) );
+            // The profile is the only screen where the change can be made, and
+            // WooCommerce keeps accounts with no back-end role out of wp-admin.
+            add_filter( 'woocommerce_prevent_admin_access', array( $this, 'allow_profile_for_password_change' ) );
             add_filter( 'authenticate', array( $this, 'block_expired_password_xmlrpc' ), 30, 1 );
             add_action( 'profile_update', array( $this, 'update_password_change_date' ), 10, 2 );
             add_action( 'user_register', array( $this, 'set_initial_password_date' ) );
@@ -2320,9 +2323,11 @@ class Vigilante_User_Security {
             return;
         }
 
-        // Check if must change password
-        $must_change = get_user_meta( $user_id, 'vigilante_must_change_password', true );
-        if ( $must_change ) {
+        // Ask what the redirect asks. From 2.11.9 to 3.0.3 this read only the
+        // flag, which is written at login, while force_password_change_redirect()
+        // also works the expiry out on the spot: a session still open when the
+        // password expired was sent to the profile with no notice saying why.
+        if ( $this->must_change_password( $user_id ) ) {
             global $pagenow;
             $on_profile = ( 'profile.php' === $pagenow );
             ?>
@@ -2331,6 +2336,7 @@ class Vigilante_User_Security {
                     <strong><?php esc_html_e( 'Password change required', 'vigilante' ); ?></strong>
                     <?php if ( $on_profile ) : ?>
                         <?php esc_html_e( 'Your password has expired. Set a new password in the section below and save your profile to continue.', 'vigilante' ); ?>
+                        <a href="#password"><?php esc_html_e( 'Go to the password field', 'vigilante' ); ?></a>
                     <?php else : ?>
                         <?php
                         printf(
@@ -2351,26 +2357,38 @@ class Vigilante_User_Security {
             return;
         }
 
-        // Show warning if expiring soon
+        // Show warning if expiring soon. get_days_until_expiration() rounds down,
+        // so 0 here is less than a day left: an expired password never gets this
+        // far, must_change_password() has answered for it above. Until 3.0.3 the
+        // check asked for more than 0, so the last day showed nothing and the
+        // next thing the user saw was the forced change.
         $days_left = $this->get_days_until_expiration( $user_id );
         $warning_days = absint( $settings['warning_days'] ?? 14 );
 
-        if ( $days_left > 0 && $days_left <= $warning_days ) {
+        if ( $warning_days > 0 && $days_left >= 0 && $days_left <= $warning_days ) {
             ?>
             <div class="notice notice-warning is-dismissible">
                 <p>
                     <?php
-                    printf(
-                        /* translators: 1: Number of days, 2: Link to profile */
-                        esc_html( _n(
-                            'Your password will expire in %1$d day. Please %2$s.',
-                            'Your password will expire in %1$d days. Please %2$s.',
-                            $days_left,
-                            'vigilante'
-                        ) ),
-                        absint( $days_left ),
-                        '<a href="' . esc_url( admin_url( 'profile.php' ) ) . '">' . esc_html__( 'change it now', 'vigilante' ) . '</a>'
-                    );
+                    if ( $days_left < 1 ) {
+                        printf(
+                            /* translators: %s: Link to profile */
+                            esc_html__( 'Your password expires in less than a day. Please %s.', 'vigilante' ),
+                            '<a href="' . esc_url( admin_url( 'profile.php' ) ) . '">' . esc_html__( 'change it now', 'vigilante' ) . '</a>'
+                        );
+                    } else {
+                        printf(
+                            /* translators: 1: Number of days, 2: Link to profile */
+                            esc_html( _n(
+                                'Your password will expire in %1$d day. Please %2$s.',
+                                'Your password will expire in %1$d days. Please %2$s.',
+                                $days_left,
+                                'vigilante'
+                            ) ),
+                            absint( $days_left ),
+                            '<a href="' . esc_url( admin_url( 'profile.php' ) ) . '">' . esc_html__( 'change it now', 'vigilante' ) . '</a>'
+                        );
+                    }
                     ?>
                 </p>
             </div>
@@ -2423,6 +2441,61 @@ class Vigilante_User_Security {
     }
 
     /**
+     * Whether this request is the user's own profile form and nothing else
+     *
+     * A user who must change an expired password is let through to the profile,
+     * because that is where the change is made. Until 3.0.3 "the profile" meant
+     * the name of the script, and profile.php can be asked for other things: the
+     * admin bootstrap runs a plugin page or an importer named in the address
+     * whatever the script is, and fires the hook of any action it is sent
+     * (wp-admin/admin.php), and the profile script edits whichever user the
+     * request names (wp-admin/user-edit.php). The pending change could be put
+     * off while part of the admin area was still in use.
+     *
+     * Two requests are the profile form: the one that shows it, which posts
+     * nothing, and the one that saves it carrying the nonce WordPress printed
+     * on this user's own form. Parameters in the address that WordPress does
+     * nothing with are left alone, so a proxy or a browser extension that adds
+     * one to every address does not send the user round in circles.
+     *
+     * Meant for admin_init. wp-admin/profile.php defines IS_PROFILE_PAGE before
+     * it loads the admin bootstrap, so the constant is there when that script is
+     * the one running. The network admin and user dashboard copies load the
+     * bootstrap first: from them the user is taken to the site profile, where
+     * the notice is shown.
+     *
+     * @return bool
+     */
+    private function is_own_profile_request() {
+        global $pagenow, $plugin_page;
+
+        if ( 'profile.php' !== $pagenow || ! defined( 'IS_PROFILE_PAGE' ) || ! IS_PROFILE_PAGE ) {
+            return false;
+        }
+
+        // A plugin page or an importer named in the address.
+        if ( isset( $plugin_page ) || isset( $_GET['import'] ) ) {
+            return false;
+        }
+
+        // Somebody else's profile.
+        $own_id = (string) get_current_user_id();
+        if ( ! empty( $_REQUEST['user_id'] ) && $own_id !== $_REQUEST['user_id'] ) {
+            return false;
+        }
+
+        // No action: the form being shown, which posts nothing.
+        if ( empty( $_REQUEST['action'] ) ) {
+            return empty( $_POST );
+        }
+
+        // An action: only the form being saved.
+        return 'update' === $_REQUEST['action']
+            && isset( $_REQUEST['_wpnonce'] )
+            && false !== wp_verify_nonce( sanitize_text_field( wp_unslash( $_REQUEST['_wpnonce'] ) ), 'update-user_' . $own_id );
+    }
+
+    /**
      * Force a user with an expired password to change it, on wp-admin and AJAX
      *
      * Until 2.11.9 this only redirected wp-admin pages and skipped AJAX, so an
@@ -2432,7 +2505,9 @@ class Vigilante_User_Security {
      * is only read by one redirect. It is now enforced on every entry point,
      * here for wp-admin and AJAX and in the three methods below for REST, the
      * front end and XML-RPC. The only thing an affected user can still do is
-     * change the password on profile.php or log out.
+     * change the password on profile.php or log out. From 2.11.9 to 3.0.3 that
+     * was not quite true, because any request to profile.php was let through:
+     * see is_own_profile_request().
      */
     public function force_password_change_redirect() {
         if ( ! is_user_logged_in() || ! $this->must_change_password( get_current_user_id() ) ) {
@@ -2449,13 +2524,44 @@ class Vigilante_User_Security {
             );
         }
 
-        // profile.php is where the change happens; do not redirect it onto itself.
-        global $pagenow;
-        if ( 'profile.php' === $pagenow ) {
+        // The profile form is where the change happens; do not redirect it onto
+        // itself. Anything else profile.php is asked for goes back to the form.
+        if ( $this->is_own_profile_request() ) {
             return;
         }
 
-        wp_safe_redirect( admin_url( 'profile.php#password' ) );
+        $this->redirect_to_profile();
+    }
+
+    /**
+     * Send a user who must change an expired password to their profile
+     *
+     * To the top of it, with no "#password" fragment (it had one from 1.0.0 to
+     * 3.0.3): the browser jumped straight to the password row and left the
+     * notice that says why, printed at the top of the page, out of sight. The
+     * notice carries the link to the field instead.
+     *
+     * wp_safe_redirect() answers an address it does not take for the site's
+     * own with a redirect to admin_url(), the dashboard, and the dashboard sent
+     * the user here again, and so on until the browser gave up. It only knows
+     * the home host, so that happened on a site whose WordPress lives on a host
+     * of its own, and also where the host has non-ASCII letters stored as
+     * written or is an IPv6 literal. The address sent is built here from the
+     * site's own settings and carries nothing from the request, so the fallback
+     * for this one call is that same address: what admin_url() says is as good
+     * for the profile as it is for the dashboard WordPress falls back to.
+     */
+    private function redirect_to_profile() {
+        $profile = admin_url( 'profile.php' );
+
+        add_filter(
+            'wp_safe_redirect_fallback',
+            static function () use ( $profile ) {
+                return $profile;
+            }
+        );
+
+        wp_safe_redirect( $profile );
         exit;
     }
 
@@ -2495,8 +2601,41 @@ class Vigilante_User_Security {
             return;
         }
 
-        wp_safe_redirect( admin_url( 'profile.php#password' ) );
-        exit;
+        $this->redirect_to_profile();
+    }
+
+    /**
+     * Let a user who must change an expired password reach the profile in a WooCommerce store
+     *
+     * WooCommerce sends accounts with no back-end role (a customer, a subscriber)
+     * from wp-admin to My Account, and force_password_change_frontend() sends
+     * them from there back to the profile. With one of those roles in Affected
+     * Roles the two redirects chased each other until the browser gave up, from
+     * 2.11.9 to 3.0.3, and the account could neither use the store nor change
+     * the password.
+     *
+     * WooCommerce's redirect is lifted on the profile and nowhere else, and only
+     * while the change is pending: from any other wp-admin screen the account
+     * still ends up on the profile, and once the new password is saved
+     * WooCommerce sends it back to My Account as it always does.
+     *
+     * What this depends on is not the caller's to choose: the user comes from
+     * the session, whether the change is pending from must_change_password(),
+     * and the request has to be the profile form and nothing else, which is
+     * is_own_profile_request(), the same test the redirect uses. What it gives
+     * is the user's own profile, which WordPress opens to any account that can
+     * read (wp-admin/menu.php); WooCommerce's redirect is the store's
+     * preference, not a permission.
+     *
+     * @param bool $prevent_access Whether WooCommerce is about to send this request out of wp-admin.
+     * @return bool
+     */
+    public function allow_profile_for_password_change( $prevent_access ) {
+        if ( $prevent_access && is_user_logged_in() && $this->is_own_profile_request() && $this->must_change_password( get_current_user_id() ) ) {
+            return false;
+        }
+
+        return $prevent_access;
     }
 
     /**

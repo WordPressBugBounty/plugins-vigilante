@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.0.3
+Stable tag: 3.0.4
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -358,7 +358,7 @@ Run it manually after any significant change (plugin update, server migration, n
 
 = What is password expiration? =
 
-You can require users to change their passwords after a set number of days (30, 60, 90, etc.). Users receive warnings before expiration and are forced to change their password on next login when it expires. Password history prevents reusing recent passwords.
+You can require users to change their passwords after a set number of days (30, 60, 90, etc.). Users are warned before it expires. Once it does, they are taken to their profile to set a new one before they can do anything else. Password history prevents reusing recent passwords.
 
 = What is registration approval? =
 
@@ -529,6 +529,16 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 3.0.4 =
+Fixes the expired password notice, which was missing when the password expired during an open session, lands the user at the top of the profile where the notice is, fixes a redirect loop for WooCommerce customers, and limits an account with an expired password to its own profile form.
+
+* Improved: when a password has expired, the user is taken to the top of their profile, where the notice says why, instead of straight to the password field with the notice out of sight above it. The notice now has a link to the field.
+* Fix: the notice that a password has expired was missing when it expired while the user was still logged in. The user was sent to the profile with no explanation, and the notice only appeared after logging in again.
+* Fix: on the last day before a password expires the warning notice was not shown, so the forced change arrived with no warning the day before.
+* Fix: in a WooCommerce store, an account with no access to the admin area, a customer for example, whose role is in Affected Roles was caught in a redirect loop when its password expired. WooCommerce sent it from the profile to My Account and Vigilant sent it back, so it could neither use the store nor change the password. That account is now let into its profile screen in the admin area while the change is pending, and only into that screen. The password is changed there, not in My Account, and once it is saved WooCommerce takes the account back to My Account as usual.
+* Fix: while a password change was pending, every request to the profile screen was let through, and that screen can be asked for other things: a plugin page, an importer, an action passed in the address, or the profile of another user for an account allowed to edit users. An account with an expired password could go on using those. Only its own profile form is let through now, to be shown or to be saved. On a network, the profile screens of the network admin and of the user dashboard lead to the profile of the site, where the notice is.
+* Fix: on a site whose WordPress Address and Site Address are on different hosts, a headless site for example, or whose address has accented or non-Latin letters saved as written, a user with an expired password was caught in a redirect loop. The redirect to the profile came out as a redirect to the dashboard, which sent the user to the profile again. It now reaches the profile.
+
 = 3.0.3 =
 File Integrity now compares themes with their WordPress.org package, searches all the code that has no official copy, and looks at must-use plugins, drop-ins, wp-admin, wp-includes and the rest of wp-content. Scan emails are sent once per new finding.
 
@@ -611,8 +621,8 @@ For older changelog entries, please check the [changelog.txt](https://plugins.sv
 
 == Upgrade Notice ==
 
-= 3.0.3 =
-File Integrity now compares themes with their WordPress.org package, searches all the code that has no official copy, and looks at must-use plugins, drop-ins, wp-admin, wp-includes and the rest of wp-content. Scan emails are sent once per new finding.
+= 3.0.4 =
+Fixes the expired password notice, which was missing when the password expired during an open session, lands the user at the top of the profile where the notice is, fixes a redirect loop for WooCommerce customers, and limits an account with an expired password to its own profile form.
 
 == Support ==
 

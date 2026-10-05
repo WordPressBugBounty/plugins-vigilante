@@ -3,6 +3,14 @@ Vigilant — Full changelog
 For each release, see the entries below. The latest version is always at the top.
 The current release notes also live in readme.txt under "== Changelog ==".
 
+= 3.0.4 =
+* Improved: when a password has expired, the user is taken to the top of their profile, where the notice says why, instead of straight to the password field with the notice out of sight above it. The notice now has a link to the field.
+* Fix: the notice that a password has expired was missing when it expired while the user was still logged in. The user was sent to the profile with no explanation, and the notice only appeared after logging in again.
+* Fix: on the last day before a password expires the warning notice was not shown, so the forced change arrived with no warning the day before.
+* Fix: in a WooCommerce store, an account with no access to the admin area, a customer for example, whose role is in Affected Roles was caught in a redirect loop when its password expired. WooCommerce sent it from the profile to My Account and Vigilant sent it back, so it could neither use the store nor change the password. That account is now let into its profile screen in the admin area while the change is pending, and only into that screen. The password is changed there, not in My Account, and once it is saved WooCommerce takes the account back to My Account as usual.
+* Fix: while a password change was pending, every request to the profile screen was let through, and that screen can be asked for other things: a plugin page, an importer, an action passed in the address, or the profile of another user for an account allowed to edit users. An account with an expired password could go on using those. Only its own profile form is let through now, to be shown or to be saved. On a network, the profile screens of the network admin and of the user dashboard lead to the profile of the site, where the notice is.
+* Fix: on a site whose WordPress Address and Site Address are on different hosts, a headless site for example, or whose address has accented or non-Latin letters saved as written, a user with an expired password was caught in a redirect loop. The redirect to the profile came out as a redirect to the dashboard, which sent the user to the profile again. It now reaches the profile.
+
 = 3.0.3 =
 * Improved: File Integrity compares themes from WordPress.org with the package WordPress.org publishes for the installed version. WordPress.org has no checksums for themes, so until now no theme file was compared with anything. The package is downloaded once per version.
 * Improved: File Integrity searches every PHP file of a plugin or theme with no official copy for hidden code, not only the first 50, and reads files of up to 8 MB. A file over 512,000 bytes was not opened, so it passed as clean. One over 8 MB is listed as not searched.
