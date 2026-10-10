@@ -69,6 +69,13 @@ class Vigilante_SA_Category_Access {
             return Vigilante_SA_Check_Result::fail( $args );
         }
 
+        // The slug is served by the Login Security class, which only loads
+        // with its module on.
+        if ( ! $this->settings->is_module_enabled( 'login_security' ) ) {
+            $args['detail'] = Vigilante_SA_Helpers::module_off_detail( $this->settings, 'login_security' );
+            return Vigilante_SA_Check_Result::fail( $args );
+        }
+
         $args['detail'] = sprintf(
             /* translators: %s: slug */
             __( 'Custom login URL set to /%s. Remember to bookmark it.', 'vigilante' ),
@@ -98,7 +105,24 @@ class Vigilante_SA_Category_Access {
             $mode = 'full';
         }
 
-        $args['data'] = array( 'mode' => $mode );
+        // The mode is applied by Vigilante_Comment_Security, which only loads
+        // with the WordPress Hardening module on (vigilante.php). With the
+        // module off the saved mode does nothing, and until 3.0.4 this check
+        // passed on it while the Dashboard recommended blocking XML-RPC.
+        $saved_mode = $mode;
+        if ( ! $this->settings->is_module_enabled( 'wp_hardening' ) ) {
+            $mode = 'none';
+        }
+
+        $args['data'] = array(
+            'mode'       => $mode,
+            'saved_mode' => $saved_mode,
+        );
+
+        if ( 'none' === $mode && 'none' !== $saved_mode ) {
+            $args['detail'] = Vigilante_SA_Helpers::module_off_detail( $this->settings, 'wp_hardening' );
+            return Vigilante_SA_Check_Result::fail( $args );
+        }
 
         if ( 'full' === $mode ) {
             $args['detail'] = __( 'XML-RPC is fully disabled; brute-force and pingback amplification vectors closed.', 'vigilante' );
@@ -128,6 +152,12 @@ class Vigilante_SA_Category_Access {
 
         if ( 0 === $max ) {
             $args['detail'] = __( 'Login lockout is not configured. Any IP can try passwords without limit.', 'vigilante' );
+            return Vigilante_SA_Check_Result::fail( $args );
+        }
+        // Attempts are counted by the Login Security class, which only loads
+        // with its module on.
+        if ( ! $this->settings->is_module_enabled( 'login_security' ) ) {
+            $args['detail'] = Vigilante_SA_Helpers::module_off_detail( $this->settings, 'login_security' );
             return Vigilante_SA_Check_Result::fail( $args );
         }
         if ( $max > 10 ) {
@@ -165,8 +195,37 @@ class Vigilante_SA_Category_Access {
         );
 
         $two_factor = $this->settings->get_option( 'login_security', 'two_factor', array() );
-        if ( ! empty( $two_factor['enabled'] ) ) {
-            $method = isset( $two_factor['method'] ) ? $two_factor['method'] : 'email';
+        $saved_here = ! empty( $two_factor['enabled'] );
+
+        // A site asks for a second factor when two factor is enabled AND its
+        // Login Security module is on: that is the rule the login itself
+        // follows, on a single site because the two classes only load with the
+        // module, and on a network because
+        // Vigilante_Settings::two_factor_demands_for() leaves out every site
+        // whose module is off.
+        $asks = $saved_here && $this->settings->is_module_enabled( 'login_security' );
+
+        // On a network the main site asks for everybody, so its policy counts
+        // here too, read with the same two conditions and from what it has
+        // stored, as the login does.
+        if ( ! $asks && is_multisite() ) {
+            $main = get_blog_option( get_main_site_id(), Vigilante_Settings::OPTION_NAME, array() );
+
+            if ( is_array( $main )
+                && ! empty( $main['modules']['login_security'] )
+                && ! empty( $main['login_security']['two_factor']['enabled'] ) ) {
+                $two_factor = $main['login_security']['two_factor'];
+                $asks       = true;
+            }
+        }
+
+        if ( ! $asks && $saved_here ) {
+            $args['detail'] = Vigilante_SA_Helpers::module_off_detail( $this->settings, 'login_security' );
+            return Vigilante_SA_Check_Result::fail( $args );
+        }
+
+        if ( $asks ) {
+            $method = ( isset( $two_factor['method'] ) && is_string( $two_factor['method'] ) ) ? $two_factor['method'] : 'email';
             $args['detail'] = sprintf(
                 /* translators: %s: 2FA method */
                 __( '2FA enabled globally using %s.', 'vigilante' ),
@@ -203,7 +262,13 @@ class Vigilante_SA_Category_Access {
         // redirects to a login page (typical) or is blocked/hidden (4xx).
         // A 200 with an HTML body is the only truly bad outcome.
         if ( in_array( $code, array( 301, 302, 303, 307, 308 ), true ) && $location ) {
-            $args['detail'] = __( '/wp-admin/ redirected anonymous visits to the login page.', 'vigilante' );
+            // Until 3.0.4 every redirect was said to lead to the login page.
+            // With the login hidden it leads somewhere else, and so does a
+            // redirect to another host or scheme: the text says the login
+            // page only when that is where it goes.
+            $args['detail'] = $this->leads_to_login( $location )
+                ? __( '/wp-admin/ redirected anonymous visits to the login page.', 'vigilante' )
+                : __( '/wp-admin/ redirected anonymous visits to another address.', 'vigilante' );
             $args['data']   = array( 'code' => $code, 'location' => $location );
             return Vigilante_SA_Check_Result::pass( $args );
         }
@@ -235,12 +300,46 @@ class Vigilante_SA_Category_Access {
         return Vigilante_SA_Check_Result::warn( $args );
     }
 
+    /**
+     * Whether a redirect goes to the login form of this site
+     *
+     * @since 3.0.5
+     *
+     * @param string $location Value of the Location header, absolute or relative.
+     * @return bool
+     */
+    private function leads_to_login( $location ) {
+        $to = rawurldecode( (string) wp_parse_url( (string) $location, PHP_URL_PATH ) );
+        if ( '' === $to ) {
+            return false;
+        }
+        if ( 'wp-login.php' === basename( $to ) ) {
+            return true;
+        }
+
+        // A login address that is not wp-login.php, as this site declares it.
+        $login = rawurldecode( (string) wp_parse_url( wp_login_url(), PHP_URL_PATH ) );
+
+        return '' !== $login && untrailingslashit( $login ) === untrailingslashit( $to );
+    }
+
+    /**
+     * The address that tells a visitor who they are
+     *
+     * Not the list of users, which is check_rest_users_enum() in the
+     * WordPress exposure category: the two were named almost the same and
+     * were taken for one. WordPress answers 401 here to anybody with no
+     * session, with Vigilant or without it, so the usual result says so and
+     * scores nothing: until 3.0.4 it gave 2 points to every site, whatever
+     * was set. It only scores, as a failure, when the address answers a
+     * visitor with no session with something else.
+     */
     private function check_rest_users_me() {
         $args = array(
             'id'       => 'rest_users_me',
             'category' => self::SLUG,
             'max'      => 2,
-            'label'    => __( 'REST /wp/v2/users/me access', 'vigilante' ),
+            'label'    => __( 'REST: current user (/wp/v2/users/me)', 'vigilante' ),
             'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'rest-api', 'vigilante-section-rest-api-main' ),
         );
 
@@ -255,13 +354,19 @@ class Vigilante_SA_Category_Access {
         $code = (int) wp_remote_retrieve_response_code( $response );
         $body = (string) wp_remote_retrieve_body( $response );
 
+        // Answering as it should is informative: no points, and no link to a
+        // setting, because none makes this happen.
+        $fine = function ( $detail ) use ( $args ) {
+            $args['detail'] = $detail;
+            unset( $args['fix_link'] );
+            return Vigilante_SA_Check_Result::info( $args );
+        };
+
         if ( 401 === $code ) {
-            $args['detail'] = __( 'The endpoint returns 401 to unauthenticated requests.', 'vigilante' );
-            return Vigilante_SA_Check_Result::pass( $args );
+            return $fine( __( 'It answers 401 to a visitor with no session, as WordPress does by itself on any site. Whether the list of users can be seen is a different check.', 'vigilante' ) );
         }
         if ( 403 === $code ) {
-            $args['detail'] = __( 'The endpoint returns 403 to unauthenticated requests.', 'vigilante' );
-            return Vigilante_SA_Check_Result::pass( $args );
+            return $fine( __( 'The endpoint returns 403 to unauthenticated requests.', 'vigilante' ) );
         }
 
         // 404 with rest_no_route => Vigilant's own rest_endpoints filter removed
@@ -271,11 +376,9 @@ class Vigilante_SA_Category_Access {
         // to recover the points. Same treatment as the sibling /wp/v2/users check.
         if ( 404 === $code ) {
             if ( false !== strpos( $body, 'rest_no_route' ) ) {
-                $args['detail'] = __( 'The /wp/v2/users/me route is unregistered for anonymous clients.', 'vigilante' );
-                return Vigilante_SA_Check_Result::pass( $args );
+                return $fine( __( 'The /wp/v2/users/me route is unregistered for anonymous clients.', 'vigilante' ) );
             }
-            $args['detail'] = __( 'The /wp/v2/users/me route returned 404 to the anonymous probe (likely a firewall rule).', 'vigilante' );
-            return Vigilante_SA_Check_Result::pass( $args );
+            return $fine( __( 'The /wp/v2/users/me route returned 404 to the anonymous probe (likely a firewall rule).', 'vigilante' ) );
         }
 
         $args['detail'] = sprintf(

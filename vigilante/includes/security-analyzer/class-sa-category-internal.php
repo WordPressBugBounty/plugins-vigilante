@@ -357,9 +357,19 @@ class Vigilante_SA_Category_Internal {
         $fi_options    = (array) $this->settings->get_section( 'file_integrity' );
         $check_enabled = ! empty( $fi_options['check_closed_plugins'] );
 
+        // The daily check belongs to File Integrity and only runs with that
+        // module on (vigilante.php). With it off, whatever is stored is the
+        // answer of the last day it ran.
+        if ( ! $this->settings->is_module_enabled( 'file_integrity' ) ) {
+            $args['detail'] = Vigilante_SA_Helpers::module_idle_detail( $this->settings, 'file_integrity' );
+            return Vigilante_SA_Check_Result::fail( $args );
+        }
+
+        // A protection somebody switched off is not one that could not be
+        // measured: it scores nothing, and it stays in the total.
         if ( ! $check_enabled ) {
             $args['detail'] = __( 'The "Closed plugins" check is disabled in File Integrity > Scan Scope.', 'vigilante' );
-            return Vigilante_SA_Check_Result::skip( $args );
+            return Vigilante_SA_Check_Result::fail( $args );
         }
 
         if ( ! class_exists( 'Vigilante_Plugin_Status' ) ) {
@@ -448,9 +458,19 @@ class Vigilante_SA_Category_Internal {
         $files      = isset( $state['files_checked'] ) ? (int) $state['files_checked'] : 0;
         $anchors    = ( isset( $state['anchors'] ) && is_array( $state['anchors'] ) ) ? $state['anchors'] : array();
 
+        // What decides the points: tasks that Vigilant had to schedule again,
+        // while that is only a warning, do not take any away. The files are as
+        // verified as they were, and that is what these ten points are for.
+        // This file is loaded when the analyzer is created, and the class it
+        // asks is loaded with the plugin: in the cron run in which WordPress
+        // updates Vigilant, the class in memory is the one of the version
+        // before, which may not have the method yet.
+        $score_tone = method_exists( 'Vigilante_Self_Integrity', 'score_tone' ) ? Vigilante_Self_Integrity::score_tone( $state, $enabled ) : $tone;
+
         $args['data'] = array(
             'status'        => isset( $state['last_status'] ) ? (string) $state['last_status'] : '',
             'tone'          => $tone,
+            'score_tone'    => $score_tone,
             'files_checked' => $files,
             'anchors'       => count( array_filter( $anchors ) ),
             'findings'      => count( $findings ),
@@ -512,7 +532,7 @@ class Vigilante_SA_Category_Internal {
         if ( 'critical' === $tone || 'off' === $tone ) {
             return Vigilante_SA_Check_Result::fail( $args );
         }
-        if ( 'warning' === $tone ) {
+        if ( 'warning' === $score_tone ) {
             return Vigilante_SA_Check_Result::warn( $args );
         }
         return Vigilante_SA_Check_Result::pass( $args );
@@ -527,16 +547,30 @@ class Vigilante_SA_Category_Internal {
             'fix_link' => '',
         );
 
+        // WordPress also loads wp-config.php from the directory above its own
+        // when that directory is not another installation (wp-load.php). Until
+        // 3.0.4 only ABSPATH was looked at, and a site set up that way passed
+        // without its file having been read.
         $wp_config = ABSPATH . 'wp-config.php';
+        if ( ! file_exists( $wp_config ) ) {
+            $above     = dirname( ABSPATH );
+            $wp_config = ( @file_exists( $above . '/wp-config.php' ) && ! @file_exists( $above . '/wp-settings.php' ) ) // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir may forbid the directory above; same call and same silencing as wp-load.php.
+                ? $above . '/wp-config.php'
+                : '';
+        }
+
         $htaccess  = ABSPATH . '.htaccess';
         $issues    = array();
+        $config_perm = ( '' !== $wp_config ) ? @fileperms( $wp_config ) : false; // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A file that cannot be read is reported below, not as a PHP warning.
 
-        if ( file_exists( $wp_config ) ) {
-            $perm = fileperms( $wp_config ) & 0777;
-            // Anything more permissive than 0644 is worth flagging.
-            if ( $perm & 0022 ) {
-                $issues[] = sprintf( 'wp-config.php: %s', self::octal( $perm ) );
-            }
+        if ( false === $config_perm ) {
+            $args['detail'] = __( 'wp-config.php could not be found or read from here, so its permissions could not be checked. Not scored.', 'vigilante' );
+            return Vigilante_SA_Check_Result::skip( $args );
+        }
+
+        // Anything more permissive than 0644 is worth flagging.
+        if ( ( $config_perm & 0777 ) & 0022 ) {
+            $issues[] = sprintf( 'wp-config.php: %s', self::octal( $config_perm & 0777 ) );
         }
 
         if ( file_exists( $htaccess ) ) {
@@ -659,9 +693,22 @@ class Vigilante_SA_Category_Internal {
         );
 
         $two_factor = $this->settings->get_option( 'login_security', 'two_factor', array() );
-        if ( empty( $two_factor['enabled'] ) ) {
-            $args['detail'] = __( '2FA is not enabled globally, so no administrator is protected with a second factor.', 'vigilante' );
-            return Vigilante_SA_Check_Result::fail( $args );
+
+        // On a network the second factor is enforced on every site and the
+        // requirement is the union of what each site of the account asks for
+        // (Vigilante_Settings::two_factor_required_for()), so this site's own
+        // switch does not settle it. On a single site it does, together with
+        // the Login Security module that loads the two classes.
+        if ( ! is_multisite() ) {
+            if ( empty( $two_factor['enabled'] ) ) {
+                $args['detail'] = __( '2FA is not enabled globally, so no administrator is protected with a second factor.', 'vigilante' );
+                return Vigilante_SA_Check_Result::fail( $args );
+            }
+
+            if ( ! $this->settings->is_module_enabled( 'login_security' ) ) {
+                $args['detail'] = Vigilante_SA_Helpers::module_off_detail( $this->settings, 'login_security' );
+                return Vigilante_SA_Check_Result::fail( $args );
+            }
         }
 
         $admins = get_users(
@@ -677,10 +724,30 @@ class Vigilante_SA_Category_Internal {
 
         $method            = isset( $two_factor['method'] ) ? $two_factor['method'] : 'email';
         $unenrolled        = array();
+        $not_asked         = 0;
         $enrolled_count    = 0;
 
         foreach ( $admins as $admin ) {
-            $enrolled = $this->is_user_enrolled( $admin->ID, $method );
+            // Asked the way the login asks: the enforced roles and the excluded
+            // users decide who gets a second factor at all. Until 3.0.4 an
+            // administrator left out by either counted here as protected.
+            $account = get_userdata( $admin->ID );
+
+            if ( ! $account || ! Vigilante_Settings::two_factor_required_for( $account ) ) {
+                $not_asked++;
+                $unenrolled[] = $admin->user_login;
+                continue;
+            }
+
+            $methods  = Vigilante_Settings::two_factor_methods_for( $account );
+            $enrolled = false;
+            foreach ( ( empty( $methods ) ? array( $method ) : $methods ) as $asked ) {
+                if ( $this->is_user_enrolled( $admin->ID, $asked ) ) {
+                    $enrolled = true;
+                    break;
+                }
+            }
+
             if ( $enrolled ) {
                 $enrolled_count++;
             } else {
@@ -693,6 +760,7 @@ class Vigilante_SA_Category_Internal {
             'total'         => $total,
             'enrolled'      => $enrolled_count,
             'unenrolled'    => $unenrolled,
+            'not_asked'     => $not_asked,
             'method'        => $method,
         );
 
@@ -712,6 +780,20 @@ class Vigilante_SA_Category_Internal {
             $total,
             implode( ', ', array_slice( $unenrolled, 0, 5 ) )
         );
+
+        if ( $not_asked > 0 ) {
+            $args['detail'] .= ' ' . sprintf(
+                /* translators: %d: number of administrator accounts */
+                _n(
+                    '%d of them is not asked for a second factor at all: the role is not among the enforced roles, or the account is in the excluded users.',
+                    '%d of them are not asked for a second factor at all: the role is not among the enforced roles, or the account is in the excluded users.',
+                    $not_asked,
+                    'vigilante'
+                ),
+                $not_asked
+            );
+        }
+
         return count( $unenrolled ) === $total
             ? Vigilante_SA_Check_Result::fail( $args )
             : Vigilante_SA_Check_Result::warn( $args );
@@ -768,10 +850,12 @@ class Vigilante_SA_Category_Internal {
         );
 
         // Alerts ride on top of Security Audit; with the module off there is
-        // nothing to alert on, so the check does not apply.
+        // nothing to alert on. That is a protection switched off, not a check
+        // that could not be measured: it scores nothing and stays in the
+        // total, or switching the module off would raise the score.
         if ( ! $this->settings->is_module_enabled( 'activity_log' ) ) {
             $args['detail'] = __( 'Security Audit is disabled, so audit alerts do not apply. Enable Security Audit to use them.', 'vigilante' );
-            return Vigilante_SA_Check_Result::skip( $args );
+            return Vigilante_SA_Check_Result::fail( $args );
         }
 
         if ( ! class_exists( 'Vigilante_Audit_Alerts' ) ) {
@@ -816,29 +900,31 @@ class Vigilante_SA_Category_Internal {
             'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'activity-log', 'vigilante-section-audit-recent' ),
         );
 
+        // With Security Audit off nothing is being recorded, so an empty day
+        // is not a quiet one. Asked before the service below: off is a
+        // failure whether or not this scan was handed the log.
+        if ( ! $this->settings->is_module_enabled( 'activity_log' ) ) {
+            $args['detail'] = Vigilante_SA_Helpers::module_idle_detail( $this->settings, 'activity_log' );
+            return Vigilante_SA_Check_Result::fail( $args );
+        }
+
         if ( ! $this->activity_log || ! method_exists( $this->activity_log, 'get_logs_count' ) ) {
             $args['detail'] = __( 'Activity log service not available for this scan.', 'vigilante' );
             return Vigilante_SA_Check_Result::skip( $args );
         }
 
+        // Only `critical`: the log has no `high` severity, and the query that
+        // asked for it until 3.0.4 always came back with zero.
         $since = gmdate( 'Y-m-d H:i:s', time() - DAY_IN_SECONDS );
-        $count_critical = (int) $this->activity_log->get_logs_count(
+        $count = (int) $this->activity_log->get_logs_count(
             array(
                 'severity'  => 'critical',
                 'date_from' => $since,
             )
         );
-        $count_high = (int) $this->activity_log->get_logs_count(
-            array(
-                'severity'  => 'high',
-                'date_from' => $since,
-            )
-        );
-        $count        = $count_critical + $count_high;
         $args['data'] = array(
             'count'          => $count,
-            'count_critical' => $count_critical,
-            'count_high'     => $count_high,
+            'count_critical' => $count,
         );
 
         if ( 0 === $count ) {
@@ -870,6 +956,13 @@ class Vigilante_SA_Category_Internal {
             'label'    => __( 'File integrity scan', 'vigilante' ),
             'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'file-integrity', 'vigilante-section-fi-last-scan' ),
         );
+
+        // With the module off no scan runs, and the result of the last one
+        // that did stays stored: until 3.0.4 it went on passing here.
+        if ( ! $this->settings->is_module_enabled( 'file_integrity' ) ) {
+            $args['detail'] = Vigilante_SA_Helpers::module_idle_detail( $this->settings, 'file_integrity' );
+            return Vigilante_SA_Check_Result::fail( $args );
+        }
 
         $last = get_option( 'vigilante_last_integrity_results' );
         if ( ! is_array( $last ) ) {

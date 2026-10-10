@@ -69,7 +69,11 @@ class Vigilante_SA_Category_WP_Exposure {
             'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'wp-hardening', 'vigilante-section-hardening-headers' ),
         );
 
-        $remove_generator = (int) $this->settings->get_option( 'wp_hardening', 'remove_wp_generator', 0 );
+        // The tag is removed by the head cleaner, which only loads with the
+        // WordPress Hardening module on: with it off, a tag that is still
+        // there is not "a plugin or a theme", it is the setting not running.
+        $remove_generator = (int) ( $this->settings->is_module_enabled( 'wp_hardening' )
+            && $this->settings->get_option( 'wp_hardening', 'remove_wp_generator', 0 ) );
         $probe            = Vigilante_SA_Helpers::probe_home();
 
         if ( null === $probe ) {
@@ -97,12 +101,16 @@ class Vigilante_SA_Category_WP_Exposure {
             'id'       => 'rest_users_enum',
             'category' => self::SLUG,
             'max'      => 3,
-            'label'    => __( 'REST /wp/v2/users public access', 'vigilante' ),
+            'label'    => __( 'REST: public list of users (/wp/v2/users)', 'vigilante' ),
             'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'rest-api', 'field-block-user-enumeration' ),
         );
 
-        // The sub-toggle is only effective when the REST hardening module itself is enabled.
-        $module_on   = (int) $this->settings->get_option( 'rest_api_security', 'enabled', 0 );
+        // The sub-toggle is only effective when the REST hardening module itself
+        // is enabled, and the switch that loads its class is the one of the
+        // Dashboard (modules.rest_api_security). Until 3.0.4 only the copy
+        // inside the section was read here, which stays on with the module off.
+        $module_on   = (int) ( $this->settings->is_module_enabled( 'rest_api_security' )
+            && $this->settings->get_option( 'rest_api_security', 'enabled', 0 ) );
         $sub_on      = (int) $this->settings->get_option( 'rest_api_security', 'block_user_enumeration', 0 );
         $setting_on  = $module_on && $sub_on;
         $args['data'] = array(
@@ -157,7 +165,12 @@ class Vigilante_SA_Category_WP_Exposure {
                 if ( $setting_on ) {
                     $args['detail'] = sprintf(
                         /* translators: %d: number of users returned by the probe */
-                        __( 'Block is fully enabled, but the probe still sees %d user records. A page cache, CDN, or higher-priority plugin filter is overriding the block — flush caches and re-scan.', 'vigilante' ),
+                        _n(
+                            'Block is fully enabled, but the probe still sees %d user record. A page cache, CDN, or higher-priority plugin filter is overriding the block: flush caches and scan again.',
+                            'Block is fully enabled, but the probe still sees %d user records. A page cache, CDN, or higher-priority plugin filter is overriding the block: flush caches and scan again.',
+                            count( $decoded ),
+                            'vigilante'
+                        ),
                         count( $decoded )
                     );
                     return Vigilante_SA_Check_Result::warn( $args );
@@ -166,7 +179,12 @@ class Vigilante_SA_Category_WP_Exposure {
                 // Nothing on at all → real exposure.
                 $args['detail'] = sprintf(
                     /* translators: %d: number of users leaked */
-                    __( 'The REST users endpoint exposes %d user records publicly.', 'vigilante' ),
+                    _n(
+                        'The REST users endpoint exposes %d user record publicly.',
+                        'The REST users endpoint exposes %d user records publicly.',
+                        count( $decoded ),
+                        'vigilante'
+                    ),
                     count( $decoded )
                 );
                 return Vigilante_SA_Check_Result::fail( $args );
@@ -402,12 +420,19 @@ class Vigilante_SA_Category_WP_Exposure {
         );
     }
 
+    /**
+     * The active theme, as information
+     *
+     * Not scored since 3.0.5. It used to be worth 5 points, the heaviest check
+     * of this category, for a theme with no update pending: nothing an
+     * attacker sees, and the same thing the theme_updates check of the
+     * internal category already scores.
+     */
     private function check_active_theme_info() {
         $theme = wp_get_theme();
         $args  = array(
             'id'       => 'active_theme_info',
             'category' => self::SLUG,
-            'max'      => 5,
             'label'    => __( 'Active theme', 'vigilante' ),
             'fix_link' => '',
         );
@@ -434,7 +459,6 @@ class Vigilante_SA_Category_WP_Exposure {
             wp_strip_all_tags( (string) $author )
         );
 
-        // Give full info points if no theme update is pending; otherwise warn.
         if ( ! function_exists( 'get_theme_updates' ) ) {
             require_once ABSPATH . 'wp-admin/includes/update.php';
         }
@@ -443,10 +467,9 @@ class Vigilante_SA_Category_WP_Exposure {
 
         if ( isset( $updates[ $slug ] ) ) {
             $args['detail'] .= ' ' . __( 'An update is available.', 'vigilante' );
-            return Vigilante_SA_Check_Result::warn( $args );
         }
 
-        return Vigilante_SA_Check_Result::pass( $args );
+        return Vigilante_SA_Check_Result::info( $args );
     }
 
     /**
@@ -462,6 +485,15 @@ class Vigilante_SA_Category_WP_Exposure {
         );
 
         $enabled = (int) $this->settings->get_option( $section, $key, 0 );
+
+        // The section is also the module that applies the setting: with the
+        // module off the class that removes the tag never loads, and until
+        // 3.0.4 this passed on the saved value alone.
+        if ( $enabled && ! $this->settings->is_module_enabled( $section ) ) {
+            $args['detail'] = Vigilante_SA_Helpers::module_off_detail( $this->settings, $section );
+            return Vigilante_SA_Check_Result::fail( $args );
+        }
+
         if ( $enabled ) {
             $args['detail'] = $pass_detail;
             return Vigilante_SA_Check_Result::pass( $args );

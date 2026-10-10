@@ -73,23 +73,101 @@ class Vigilante_SA_Helpers {
         $score   = (int) round( ( max( 0, (int) $earned ) / $maximum ) * 100 );
         $score   = max( 0, min( 100, $score ) );
 
-        // A is reserved for a perfect score — a single missing point drops to B.
-        if ( 100 === $score ) {
-            $grade = 'A';
-        } elseif ( $score >= 70 ) {
-            $grade = 'B';
-        } elseif ( $score >= 50 ) {
-            $grade = 'C';
-        } elseif ( $score >= 30 ) {
-            $grade = 'D';
-        } else {
-            $grade = 'E';
-        }
-
         return array(
             'score' => $score,
-            'grade' => $grade,
+            'grade' => self::grade_for_score( $score ),
         );
+    }
+
+    /**
+     * The letter a 0-100 score earns
+     *
+     * One scale for every letter the plugin shows: the Security Check, each of
+     * its categories and the Test Headers button. Until 3.0.4 there were two,
+     * so the same letter meant two things on the same screen: the Dashboard
+     * gave its Configuration Score an A from 90 and the Security Check only at
+     * 100, and a B ran from 70 to 99, which put a site with thirteen failing
+     * checks one letter away from a perfect one. The configuration level of
+     * the Dashboard no longer carries a letter: it is a bar
+     * (Vigilante_Admin::render_configuration_card()).
+     *
+     * A is a perfect score and nothing else. The admin script mirrors these
+     * thresholds in VigilanteAnalyzer.qualityTag (assets/js/admin.js).
+     *
+     * @since 3.0.5
+     *
+     * @param int $score Score from 0 to 100.
+     * @return string A, B, C, D or E.
+     */
+    public static function grade_for_score( $score ) {
+        $score = max( 0, min( 100, (int) $score ) );
+
+        if ( 100 === $score ) {
+            return 'A';
+        }
+        if ( $score >= 85 ) {
+            return 'B';
+        }
+        if ( $score >= 70 ) {
+            return 'C';
+        }
+        if ( $score >= 50 ) {
+            return 'D';
+        }
+        return 'E';
+    }
+
+    /**
+     * What a check says when the setting is saved and the module that applies it is off
+     *
+     * A setting inside a module does nothing while the module is switched off:
+     * its class is never loaded. A check that reads the setting alone reports a
+     * protection that is not running.
+     *
+     * @since 3.0.5
+     *
+     * @param Vigilante_Settings $settings Settings.
+     * @param string             $module   Module key, for example login_security.
+     * @return string
+     */
+    public static function module_off_detail( Vigilante_Settings $settings, $module ) {
+        return sprintf(
+            /* translators: %s: name of a Vigilant module, for example Login Security */
+            __( 'The %s module is switched off, so what is set there is saved but not applied. Switch the module on from the Dashboard.', 'vigilante' ),
+            self::module_label( $settings, $module )
+        );
+    }
+
+    /**
+     * What a check says when the module it reads from is off
+     *
+     * @since 3.0.5
+     *
+     * @param Vigilante_Settings $settings Settings.
+     * @param string             $module   Module key, for example file_integrity.
+     * @return string
+     */
+    public static function module_idle_detail( Vigilante_Settings $settings, $module ) {
+        return sprintf(
+            /* translators: %s: name of a Vigilant module, for example File Integrity */
+            __( 'The %s module is switched off, so there is nothing recent for this check to read. Switch the module on from the Dashboard.', 'vigilante' ),
+            self::module_label( $settings, $module )
+        );
+    }
+
+    /**
+     * Name of a module as the Dashboard shows it
+     *
+     * @since 3.0.5
+     *
+     * @param Vigilante_Settings $settings Settings.
+     * @param string             $module   Module key.
+     * @return string
+     */
+    private static function module_label( Vigilante_Settings $settings, $module ) {
+        $labels = $settings->get_module_labels();
+
+        return isset( $labels[ $module ] ) ? (string) $labels[ $module ] : (string) $module;
     }
 
     /**
@@ -334,12 +412,47 @@ class Vigilante_SA_Helpers {
      * @return bool True if URL returns 2xx.
      */
     public static function public_url_returns_ok( $relative ) {
+        return 'reachable' === self::public_url_state( $relative );
+    }
+
+    /**
+     * Whether a public URL can be fetched, cannot, or could not be asked
+     *
+     * Three answers, because a request that fails is not a file that is
+     * protected: until 3.0.4 a timeout read as "not reachable" and the check
+     * passed without having measured anything.
+     *
+     * @since 3.0.5
+     *
+     * @param string $relative Path relative to site root.
+     * @return string reachable (2xx), blocked (any other answer) or unknown (no answer).
+     */
+    public static function public_url_state( $relative ) {
         $url      = trailingslashit( home_url() ) . ltrim( $relative, '/' );
         $response = self::get( $url, array( 'redirection' => 0 ) );
+
         if ( is_wp_error( $response ) ) {
-            return false;
+            return 'unknown';
         }
+
         $code = (int) wp_remote_retrieve_response_code( $response );
-        return $code >= 200 && $code < 300;
+
+        return ( $code >= 200 && $code < 300 ) ? 'reachable' : 'blocked';
+    }
+
+    /**
+     * What a check says when the request it depends on got no answer
+     *
+     * @since 3.0.5
+     *
+     * @param string $what What was asked for, for example /.env.
+     * @return string
+     */
+    public static function unreachable_detail( $what ) {
+        return sprintf(
+            /* translators: %s: a path of the site, for example /.env */
+            __( 'The request for %s got no answer from this server, so whether it is reachable from the web could not be checked. Not scored.', 'vigilante' ),
+            $what
+        );
     }
 }

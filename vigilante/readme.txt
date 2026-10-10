@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.0.4
+Stable tag: 3.0.5
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -182,7 +182,7 @@ Track everything happening on your site:
 * Immediate alerts the moment a serious event is logged, by minimum severity (a new administrator, a closed plugin or a privilege escalation are all logged as Critical)
 * Threshold alerts when a category spikes - firewall blocks, login failures, user, plugin, file integrity, security, system and content events - over a 30-minute, 1, 6 or 24 hour window, counting only warning and critical events so routine activity never trips them
 * A single anti-repeat cooldown keeps a storm of events down to one notice instead of flooding your inbox
-* Active alerts surface in Settings & Tools, the Dashboard, the Configuration Score and the Security Check
+* Active alerts surface in Settings & Tools, the Dashboard, the configuration level and the Security Check
 * "Send test email" button to confirm delivery
 
 == Security Check ==
@@ -350,7 +350,13 @@ No. All checks run on your server. The only external traffic is three DNS lookup
 
 = What does the Security Check score measure? =
 
-It adds the points of every check that passes. Some checks test the live site: HTTPS, the headers the browser receives, files that should not be reachable. Others read a Vigilant setting, such as the custom login URL, the login attempt limit or two-factor, and tell you whether it is on, not whether a CDN or your host changes the result. The Configuration Score on the Dashboard only looks at settings, so the two numbers can differ.
+It adds the points of every check that passes, out of the checks it could run.
+
+* Some checks test the live site: HTTPS, the headers the browser receives, files that should not be reachable.
+* Others read a Vigilant setting, such as the custom login URL, the login attempt limit or two-factor. They count while the module that applies the setting is switched on, and tell you whether it is on, not whether a CDN or your host changes the result.
+* A check that could not be run, because the site did not answer in time for example, is left out of the score and counted as not measured.
+
+The letter follows one scale: A is 100, B from 85, C from 70, D from 50 and E below. The Dashboard also shows Vigilant configuration, a bar with no letter: it only counts what is switched on, so the two figures can differ.
 
 = How often should I run Security Check? =
 
@@ -459,6 +465,15 @@ Vigilant verifies its own files against the checksums WordPress.org publishes fo
 
 A list of the SHA-256 checksum of every file in the plugin, in the standard format of the sha256sum tool, generated as the last step of each release. It is what lets Vigilant, and you, notice a changed file even when WordPress.org cannot be reached. readme.txt and changelog.txt are not in it, because WordPress.org allows updating them without a new version.
 
+= Vigilant says that its scheduled tasks were missing. What should I do? =
+
+Usually nothing. Vigilant has already scheduled them again, and the notice is not about changed files.
+
+* WordPress itself drops a scheduled task when it cannot save its next run, for example if the database does not answer at that moment.
+* A cleanup or optimization plugin can remove scheduled events: exclude the ones whose name starts with vigilante_.
+* The notice goes away by itself after a week with no task missing.
+* If it turns critical, the same task was missing three times in one week or four in a month: something is removing it. Look for the plugin or the hosting job that does it, and if you find neither, review recently installed plugins and the administrator accounts.
+
 = Does self-protection detect vulnerabilities in Vigilant? =
 
 No. It detects that Vigilant's files were changed, deleted or added to, not bugs in its code. Vulnerabilities are fixed in new releases, so keep Vigilant updated, and report any you find as SECURITY.md explains.
@@ -528,6 +543,32 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 10. Security Check - On-demand audit widget with score, per-category breakdown, and fix links
 
 == Changelog ==
+
+= 3.0.5 =
+The Dashboard shows one grade, the one of Security Check, on a stricter scale. It counts a setting only while its module is on and leaves out what it could not measure, so some scores go down. The notice about scheduled tasks no longer says that files were modified.
+
+* Improved: the Dashboard shows one grade. Security Check, which measures the site, keeps its letter and comes first. What was the Configuration Score is now Vigilant configuration: a bar with a percentage and no letter, next to the recommendations and the modules it counts. Two letters side by side read as two grades of the same site that did not agree.
+* Improved: Security Check and each of its categories use a stricter scale of letters: A is a perfect score, B starts at 85, C at 70, D at 50 and E is anything below. Until now a B ran from 70 to 99, so a site with many failing checks sat one letter away from a perfect one. The numbers do not change with this, but many sites will see a lower letter.
+* Improved: Security Check leaves a check it could not run out of the score, and says how many were not measured. Until now such a check counted as a zero, so a request to your own site that timed out lowered the score as if the check had failed, and the result changed from one scan to the next. A check that is only informational, such as a header switched off on purpose, no longer keeps the score from reaching 100.
+* Improved: the percentage of Vigilant configuration is worked out over the same total on every site, and a module that is switched off loses its points and the points of its settings. Until now those settings left the total too, so a site with most modules off kept a middling figure, and switching Security Audit off with no alert configured raised it. Sites with modules switched off will see a lower percentage.
+* Improved: the Active theme row of Security Check is informational and no longer gives 5 points. Whether the theme has an update pending is already scored by another check. This can move the score by a point or two.
+* Improved: Security Check says when a security header reaches the browser from a Vigilant block in the .htaccess of a folder above the site, which is what happens to a WordPress installed in a subfolder of another one. Until now only the Content-Security-Policy check said so.
+* Improved: when Vigilant finds one of its scheduled tasks missing and schedules it again, the second time in 30 days is now a warning, with no email and no effect on the scores, and it goes away by itself after a week with no task missing. It only becomes critical, with one email a week at most, from the third time within one week or the fourth within 30 days. Until now the second time was already critical, both scores dropped to E, and the notice stayed for 30 days whatever was done. WordPress itself drops a scheduled task when it cannot save its next run, so two in a month does not mean that something is removing them.
+* Improved: the hourly task of Vigilant is no longer watched. It does nothing, and being hourly it was the one most often lost.
+* Improved: Vigilant no longer waits for an administrator to open the dashboard to schedule again a task that went missing: it also checks from the scheduled tasks of WordPress itself, which run twice a day. Until now, when the daily maintenance task was removed, it stayed missing and nothing watched the others until an administrator came by.
+* Improved: the steps of the notice about scheduled tasks say first that Vigilant has scheduled the tasks again, then what to look for, and leave a possible compromise for the case that keeps repeating.
+* Fix: Security Check passed checks on a setting that was saved while the module that applies it was switched off, so the protection was not running: the custom login URL, the login attempt limit, two-factor, XML-RPC, the RSD, Windows Live Writer and shortlink tags, and the checks that read Security Audit and File Integrity. With the Security Headers module off, the Content-Security-Policy and HSTS checks said that something was removing the header and gave half the points. They now fail and name the module that is off. Sites with modules switched off will see a lower score, and the weekly scan, where its email is switched on, will report the checks that start failing.
+* Fix: the Test Headers button graded the settings of its tab without asking the site for anything, so it could show a B where no header reached the browser. It now measures what arrives, with the checks and the scale of Security Check. And Security Check says when a header is switched on in Vigilant but does not arrive, with the likely cause, and gives it no points.
+* Fix: three texts of Security Check that could be read wrong. The check of /wp-admin/ said that visitors were sent to the login page whatever the redirect was. The two checks of users over the REST API were named almost the same: one is the list of users, the other only tells a visitor who they are, and WordPress answers that one with a 401 on any site, so it is now informational and no longer gives 2 points. And a single user was counted as 1 user records.
+* Fix: Security Check counted an administrator as protected by two-factor when the role was not among the enforced roles or the account was among the excluded users.
+* Fix: Security Check passed the checks for exposed files (.env, .git/config, debug.log, copies of wp-config.php, developer scripts and wp-cron.php) when the request it sends to the site got no answer. They are now shown as not measured.
+* Fix: the file permissions check of Security Check reads wp-config.php when it is one folder above WordPress, and says so when it cannot find it instead of passing.
+* Fix: on the Dashboard, switching a module saved the change twice and showed for a moment a score worked out differently from the one the page shows once reloaded.
+* Fix: in Security Check, the bar of each category kept its color after a scan until the page was reloaded.
+* Fix: when the critical notice was about scheduled tasks, the email, the File Integrity box, the admin notice, the Dashboard recommendation and the note on the scores said that the files of Vigilant had been modified, with every file intact. They now say that scheduled tasks keep being removed, count tasks instead of files, and no longer ask for a repair or for a new scan, which cleared nothing.
+* Fix: when the hooks of Vigilant self-protection had been removed, the email, the File Integrity box, the admin notice, the Dashboard recommendation and the note on the scores said that the files of Vigilant had been modified, and with self-protection switched off by code so did the email and the note on the scores. They now say what was found. With self-protection switched off by code, the Dashboard also asked to turn it on, which no setting does: it now says that something on the site switched it off and where to look.
+* Fix: when WordPress updated Vigilant in the background and the daily maintenance of Vigilant fell due in that same run, Vigilant took the update for a version change made outside the updater, wrote it down as such and could send a warning email. It now waits for the check it runs at the end of every update, and so do the other checks while WordPress is running its background updates in another process. An update is handled by the version that is being replaced, so this takes effect from the update that follows this one.
+* Fix: File Integrity reported as suspicious a call to the old PHP function that builds a function from a string when the call was only inside a comment, where plugins leave it next to the code that replaced it. Comments are no longer searched for it, and a live call is reported as before.
 
 = 3.0.4 =
 Fixes the expired password notice, which was missing when the password expired during an open session, lands the user at the top of the profile where the notice is, fixes a redirect loop for WooCommerce customers, and limits an account with an expired password to its own profile form.
@@ -602,27 +643,12 @@ Fixes the role lists of two factor, password rules and password expiry, which ca
 * Fix: those four settings also fall back to their shipped value when the stored list is empty, wherever the empty list came from. None of them can be emptied from any screen, so an empty one is a leftover, and it used to mean block every method, allow every registration through while the switch says otherwise, or cut the public REST API.
 * Fix: adopting a manifest that WordPress.org confirms is logged for what it is, instead of as a version change that did not happen.
 
-= 3.0.0 =
-Vigilant now verifies its own files against WordPress.org, a shipped SHA-256 manifest and a database fingerprint, checks itself after every update and restores its own scheduled tasks. The Security Check score may change slightly: a new check was added.
-
-* New: self-protection. Vigilant verifies its own files against three references: the SHA-256 checksums WordPress.org publishes for the installed version, a MANIFEST.sha256 file shipped inside the plugin, and a fingerprint of that manifest kept in the database. The check runs first in every File Integrity scan, outside the scan time budget and without the excluded paths and extensions of the scan, and once a day when nothing else checked in the last 24 hours. It reports modified, missing, unreadable and added files, folders that cannot be listed, symbolic links, files the manifest lists but WordPress.org does not distribute, and a replaced, deleted or invalid manifest. A modified PHP or JavaScript file, or a data file the plugin loads, is critical, and so is an added file a web server can run, whatever extension of its name says so; a modified stylesheet or image is a warning, because optimisation plugins and hosts often rewrite them, and text files whose line endings the host rewrote are not reported, nor is the manifest when it was rewritten that way. File Integrity shows the result as the first block of the scan results, with what each finding means and how to fix it. There is no setting to switch it off: a security plugin that can be told not to check itself has a switch whose only real user is whoever just changed its files.
-* New: Vigilant checks itself at the end of every update WordPress makes to it, including an update made by uploading a zip file, once a failed update has had its previous copy restored, and notices a version change made outside the updater, such as a manual or FTP upload, on the next admin page opened by an administrator or on the daily maintenance task. A new version that WordPress.org cannot confirm raises a warning instead of being trusted, the fingerprint is not taken again when the plugin is reactivated, and a downgrade is reported by email wherever it is detected.
-* New: self-protection has its own alert, and no setting switches it off. A critical finding about Vigilant own files always sends an email, wherever it is detected, deduplicated by set of findings and sent once on a network, from the site that owns the shared files and always to the network administration email as well. It no longer travels in the File Integrity scan email, which follows a notification setting: switching off the report about changed files was also switching off the alarm about the plugin itself. Warnings stay on screen, where they do not train anyone to ignore an email, except a downgrade and a version change that cannot be verified against WordPress.org, which are always sent. There are no reminders either: each distinct set of findings is reported once.
-* New: switching self-protection off cannot be done quietly. There is no setting for it, so the only way is the vigilante_self_integrity_enabled filter, and Vigilant reports that as critical on every admin screen, names the files that hook it and writes it to the Security Audit. Code that removes the hooks of the check is detected at the end of each admin page and reported the same way, with the plugins that were loaded in that request. And a result older than three days stops counting as verified, whatever stopped the check, so an old green is never shown as if it were current.
-* New: scheduled task watchdog. If something removes the daily maintenance, the hourly checks, the weekly Security Check, the closed plugins check or the scheduled integrity scan, Vigilant schedules it again and logs it, and the same task removed again within 30 days is reported as critical by email. Tasks you switched off are left alone. On sites activated before one of those tasks existed, the first pass schedules it once, without reporting it. On a multisite network it watches the main site.
-* New: Security Check includes a Vigilant self-protection check in the Internal category, the heaviest single check of the analyzer, which now scores out of 40 instead of 30. While Vigilant own files are reported as changed, both scores of the plugin are held at the bottom of the scale and say why: every other result is produced by that same code. The stored report is cleared on update, so the score may move after the next check.
-* New: self-protection has its own block in File Integrity, the first one of the results, coloured by severity, with the files it found, what each finding means and what to do about it. The same wording appears in the Security Check detail, in the details of each Security Audit entry and in the alert email, so the five never say different things. A change to Vigilant own files is also counted in red on the Vigilant menu, summarised at the top of its dashboard and shown on every admin screen until it is fixed; a warning is shown on the Vigilant screens. Findings about Vigilant own files are no longer listed with the rest of the scan, and they cannot be ignored.
-* New: one click repair. When Vigilant finds its own files changed, it can download a clean copy from WordPress.org and replace only the plugin files, keeping your settings, your tables and your log, after a screen that says exactly what it is going to do. It installs the version WordPress.org distributes, never the version the files claim, and never an older one than the version this site had verified. On a network it takes a super administrator, and where WordPress cannot change plugin files the screen gives the steps by hand instead.
-* New: SECURITY.md, with how to report a vulnerability, what self-protection covers and what it does not, and how to verify an installation yourself, and bin/verify-manifest.php, a command line tool that checks the plugin folder against the manifest and the manifest against WordPress.org.
-* Improved: File Integrity no longer scans Vigilant as a regular plugin, so its files are not reported twice, and updating removes Vigilant own files from the ignore list, where they would silence the new check.
-* Improved: on a multisite network a finding about Vigilant own files cannot be ignored on any site, by anyone, clearing the scan results without network rights keeps it, and its alert also reaches the network administration email.
-
 For older changelog entries, please check the [changelog.txt](https://plugins.svn.wordpress.org/vigilante/trunk/changelog.txt) file
 
 == Upgrade Notice ==
 
-= 3.0.4 =
-Fixes the expired password notice, which was missing when the password expired during an open session, lands the user at the top of the profile where the notice is, fixes a redirect loop for WooCommerce customers, and limits an account with an expired password to its own profile form.
+= 3.0.5 =
+The Dashboard shows one grade, the one of Security Check, on a stricter scale. It counts a setting only while its module is on and leaves out what it could not measure, so some scores go down. The notice about scheduled tasks no longer says that files were modified.
 
 == Support ==
 

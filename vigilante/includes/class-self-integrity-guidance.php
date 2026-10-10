@@ -68,7 +68,9 @@ class Vigilante_Self_Integrity_Guidance {
             case 'no_anchors':
                 return 'no_anchors';
             case 'cron_cleared_repeatedly':
-                return 'cron_repeated';
+                // Critical only from the third time in a week or the fourth in
+                // 30 days (see Vigilante_Self_Integrity::watchdog_severity()).
+                return ( 'critical' === $severity ) ? 'cron_repeated' : 'cron_repeated_soft';
             case 'self_disabled':
                 return 'disabled';
             case 'self_hooks_removed':
@@ -358,12 +360,30 @@ class Vigilante_Self_Integrity_Guidance {
                     __( 'Then repair Vigilant to restore the manifest.', 'vigilante' ),
                 );
                 break;
+            /*
+             * Two cases since 3.0.5, and neither says that anything is switched
+             * off: by the time somebody reads this the watchdog has scheduled
+             * the tasks again. The first cause named is the one that needs no
+             * culprit, WordPress losing the task; "a possible compromise" is
+             * the last step, and only of the case that earns it.
+             */
+            case 'cron_repeated_soft':
+                $title   = __( 'Scheduled tasks were missing more than once', 'vigilante' );
+                $meaning = __( 'Vigilant found some of its scheduled tasks missing more than once this month and scheduled them again each time. This is about scheduled tasks, not about changed files. WordPress drops a scheduled task by itself when it cannot save its next run, for example when the database does not answer at that moment, and a cleanup plugin can remove them too.', 'vigilante' );
+                $steps   = array(
+                    __( 'There is nothing to repair: Vigilant schedules a missing task again whenever it finds one. A plugin such as WP Crontrol lists the scheduled events of your site, and the ones of Vigilant start with vigilante_.', 'vigilante' ),
+                    __( 'If you use a cleanup or optimization plugin that removes scheduled events, exclude the ones whose name starts with vigilante_.', 'vigilante' ),
+                    __( 'This notice goes away by itself after a week with no task missing.', 'vigilante' ),
+                );
+                $repair  = false;
+                break;
             case 'cron_repeated':
                 $title   = __( 'Scheduled tasks keep disappearing', 'vigilante' );
-                $meaning = __( 'Vigilant scheduled tasks keep being removed and Vigilant keeps scheduling them again. While they are gone there are no scheduled scans, no daily check and no alerts.', 'vigilante' );
+                $meaning = __( 'Vigilant scheduled tasks keep going missing, and Vigilant scheduled them again each time. This is about scheduled tasks, not about changed files. That often is not WordPress losing a task: something on this site keeps removing them, and between one removal and the next check the scheduled scans and the daily check do not run.', 'vigilante' );
                 $steps   = array(
-                    __( 'Check whether a cleanup or optimization plugin removes scheduled events, and exclude the ones whose name starts with vigilante_. A plugin such as WP Crontrol lists them.', 'vigilante' ),
-                    __( 'If you cannot find the cause, treat it as a possible compromise: review recently installed plugins and the administrator accounts.', 'vigilante' ),
+                    __( 'Look for a cleanup or optimization plugin, or a scheduled job of your hosting, that removes scheduled events, and exclude the ones whose name starts with vigilante_. A plugin such as WP Crontrol lists them.', 'vigilante' ),
+                    __( 'If you find neither, treat it as a possible compromise: review recently installed plugins and the administrator accounts.', 'vigilante' ),
+                    __( 'This notice goes away by itself after a week with no task missing.', 'vigilante' ),
                 );
                 $repair  = false;
                 break;
@@ -433,7 +453,7 @@ class Vigilante_Self_Integrity_Guidance {
                 break;
             case 'hooks_removed':
                 $title   = __( 'Something removed the self-protection hooks', 'vigilante' );
-                $meaning = __( 'Code on this site unhooked the checks that run after updates and on each admin page, so Vigilant would keep showing its last result as if it were current. WordPress says nothing when a callback is removed, so the file that did it cannot be named; the plugins loaded in that request are in the entry of the Security Audit.', 'vigilante' );
+                $meaning = __( 'Code on this site unhooked checks that Vigilant runs on its own files and on its scheduled tasks, so Vigilant would keep showing its last result as if it were current. WordPress says nothing when a callback is removed, so the file that did it cannot be named; the plugins loaded in that request are in the entry of the Security Audit.', 'vigilante' );
                 $steps   = array(
                     __( 'Look at the Security Audit entry for the list of plugins loaded when it happened, and deactivate them one by one until it stops.', 'vigilante' ),
                     __( 'If none of them explains it, treat it as a compromise: change your hosting, FTP and administrator passwords and ask your host to check the server.', 'vigilante' ),

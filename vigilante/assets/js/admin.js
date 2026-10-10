@@ -31,7 +31,6 @@
             $(document).on('submit', '.vigilante-settings-form', this.handleFormSubmit.bind(this));
 
             // Module toggles in dashboard
-            $(document).on('change', '.vigilante-module-item input[type="checkbox"]', this.handleModuleToggle.bind(this));
 
             // Apply preset
             $(document).on('click', '.vigilante-preset-btn', this.handleApplyPreset.bind(this));
@@ -163,6 +162,14 @@
 
         /**
          * Initialize module toggles
+         *
+         * The only handler of a module switch. It saves and reloads, so the
+         * configuration level, the recommendations and the Security Check are
+         * drawn again by the server, which is the one place where they are
+         * worked out. There used to be a second handler on the same event: it
+         * saved the same change again and rewrote both score circles with a
+         * figure of its own (modules on, out of eight) for the 0.8 seconds
+         * before the reload brought the real one back.
          */
         initModuleToggles: function() {
             $(document).on('change', '.vigilante-module-item input[type="checkbox"]', function() {
@@ -175,6 +182,16 @@
                 // Save module state
                 Vigilante_Admin.saveModuleState(module, enabled);
             });
+        },
+
+        /**
+         * Put a module switch back where it was when its save did not go through
+         */
+        revertModuleToggle: function($item, module, enabled) {
+            $item.removeClass('vigilante-saving')
+                 .toggleClass('enabled', !enabled)
+                 .toggleClass('disabled', enabled);
+            $item.find('input[data-module="' + module + '"]').prop('checked', !enabled);
         },
 
         /**
@@ -204,71 +221,15 @@
                             location.reload();
                         }, 800);
                     } else {
-                        $item.removeClass('vigilante-saving');
+                        Vigilante_Admin.revertModuleToggle($item, module, enabled);
                         Vigilante_Admin.showNotice('error', response.data || vigilanteAdmin.strings.error);
                     }
                 },
                 error: function() {
-                    $item.removeClass('vigilante-saving');
+                    Vigilante_Admin.revertModuleToggle($item, module, enabled);
                     Vigilante_Admin.showNotice('error', vigilanteAdmin.strings.error);
                 }
             });
-        },
-
-        /**
-         * Update security score after module toggle
-         */
-        updateSecurityScore: function() {
-            var total = $('.vigilante-module-item').length;
-            var enabled = $('.vigilante-module-item.enabled').length;
-            var score = total > 0 ? Math.round((enabled / total) * 100) : 0;
-            
-            // Grade thresholds: A (90+), B (70-89), C (50-69), D (30-49), E (0-29)
-            var grade;
-            if (score >= 90) {
-                grade = 'A';
-            } else if (score >= 70) {
-                grade = 'B';
-            } else if (score >= 50) {
-                grade = 'C';
-            } else if (score >= 30) {
-                grade = 'D';
-            } else {
-                grade = 'E';
-            }
-            
-            // Update score display
-            $('.vigilante-score-text').text(score + '%');
-            $('.vigilante-grade').text(grade);
-            $('.vigilante-score-circle').removeClass('vigilante-grade-a vigilante-grade-b vigilante-grade-c vigilante-grade-d vigilante-grade-e')
-                                  .addClass('vigilante-grade-' + grade.toLowerCase());
-            
-            // Update modules count text - use fixed string to prevent text accumulation
-            var $countText = $('.vigilante-security-score p');
-            if ($countText.length) {
-                var modulesText = (vigilanteAdmin.strings.modulesEnabled || '%1$d / %2$d modules enabled').replace('%1$d', enabled).replace('%2$d', total);
-                $countText.text(modulesText);
-            }
-        },
-
-        /**
-         * Update configuration status badge
-         */
-        updateConfigBadge: function(preset) {
-            var $badge = $('.vigilante-config-status .vigilante-preset-badge');
-            if ($badge.length) {
-                $badge.removeClass('vigilante-preset-standard vigilante-preset-maximum vigilante-preset-custom vigilante-preset-under-attack');
-                
-                if (vigilanteAdmin.underAttack && vigilanteAdmin.underAttack.active) {
-                    $badge.addClass('vigilante-preset-under-attack').text(vigilanteAdmin.strings.underAttackLabel || 'Under Attack');
-                } else if (preset === 'standard') {
-                    $badge.addClass('vigilante-preset-standard').text(vigilanteAdmin.strings.standardLabel || 'Standard');
-                } else if (preset === 'maximum') {
-                    $badge.addClass('vigilante-preset-maximum').text(vigilanteAdmin.strings.maximumLabel || 'Maximum Security');
-                } else {
-                    $badge.addClass('vigilante-preset-custom').text(vigilanteAdmin.strings.customConfig || 'Custom Configuration');
-                }
-            }
         },
 
         /**
@@ -315,64 +276,6 @@
                     setTimeout(function() {
                         $btn.text($btn.data('original-text') || vigilanteAdmin.strings.saveSettings || 'Save Settings');
                     }, 2000);
-                }
-            });
-        },
-
-        /**
-         * Handle module toggle in dashboard
-         */
-        handleModuleToggle: function(e) {
-            var $checkbox = $(e.currentTarget);
-            var module = $checkbox.data('module');
-            var enabled = $checkbox.is(':checked');
-            var $item = $checkbox.closest('.vigilante-module-item');
-
-            // Visual feedback
-            $item.addClass('vigilante-loading');
-
-            // Build data for modules section
-            var formData = 'modules[' + module + ']=' + (enabled ? '1' : '0');
-
-            $.ajax({
-                url: vigilanteAdmin.ajaxUrl,
-                type: 'POST',
-                data: {
-                    action: 'vigilante_save_settings',
-                    nonce: vigilanteAdmin.nonce,
-                    section: 'modules',
-                    data: formData
-                },
-                success: function(response) {
-                    if (response.success) {
-                        // Update visual state
-                        if (enabled) {
-                            $item.removeClass('disabled').addClass('enabled');
-                        } else {
-                            $item.removeClass('enabled').addClass('disabled');
-                        }
-                        Vigilante_Admin.updateSecurityScore();
-                        Vigilante_Admin.showNotice('success', vigilanteAdmin.strings.saved);
-                        
-                        // Update config badge to Custom (since settings were manually changed)
-                        Vigilante_Admin.updateConfigBadge('custom');
-                        
-                        // Clear active preset indicator
-                        $('.vigilante-preset-card').removeClass('vigilante-preset-active');
-                        $('.vigilante-active-indicator').remove();
-                    } else {
-                        // Revert checkbox on error
-                        $checkbox.prop('checked', !enabled);
-                        Vigilante_Admin.showNotice('error', response.data || vigilanteAdmin.strings.error);
-                    }
-                },
-                error: function() {
-                    // Revert checkbox on error
-                    $checkbox.prop('checked', !enabled);
-                    Vigilante_Admin.showNotice('error', vigilanteAdmin.strings.error);
-                },
-                complete: function() {
-                    $item.removeClass('vigilante-loading');
                 }
             });
         },
@@ -1824,34 +1727,44 @@
          * Display header test results
          */
         displayHeaderResults: function(results, $container) {
-            var gradeClass = 'vigilante-grade-' + results.grade.toLowerCase();
+            // Every text is escaped: the lists carry the value of headers as
+            // the site answered them (Server, the CSP, X-Frame-Options), and
+            // that is whatever the server, a CDN or another plugin sends.
+            var esc = Vigilante_Admin.escapeHtml;
+            var strings = vigilanteAdmin.strings;
+            var grade = String(results.grade || '');
+            var gradeClass = 'vigilante-grade-' + esc(grade.toLowerCase());
             var html = '<div class="vigilante-security-score" style="text-align: center; padding: 20px;">';
             html += '<div class="vigilante-score-circle ' + gradeClass + '">';
-            html += '<span class="vigilante-grade">' + results.grade + '</span>';
+            html += '<span class="vigilante-grade">' + esc(grade) + '</span>';
             html += '</div>';
-            html += '<p style="text-align: center;"><strong>' + vigilanteAdmin.strings.score + ':</strong> ' + Math.round(results.score) + '%</p>';
+            html += '<p style="text-align: center;"><strong>' + esc(strings.score) + ':</strong> ' + Math.round(results.score) + '%</p>';
+            html += '<p class="description" style="text-align: center;">' + esc(strings.headersMeasured) + '</p>';
             html += '</div>';
 
-            if (results.headers.length > 0) {
-                html += '<p><strong>' + vigilanteAdmin.strings.enabledHeaders + ':</strong></p><ul>';
-                results.headers.forEach(function(header) {
-                    html += '<li class="enabled">&#10003; ' + header + '</li>';
+            // The lists are passed, failing and notes. The server also sends
+            // headers, missing and warnings, empty: those are the names this
+            // function read until 3.0.4, when it printed them as they came.
+            if (results.passed && results.passed.length > 0) {
+                html += '<p><strong>' + esc(strings.enabledHeaders) + ':</strong></p><ul>';
+                results.passed.forEach(function(header) {
+                    html += '<li class="enabled">&#10003; ' + esc(header) + '</li>';
                 });
                 html += '</ul>';
             }
 
-            if (results.missing.length > 0) {
-                html += '<p><strong>' + vigilanteAdmin.strings.missingHeaders + ':</strong></p><ul>';
-                results.missing.forEach(function(header) {
-                    html += '<li class="missing">&#10007; ' + header + '</li>';
+            if (results.failing && results.failing.length > 0) {
+                html += '<p><strong>' + esc(strings.missingHeaders) + ':</strong></p><ul>';
+                results.failing.forEach(function(header) {
+                    html += '<li class="missing">&#10007; ' + esc(header) + '</li>';
                 });
                 html += '</ul>';
             }
 
-            if (results.warnings && results.warnings.length > 0) {
-                html += '<p><strong>' + vigilanteAdmin.strings.warnings + ':</strong></p><ul>';
-                results.warnings.forEach(function(warning) {
-                    html += '<li class="warning">&#9888; ' + warning + '</li>';
+            if (results.notes && results.notes.length > 0) {
+                html += '<p><strong>' + esc(strings.warnings) + ':</strong></p><ul>';
+                results.notes.forEach(function(warning) {
+                    html += '<li class="warning">&#9888; ' + esc(warning) + '</li>';
                 });
                 html += '</ul>';
             }
@@ -3793,16 +3706,16 @@
 
         /**
          * Map a 0-100 score percentage to a quality tag {label, slug}, mirroring
-         * Vigilante_Admin::analyzer_quality_tag() in PHP.
+         * Vigilante_SA_Helpers::grade_for_score() in PHP: A only at 100, B from
+         * 85, C from 70, D from 50, E below. Change one, change the other.
          */
         qualityTag: function(pct) {
             pct = Math.max(0, Math.min(100, parseInt(pct, 10) || 0));
             var s = vigilanteAdmin.strings || {};
-            // "Excellent" is reserved for a perfect score — a single missing point drops to Good.
             if (pct === 100) { return { label: s.analyzerQualityExcellent || 'Excellent', slug: 'a' }; }
-            if (pct >= 70)   { return { label: s.analyzerQualityGood      || 'Good',      slug: 'b' }; }
-            if (pct >= 50)   { return { label: s.analyzerQualityFair      || 'Fair',      slug: 'c' }; }
-            if (pct >= 30)   { return { label: s.analyzerQualityPoor      || 'Poor',      slug: 'd' }; }
+            if (pct >= 85)   { return { label: s.analyzerQualityGood      || 'Good',      slug: 'b' }; }
+            if (pct >= 70)   { return { label: s.analyzerQualityFair      || 'Fair',      slug: 'c' }; }
+            if (pct >= 50)   { return { label: s.analyzerQualityPoor      || 'Poor',      slug: 'd' }; }
             return { label: s.analyzerQualityCritical || 'Critical', slug: 'e' };
         },
 
@@ -3811,7 +3724,7 @@
          */
         setQualityClass: function($el, baseClass, slug) {
             $el.removeClass(function(i, cls) {
-                return (cls.match(new RegExp('(^|\\s)' + baseClass + '-[abcde](?=\\s|$)', 'g')) || []).join(' ');
+                return (cls.match(new RegExp('(^|\\s)' + baseClass + '-(?:[abcde]|info)(?=\\s|$)', 'g')) || []).join(' ');
             });
             $el.addClass(baseClass + '-' + slug);
         },
@@ -3831,6 +3744,18 @@
                 $root.find('[data-role="pass"]').text(report.counts.pass || 0);
                 $root.find('[data-role="warn"]').text(report.counts.warn || 0);
                 $root.find('[data-role="fail"]').text(report.counts.fail || 0);
+
+                // Left out of the score, so it is said: shown only when there is any.
+                var skipped = parseInt(report.counts.skip, 10) || 0;
+                $root.find('[data-role="skip"]').text(skipped);
+                $root.find('[data-role="skip-wrap"]').prop('hidden', skipped < 1);
+            }
+
+            // The note that says the score comes from an earlier scan, capped
+            // by what self-protection found then, goes once a new scan is not
+            // capped: it asks for a new scan, and it stayed after running it.
+            if (report.categories && report.capped_by !== 'self_integrity') {
+                $root.find('.vigilante-analyzer-capped[data-why="stored"]').remove();
             }
 
             // Main score circle + quality tag.
@@ -3894,8 +3819,22 @@
                         var max    = parseInt(cat.max, 10) || 0;
                         var pct    = max > 0 ? Math.round((earned / max) * 100) : 0;
                         var cq     = self.qualityTag(pct);
+                        var ran    = Array.isArray(cat.checks) && cat.checks.length > 0;
+
+                        // Checks ran and none of them could be scored: not a zero.
+                        if (ran && max === 0) {
+                            cq = {
+                                label: (vigilanteAdmin.strings && vigilanteAdmin.strings.analyzerNotMeasured) || 'Not measured',
+                                slug: 'info'
+                            };
+                        }
 
                         $cat.find('[data-role="earned"]').text(earned);
+                        // The server adds the maximum up from the checks that
+                        // scored, so it changes from one scan to the next.
+                        if (ran) {
+                            $cat.find('[data-role="max"]').text(max);
+                        }
 
                         var $catQuality = $cat.find('[data-role="category-quality"]');
                         if ($catQuality.length) {
@@ -3930,7 +3869,8 @@
                         var $bar = $cat.find('[data-role="category-bar"]');
                         if ($bar.length) {
                             $bar.css('width', pct + '%');
-                            self.setQualityClass($bar, 'vigilante-analyzer-category-bar-fill', cq.slug);
+                            // Two hyphens before the slug, as the stylesheet and the server write it.
+                            self.setQualityClass($bar, 'vigilante-analyzer-category-bar-fill-', cq.slug);
                         }
                     }
 

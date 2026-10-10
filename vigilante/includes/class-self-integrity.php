@@ -135,6 +135,36 @@ class Vigilante_Self_Integrity {
     const WATCHDOG_REPEAT_WINDOW = 2592000;
 
     /**
+     * How long after the last restoration a repeated one is still shown
+     * (7 days). After a week with no task missing the finding closes on its
+     * own: until 3.0.4 it stayed for the whole 30 days whatever the site did,
+     * while the screen asked for a new scan that could not clear it.
+     */
+    const WATCHDOG_RECENT_WINDOW = 604800;
+
+    /**
+     * Restorations of the same task inside WATCHDOG_RECENT_WINDOW that mean
+     * something is removing it over and over. Fewer than that is a warning:
+     * WordPress itself drops a recurring task when it cannot save its next run
+     * (wp-cron.php reschedules, and removes the old run even when that
+     * failed), so two in a month is not evidence of anybody doing anything.
+     */
+    const WATCHDOG_ACTIVE_COUNT = 3;
+
+    /**
+     * Restorations of the same task inside WATCHDOG_REPEAT_WINDOW that mean
+     * the same thing on a site whose administrator comes by once a week. The
+     * watchdog only runs when an administrator opens wp-admin or from the
+     * daily maintenance, which is itself one of the tasks being removed, so
+     * with the week alone such a site never got past the warning however long
+     * it went on. Found by the cross review of B77. Since the watchdog also
+     * runs from the scheduled tasks of WordPress itself (see
+     * run_watchdog_from_core_cron()) this is what tells apart something that
+     * removes the tasks once a week.
+     */
+    const WATCHDOG_MONTH_COUNT = 4;
+
+    /**
      * A check older than this stops counting as a result. Something that stops
      * the check (a filter, a removed hook, a cron nobody runs, files edited)
      * leaves the last state frozen, and a green from three days ago read as
@@ -216,6 +246,27 @@ class Vigilante_Self_Integrity {
     private static $executable_names = array( '.htaccess', '.user.ini', 'php.ini' );
 
     /**
+     * Scheduled tasks of WordPress itself that the watchdog also runs from.
+     *
+     * The update checks are scheduled twice a day and put back by core on
+     * every page load when they are missing (wp_schedule_update_checks(), on
+     * init); the two daily cleanups are put back from every admin page
+     * (wp-admin/admin.php). None of them depends on a task of Vigilant being
+     * there, which is the point.
+     *
+     * @var array
+     */
+    private static $core_tasks = array( 'wp_version_check', 'wp_update_plugins', 'wp_scheduled_delete', 'delete_expired_transients' );
+
+    /**
+     * Whether the watchdog already ran from a task of WordPress in this
+     * process: several of them fall due in the same cron run.
+     *
+     * @var bool
+     */
+    private $core_cron_pass_done = false;
+
+    /**
      * Constructor. Registers no hooks, see init_hooks().
      *
      * @param Vigilante_Settings          $settings     Settings instance.
@@ -235,6 +286,13 @@ class Vigilante_Self_Integrity {
     public function init_hooks() {
         add_action( 'admin_init', array( $this, 'maybe_detect_version_change' ), 20 );
         add_action( 'admin_init', array( $this, 'maybe_run_watchdog' ), 30 );
+        // Before the callback of WordPress itself, which runs at priority 10:
+        // the one of wp_version_check is what starts the background updates
+        // (wp_maybe_auto_update), and a check that ran right behind it found
+        // the new files of Vigilant with the old code still in memory.
+        foreach ( self::$core_tasks as $core_task ) {
+            add_action( $core_task, array( $this, 'run_watchdog_from_core_cron' ), 5 );
+        }
         // Last of all, to see whether the two above are still there: code that
         // runs inside WordPress can unhook them, and a plugin that does that
         // leaves every screen showing the last result as if nothing happened.
@@ -242,7 +300,8 @@ class Vigilante_Self_Integrity {
     }
 
     /**
-     * Are the two entry points of the self-check still hooked?
+     * Are the entry points of the self-check still hooked? The two of
+     * admin_init, and the one that hangs from the scheduled tasks of WordPress.
      *
      * Runs at the end of admin_init, so anything that unhooked them earlier in
      * the same request is visible here. It cannot say which file called
@@ -267,6 +326,18 @@ class Vigilante_Self_Integrity {
             if ( false === has_action( 'admin_init', array( $this, $method ) ) ) {
                 $missing[] = $method;
             }
+        }
+        // The entry point that does not depend on anybody opening wp-admin:
+        // gone from every task of WordPress it was hooked to.
+        $on_core = false;
+        foreach ( self::$core_tasks as $core_task ) {
+            if ( false !== has_action( $core_task, array( $this, 'run_watchdog_from_core_cron' ) ) ) {
+                $on_core = true;
+                break;
+            }
+        }
+        if ( ! $on_core ) {
+            $missing[] = 'run_watchdog_from_core_cron';
         }
 
         $state = $this->get_state();
@@ -1731,12 +1802,94 @@ class Vigilante_Self_Integrity {
     }
 
     /**
+     * Whether the WordPress updater has replaced Vigilant in this request and
+     * the check of the new files is still to come
+     *
+     * vigilante_on_upgrader_process_complete() leaves that check for the end
+     * of the request, once a failed update has had its previous copy restored.
+     * Until then the code in memory is the old one and the files on disk are
+     * the new ones, or half moved: taking that for a version change made
+     * outside the updater, or checking the files from here, reported the
+     * update WordPress had just made. It happens in one cron run, when a
+     * background update is followed by the daily maintenance or by a task of
+     * WordPress the watchdog hangs from.
+     *
+     * @since 3.0.5
+     *
+     * @return bool
+     */
+    private static function upgrade_check_pending() {
+        return false !== has_action( 'shutdown', 'vigilante_verify_after_upgrade' );
+    }
+
+    /**
+     * Whether WordPress is in the middle of its background updates, in this
+     * process or in another one
+     *
+     * WP_Automatic_Updater::run() holds a lock in the options table while it
+     * works (WP_Upgrader::create_lock( 'auto_updater' )) and releases it at
+     * the end; core itself takes it for abandoned after an hour. A mark dated
+     * ahead of this server's clock counts only within five minutes, which is
+     * a clock slightly out of step between two servers: with a whole hour of
+     * margin each way, one write kept every check waiting for almost two
+     * (the sixth blind round).
+     *
+     * The row is read from the table, not through get_option(). Releasing
+     * the lock is a delete_option(), which notes the name as an option that
+     * does not exist; the next lock is inserted with a query of its own, and
+     * the update_option() that follows it writes the same value within the
+     * same second, changes no row and leaves that note where it was. From
+     * then on get_option() answers that there is no lock while there is one:
+     * for the rest of the process on any site, and for every process on a
+     * site with a persistent object cache (wp-admin/includes/class-wp-upgrader.php
+     * :1065, :1087 and :1103 in 7.1.3).
+     *
+     * On a network the lock is in the options of the main site of the main
+     * network, the only one where the updates run (class-wp-automatic-updater.php
+     * :647), so it is looked for there from wherever this is asked.
+     *
+     * @since 3.0.5
+     *
+     * @return bool
+     */
+    private static function core_updates_running() {
+        global $wpdb;
+
+        $switched = false;
+        if ( is_multisite() && ! ( is_main_site() && is_main_network() ) ) {
+            $main_site = (int) get_main_site_id( get_main_network_id() );
+            if ( $main_site < 1 ) {
+                return false;
+            }
+            switch_to_blog( $main_site );
+            $switched = true;
+        }
+
+        $lock = $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s LIMIT 1", 'auto_updater.lock' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- the cached answer is what cannot be trusted here: see the note above.
+
+        if ( $switched ) {
+            restore_current_blog();
+        }
+
+        if ( ! is_numeric( $lock ) ) {
+            return false;
+        }
+        $age = time() - (int) $lock;
+
+        return $age < HOUR_IN_SECONDS && $age > -5 * MINUTE_IN_SECONDS;
+    }
+
+    /**
      * FTP/manual update and downgrade detection: the anchored version in the
      * state differs from the running code. Also called from the daily
-     * maintenance cron. Throttled while a change stays unresolved.
+     * maintenance cron and from the scheduled tasks of WordPress. Throttled
+     * while a change stays unresolved, and silent while the check that follows
+     * an update by WordPress is pending (see upgrade_check_pending()) or
+     * WordPress is running its background updates in another process (see
+     * core_updates_running()).
      */
     public function detect_version_change() {
-        if ( ! $this->is_enabled() ) {
+        if ( ! $this->is_enabled() || self::upgrade_check_pending() ) {
             return;
         }
 
@@ -1751,7 +1904,20 @@ class Vigilante_Self_Integrity {
             return;
         }
 
+        // A version that differs while WordPress holds the lock of its
+        // background updates is, almost always, WordPress replacing Vigilant
+        // in another process: the daily maintenance that falls due in a second
+        // cron process, or an administrator opening the dashboard meanwhile,
+        // found the new files and took them for a change made outside the
+        // updater (the blind review of 3.0.5). The process that updates checks
+        // them when it ends. Asked only once the version has changed and the
+        // throttle allows an attempt, so a page of the dashboard does not read
+        // the table for it while a change stays unresolved, and before the
+        // throttle is set, so waiting does not use up the next attempt.
         if ( get_transient( self::VERSION_CHECK_TRANSIENT ) ) {
+            return;
+        }
+        if ( self::core_updates_running() ) {
             return;
         }
         set_transient( self::VERSION_CHECK_TRANSIENT, 1, self::VERSION_CHECK_THROTTLE );
@@ -1815,6 +1981,59 @@ class Vigilante_Self_Integrity {
     }
 
     /**
+     * The same self-protection the daily maintenance runs, from the scheduled
+     * tasks of WordPress itself
+     *
+     * The two other entry points depend on what the watchdog watches: an
+     * administrator opening wp-admin, and the daily maintenance of Vigilant,
+     * which is one of the tasks that get removed. On a site where something
+     * removed every task, the daily maintenance and the weekly Security Check
+     * stayed missing until an administrator came by, and what the watchdog
+     * counted was those visits: coming by every ten days, it never reached
+     * the count that makes it critical (the blind review of 3.0.5). The update
+     * checks of WordPress run twice a day whether or not the tasks of Vigilant
+     * are there, so a missing task is put back within hours and the count
+     * follows what happens to the tasks, not who visits.
+     *
+     * Cron only: these actions have the same names as functions that
+     * WordPress calls directly on other requests, and this must not run on a
+     * page load. And only on the site that owns the files of the installation:
+     * every site of a network runs its own cron, the files are the same for
+     * all of them, and the main site already checks them.
+     *
+     * @since 3.0.5
+     */
+    public function run_watchdog_from_core_cron() {
+        if ( $this->core_cron_pass_done || ! wp_doing_cron() ) {
+            return;
+        }
+        $this->core_cron_pass_done = true;
+        if ( ! Vigilante_Settings::owns_shared_files() ) {
+            return;
+        }
+        // upgrade_check_pending() is only known inside the process that runs
+        // the update. A second cron process that starts while the first one is
+        // still inside the background updates of WordPress finds Vigilant
+        // already replaced and nothing pending, and this pass would take the
+        // new version for a change made outside the updater. It comes back
+        // with the next task of WordPress, within hours. The two checks it
+        // would run ask the same thing by themselves, for their other callers;
+        // asked here too, this entry does not schedule anything meanwhile.
+        if ( self::core_updates_running() ) {
+            return;
+        }
+
+        // Same order as Vigilante_Main::daily_maintenance(), and for the same
+        // reasons: the version change first, and switched off is said aloud.
+        if ( ! $this->is_enabled() ) {
+            $this->audit_off_state();
+            return;
+        }
+        $this->detect_version_change();
+        $this->run_watchdog();
+    }
+
+    /**
      * Verify that Vigilant's own cron events are still scheduled and restore
      * any that were unscheduled (a malicious wp_clear_scheduled_hook, or an
      * overzealous cleanup plugin, silences the plugin forever otherwise).
@@ -1822,10 +2041,16 @@ class Vigilante_Self_Integrity {
      * A hook is only reported once the watchdog has seen it scheduled: the
      * first pass on a site, and a hook whose setting was just switched on,
      * schedule what is missing quietly. After that, a first disappearance is
-     * restored with a warning; the SAME hook disappearing again within 30
-     * days means something is actively clearing it: critical and a standalone
-     * alert. A hook whose setting is off is forgotten, so switching it back on
-     * is not reported either.
+     * restored with a line in the log. The SAME hook missing again within 30
+     * days is a warning on screen, with no email and no effect on the scores,
+     * and it closes on its own after a week with nothing missing: WordPress
+     * drops a recurring task by itself when it cannot save its next run, so
+     * that much proves nothing. Three times inside one week, or four inside
+     * the 30 days, means something is actively clearing it: critical and a
+     * standalone alert, one a week at most, which says tasks and not files. Until 3.0.4 the second time was already critical,
+     * the texts said that the files of the plugin had been modified, and the
+     * finding stayed for 30 days. A hook whose setting is off is forgotten, so
+     * switching it back on is not reported either.
      *
      * On a network it only watches the site that owns the installation's
      * shared files: the activation schedules these events once, so on the
@@ -1851,9 +2076,11 @@ class Vigilante_Self_Integrity {
             // The weekly analyzer scan is required unless it was switched off
             // explicitly: its own toggle unschedules it on purpose, and an
             // unset value means on (Vigilante_Security_Analyzer reads it the same way).
+            // vigilante_hourly_checks is not here since 3.0.5: its callback
+            // does nothing, so it missing takes nothing away, and being hourly
+            // it was the task WordPress dropped most often.
             $expected = array(
                 'vigilante_daily_maintenance'    => array( 'daily', 0, true ),
-                'vigilante_hourly_checks'        => array( 'hourly', 0, true ),
                 'vigilante_analyzer_weekly_scan' => array( 'weekly', DAY_IN_SECONDS, ! isset( $analyzer['weekly_scan_enabled'] ) || ! empty( $analyzer['weekly_scan_enabled'] ) ),
                 'vigilante_plugin_status_check'  => array( 'daily', HOUR_IN_SECONDS, ! empty( $fi['check_closed_plugins'] ) ),
                 'vigilante_file_integrity_scan'  => array(
@@ -1881,6 +2108,11 @@ class Vigilante_Self_Integrity {
             $repeated   = array();
             $now        = time();
 
+            // What is no longer watched is forgotten, with whatever it had
+            // counted: the hourly task of the versions up to 3.0.4.
+            $seen     = array_intersect_key( $seen, $expected );
+            $watchdog = array_intersect_key( $watchdog, $expected );
+
             foreach ( $expected as $hook => $spec ) {
                 list( $schedule, $offset, $required ) = $spec;
 
@@ -1906,16 +2138,21 @@ class Vigilante_Self_Integrity {
                     continue;
                 }
 
-                $previous = ( isset( $watchdog[ $hook ] ) && is_array( $watchdog[ $hook ] ) ) ? $watchdog[ $hook ] : array();
-                $recent   = isset( $previous['last'] ) && ( $now - (int) $previous['last'] ) < self::WATCHDOG_REPEAT_WINDOW;
-                $times    = $recent && isset( $previous['count'] ) ? (int) $previous['count'] + 1 : 1;
+                // Every restoration of the last 30 days, with its date: how
+                // close together they are is what tells a task WordPress lost
+                // from one that something keeps removing.
+                $previous   = ( isset( $watchdog[ $hook ] ) && is_array( $watchdog[ $hook ] ) ) ? $watchdog[ $hook ] : array();
+                $times      = self::watchdog_times( $previous, $now, true );
+                $times[]    = $now;
+                $times      = array_slice( $times, -10 );
 
                 $watchdog[ $hook ] = array(
-                    'count' => $times,
+                    'count' => count( $times ),
                     'last'  => $now,
+                    'times' => $times,
                 );
                 $restored[] = $hook;
-                if ( $times >= 2 ) {
+                if ( 'critical' === self::watchdog_severity( $watchdog[ $hook ], $now ) ) {
                     $repeated[] = $hook;
                 }
             }
@@ -1953,22 +2190,47 @@ class Vigilante_Self_Integrity {
                 );
             }
 
-            if ( ! empty( $repeated ) ) {
-                $findings = array();
-                foreach ( $repeated as $hook ) {
-                    $findings[] = $this->finding(
-                        'cron_cleared_repeatedly',
-                        $hook,
-                        'critical',
-                        sprintf(
-                            /* translators: 1: cron hook name, 2: number of restorations */
-                            __( 'The cron event "%1$s" keeps being unscheduled (restored %2$d times in 30 days). Something on this site is actively clearing Vigilant\'s scheduled tasks.', 'vigilante' ),
-                            $hook,
-                            (int) $watchdog[ $hook ]['count']
-                        )
-                    );
+            // What is critical right now, and not only what this pass put
+            // back: an email that could not be sent is tried again by the next
+            // pass for as long as the finding lasts, instead of waiting for
+            // one more removal that may never come.
+            $findings = array();
+            foreach ( self::watchdog_findings( $state ) as $finding ) {
+                if ( 'critical' !== $finding['severity'] ) {
+                    continue;
                 }
-                $this->maybe_send_self_alert( $findings, 'watchdog' );
+                $findings[] = $this->finding(
+                    'cron_cleared_repeatedly',
+                    $finding['file'],
+                    'critical',
+                    sprintf(
+                        /* translators: %s: cron hook name */
+                        __( 'The scheduled task "%s" keeps going missing, and Vigilant scheduled it again each time. Something on this site keeps removing it.', 'vigilante' ),
+                        $finding['file']
+                    )
+                );
+            }
+
+            if ( ! empty( $findings ) ) {
+                /*
+                 * One email a week at most while it goes on, kept apart from
+                 * the fingerprint of the alerts about files. That fingerprint
+                 * is cleared by every clean check of the files, so with it
+                 * alone this email went out again every day; and with a
+                 * standing warning about the files it was never cleared, so a
+                 * second episode of the same tasks went out to nobody.
+                 */
+                $state   = $this->get_state();
+                $alerted = isset( $state['watchdog_alerted'] ) ? (int) $state['watchdog_alerted'] : 0;
+                if ( $alerted > $now + DAY_IN_SECONDS ) {
+                    // Written with the clock ahead: it would hold the email back until then.
+                    $alerted = 0;
+                }
+                if ( ( $now - $alerted ) >= self::WATCHDOG_RECENT_WINDOW && $this->maybe_send_self_alert( $findings, 'watchdog', false ) ) {
+                    $state                     = $this->get_state();
+                    $state['watchdog_alerted'] = $now;
+                    $this->save_state( $state );
+                }
             }
         }
 
@@ -1978,7 +2240,7 @@ class Vigilante_Self_Integrity {
         // site with scheduled scans switched off with no periodic check at all.
         $state      = $this->get_state();
         $last_check = isset( $state['last_check'] ) ? (int) $state['last_check'] : 0;
-        if ( time() - $last_check > DAY_IN_SECONDS ) {
+        if ( ! self::upgrade_check_pending() && time() - $last_check > DAY_IN_SECONDS && ! self::core_updates_running() ) {
             $result = $this->run_check( 'watchdog' );
             if ( 'critical' === $this->worst_severity( $result['findings'] ) ) {
                 $this->maybe_send_self_alert( $result['findings'], 'watchdog' );
@@ -2007,20 +2269,24 @@ class Vigilante_Self_Integrity {
      *
      * @param array  $findings Findings to report.
      * @param string $context  Alert context (upgrader|version_change|watchdog).
+     * @param bool   $by_set   Whether the set of findings is what keeps it from
+     *                         being sent twice. False for the watchdog, which
+     *                         keeps its own count of time (see run_watchdog()).
+     * @return bool Whether it was sent.
      */
-    public function maybe_send_self_alert( $findings, $context ) {
+    public function maybe_send_self_alert( $findings, $context, $by_set = true ) {
         if ( empty( $findings ) ) {
-            return;
+            return false;
         }
 
         if ( ! Vigilante_Settings::owns_shared_files() ) {
-            return;
+            return false;
         }
         $summary     = $this->findings_summary( $findings );
         $fingerprint = md5( wp_json_encode( $summary ) );
         $state       = $this->get_state();
-        if ( isset( $state['alerted_fingerprint'] ) && $fingerprint === $state['alerted_fingerprint'] ) {
-            return;
+        if ( $by_set && isset( $state['alerted_fingerprint'] ) && $fingerprint === $state['alerted_fingerprint'] ) {
+            return false;
         }
 
         if ( ! class_exists( 'Vigilante_Email_Template' ) ) {
@@ -2040,13 +2306,50 @@ class Vigilante_Self_Integrity {
             $recipients = array_values( array_unique( $recipients ) );
         }
         if ( empty( $recipients ) ) {
-            return;
+            return false;
         }
 
         $worst     = $this->worst_severity( $findings );
         $site_name = get_bloginfo( 'name' );
+        // Tasks that keep being removed, the check switched off and its hooks
+        // removed are not files that changed, and the email said files for all
+        // of them until 3.0.4.
+        $kind      = ( 'critical' === $worst ) ? self::findings_kind( $findings, 'critical' ) : '';
+        // Switched off by code after the last check had found changed files:
+        // the files travel in the alert, but they were already announced when
+        // they were found. What is new, and what a scan from File Integrity
+        // will not look at, is that the check has been switched off.
+        $off_after = ( 'files' === $kind ) && self::has_code( $findings, array( 'self_disabled' ) );
+        if ( $off_after ) {
+            $kind = 'off';
+        }
+        $tasks     = 'tasks' === $kind;
+        $check_off = in_array( $kind, array( 'off', 'hooks' ), true );
 
-        if ( 'critical' === $worst ) {
+        if ( $check_off ) {
+            if ( 'off' === $kind ) {
+                /* translators: %s: Site name */
+                $subject_text = __( '[%s] CRITICAL: Vigilant self-protection is switched off by code', 'vigilante' );
+                $lead         = __( 'Vigilant self-protection is switched off by code on this site.', 'vigilante' );
+            } else {
+                /* translators: %s: Site name */
+                $subject_text = __( '[%s] CRITICAL: the hooks of Vigilant self-protection were removed', 'vigilante' );
+                $lead         = __( 'Something removed the hooks that run the self-check.', 'vigilante' );
+            }
+            $subject = sprintf( $subject_text, $site_name );
+            $title   = __( 'Vigilant self-protection alert', 'vigilante' );
+            $intro   = $lead . ' ' . ( $off_after
+                ? __( 'Before that, the last check that ran had found changed files in Vigilant, and they are listed below. Unless you did both things yourself, treat this as a compromise: changing the security plugin and then switching off the check that reports it is what an attacker does.', 'vigilante' )
+                : __( 'This alert is about the check itself, not about changed files. While this goes on, the files of Vigilant are not being checked as they should. If you did not do this yourself, treat it as a possible compromise.', 'vigilante' ) );
+        } elseif ( $tasks ) {
+            $subject = sprintf(
+                /* translators: %s: Site name */
+                __( '[%s] CRITICAL: Vigilant scheduled tasks keep being removed', 'vigilante' ),
+                $site_name
+            );
+            $title = __( 'Vigilant self-protection alert', 'vigilante' );
+            $intro = __( 'Scheduled tasks of Vigilant keep going missing, and Vigilant scheduled them again each time. This alert is about scheduled tasks, not about changed files. Something on this site keeps removing them: a cleanup plugin or a scheduled job is the usual cause, and if you find neither, treat it as a possible compromise.', 'vigilante' );
+        } elseif ( 'critical' === $worst ) {
             $subject = sprintf(
                 /* translators: %s: Site name */
                 __( '[%s] CRITICAL: Vigilant plugin files were modified', 'vigilante' ),
@@ -2066,9 +2369,15 @@ class Vigilante_Self_Integrity {
 
         $body  = Vigilante_Email_Template::p( $intro );
         $body .= self::build_self_email_section( $findings );
-        $body .= Vigilante_Email_Template::p(
-            __( 'How to verify by yourself: run a scan from File Integrity, or check the folder over SSH with "php bin/verify-manifest.php" or "sha256sum -c MANIFEST.sha256". Full instructions live in the SECURITY.md file distributed with the plugin.', 'vigilante' )
-        );
+        if ( $tasks ) {
+            $how = __( 'How to see them by yourself: a plugin such as WP Crontrol lists the scheduled events of your site, and the ones of Vigilant start with vigilante_.', 'vigilante' );
+        } elseif ( $check_off ) {
+            // A scan does not check these files while the check is switched off.
+            $how = __( 'How to check the files of Vigilant by yourself meanwhile: over SSH, in the folder of the plugin, with "php bin/verify-manifest.php" or "sha256sum -c MANIFEST.sha256". Full instructions live in the SECURITY.md file distributed with the plugin.', 'vigilante' );
+        } else {
+            $how = __( 'How to verify by yourself: run a scan from File Integrity, or check the folder over SSH with "php bin/verify-manifest.php" or "sha256sum -c MANIFEST.sha256". Full instructions live in the SECURITY.md file distributed with the plugin.', 'vigilante' );
+        }
+        $body .= Vigilante_Email_Template::p( $how );
         $body .= Vigilante_Email_Template::button(
             admin_url( 'admin.php?page=vigilante&tab=file-integrity#vigilante-section-fi-last-scan' ),
             __( 'Review in Vigilant', 'vigilante' )
@@ -2089,11 +2398,15 @@ class Vigilante_Self_Integrity {
             // returns it when one of them is refused and the others were sent),
             // so those count as sent, or the alert would be repeated to
             // everybody who did get it.
-            return;
+            return false;
         }
 
-        $state['alerted_fingerprint'] = $fingerprint;
-        $this->save_state( $state );
+        if ( $by_set ) {
+            $state['alerted_fingerprint'] = $fingerprint;
+            $this->save_state( $state );
+        }
+
+        return true;
     }
 
     /**
@@ -2110,9 +2423,26 @@ class Vigilante_Self_Integrity {
 
         $html  = '<div style="background:#fef1f1;border-left:4px solid #d63638;padding:12px 16px;margin:16px 0;">';
         $html .= '<h2 style="margin:0 0 8px;font-size:16px;color:#d63638;">' . esc_html__( 'Vigilant self-protection', 'vigilante' ) . '</h2>';
-        $html .= '<p style="margin:0 0 10px;color:#3c434a;">' . esc_html__( 'Findings about Vigilant\'s own files. If you did not modify them yourself, treat this as a possible compromise.', 'vigilante' ) . '</p>';
+        // What the rows are, so the line above them and the first column say it.
+        $kind = self::findings_kind( $findings );
+        if ( 'files' === $kind && self::has_code( $findings, array( 'self_disabled', 'self_hooks_removed' ) ) ) {
+            // Both things: a row about the check itself is not a file of Vigilant.
+            $about  = __( 'Findings about the self-check of Vigilant and about its own files.', 'vigilante' );
+            $column = __( 'File', 'vigilante' );
+        } elseif ( 'tasks' === $kind ) {
+            $about  = __( 'Findings about the scheduled tasks of Vigilant, not about its files.', 'vigilante' );
+            $column = __( 'Task', 'vigilante' );
+        } elseif ( 'off' === $kind || 'hooks' === $kind ) {
+            $about  = __( 'Findings about the self-check of Vigilant itself, not about changed files.', 'vigilante' );
+            // Switched off by code lists the files that hook the filter.
+            $column = ( 'hooks' === $kind ) ? __( 'Hook', 'vigilante' ) : __( 'File', 'vigilante' );
+        } else {
+            $about  = __( 'Findings about Vigilant\'s own files. If you did not modify them yourself, treat this as a possible compromise.', 'vigilante' );
+            $column = __( 'File', 'vigilante' );
+        }
+        $html .= '<p style="margin:0 0 10px;color:#3c434a;">' . esc_html( $about ) . '</p>';
         $html .= '<table style="border-collapse:collapse;width:100%;font-size:13px;">';
-        $html .= '<tr><th style="text-align:left;padding:4px 8px;border-bottom:1px solid #dcdcde;">' . esc_html__( 'File', 'vigilante' ) . '</th>'
+        $html .= '<tr><th style="text-align:left;padding:4px 8px;border-bottom:1px solid #dcdcde;">' . esc_html( $column ) . '</th>'
             . '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #dcdcde;">' . esc_html__( 'Finding', 'vigilante' ) . '</th>'
             . '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #dcdcde;">' . esc_html__( 'Severity', 'vigilante' ) . '</th></tr>';
 
@@ -2188,9 +2518,114 @@ class Vigilante_Self_Integrity {
     }
 
     /**
-     * Cron events the watchdog had to schedule again more than once inside its
-     * window. They are logged and emailed when they happen, but they are not
-     * part of last_findings, so the screens read them from the watchdog state.
+     * The scheduled tasks the watchdog looks after
+     *
+     * The same names as the table of run_watchdog(). A task left out of here
+     * is not reported even if an older version left a count for it in the
+     * state: the hourly task up to 3.0.4.
+     *
+     * @since 3.0.5
+     *
+     * @return string[]
+     */
+    public static function watched_hooks() {
+        return array(
+            'vigilante_daily_maintenance',
+            'vigilante_analyzer_weekly_scan',
+            'vigilante_plugin_status_check',
+            'vigilante_file_integrity_scan',
+        );
+    }
+
+    /**
+     * When a task was restored, over the last 30 days
+     *
+     * An entry written up to 3.0.4 holds a count and the date of the last one
+     * only. It is read as that date twice at most: enough for the warning it
+     * had earned, never for the critical one, whose dates are not known.
+     *
+     * @since 3.0.5
+     *
+     * That reading is for the screens. To add a restoration to such an entry
+     * only the one date it really holds is kept: carrying the made-up second
+     * one forward turned "once three weeks ago and once three days ago" into
+     * three this week on the next loss, which is critical and an email.
+     *
+     * @param array    $entry   One entry of the watchdog state.
+     * @param int|null $now     Current time.
+     * @param bool     $to_keep Whether the list is going to be stored with a new date added.
+     * @return int[] Timestamps, oldest first.
+     */
+    public static function watchdog_times( $entry, $now = null, $to_keep = false ) {
+        $now   = null === $now ? time() : (int) $now;
+        $times = array();
+
+        if ( ! is_array( $entry ) ) {
+            return $times;
+        }
+
+        if ( isset( $entry['times'] ) && is_array( $entry['times'] ) ) {
+            foreach ( $entry['times'] as $time ) {
+                // Whole numbers only: the state is an option, and anything
+                // else in it is not a date.
+                if ( is_int( $time ) || ( is_string( $time ) && ctype_digit( $time ) ) ) {
+                    $times[] = (int) $time;
+                }
+            }
+        } elseif ( isset( $entry['last'] ) && ( is_int( $entry['last'] ) || ( is_string( $entry['last'] ) && ctype_digit( $entry['last'] ) ) ) && (int) $entry['last'] > 0 ) {
+            $count = ( isset( $entry['count'] ) && is_numeric( $entry['count'] ) ) ? (int) $entry['count'] : 0;
+            $times = array_fill( 0, $to_keep ? 1 : max( 1, min( 2, $count ) ), (int) $entry['last'] );
+        }
+
+        // A date more than a day ahead was written with the clock wrong: kept,
+        // it would count as recent for as long as it stayed ahead.
+        $recent = array();
+        foreach ( $times as $time ) {
+            if ( $time > 0 && $time <= $now + DAY_IN_SECONDS && ( $now - $time ) < self::WATCHDOG_REPEAT_WINDOW ) {
+                $recent[] = $time;
+            }
+        }
+        sort( $recent, SORT_NUMERIC );
+
+        return $recent;
+    }
+
+    /**
+     * How serious the restorations of one task are, right now
+     *
+     * Nothing while the last one is more than a week old, so the finding
+     * closes on its own once the task stays put. A warning from the second one
+     * in 30 days. Critical from the third inside one week, or the fourth
+     * inside the 30 days.
+     *
+     * @since 3.0.5
+     *
+     * @param array    $entry One entry of the watchdog state.
+     * @param int|null $now   Current time.
+     * @return string '', warning or critical.
+     */
+    public static function watchdog_severity( $entry, $now = null ) {
+        $now   = null === $now ? time() : (int) $now;
+        $times = self::watchdog_times( $entry, $now );
+        $week  = 0;
+
+        foreach ( $times as $time ) {
+            if ( ( $now - $time ) < self::WATCHDOG_RECENT_WINDOW ) {
+                ++$week;
+            }
+        }
+
+        if ( $week < 1 || count( $times ) < 2 ) {
+            return '';
+        }
+
+        return ( $week >= self::WATCHDOG_ACTIVE_COUNT || count( $times ) >= self::WATCHDOG_MONTH_COUNT ) ? 'critical' : 'warning';
+    }
+
+    /**
+     * Scheduled tasks the watchdog had to schedule again more than once. They
+     * are logged when they happen, but they are not part of last_findings, so
+     * the screens read them from the watchdog state.
      *
      * @param array $state State.
      * @return array Findings, in the same shape as last_findings.
@@ -2198,23 +2633,152 @@ class Vigilante_Self_Integrity {
     public static function watchdog_findings( $state ) {
         $findings = array();
         $watchdog = ( isset( $state['watchdog'] ) && is_array( $state['watchdog'] ) ) ? $state['watchdog'] : array();
+        $watched  = self::watched_hooks();
+
         foreach ( $watchdog as $hook => $entry ) {
-            if ( ! is_array( $entry ) ) {
+            if ( ! is_array( $entry ) || ! in_array( (string) $hook, $watched, true ) ) {
                 continue;
             }
-            $count = isset( $entry['count'] ) ? (int) $entry['count'] : 0;
-            $last  = isset( $entry['last'] ) ? (int) $entry['last'] : 0;
-            if ( $count < 2 || ( time() - $last ) >= self::WATCHDOG_REPEAT_WINDOW ) {
+            $severity = self::watchdog_severity( $entry );
+            if ( '' === $severity ) {
                 continue;
             }
             $findings[] = array(
                 'code'     => 'cron_cleared_repeatedly',
                 'file'     => (string) $hook,
-                'severity' => 'critical',
+                'severity' => $severity,
                 'message'  => '',
             );
         }
         return $findings;
+    }
+
+    /**
+     * What a set of findings is about
+     *
+     * Not every critical finding of the self-check is a changed file: the
+     * check can be switched off through its filter, its hooks can be removed,
+     * and scheduled tasks can keep going missing. Until 3.0.4 the email, the
+     * box, the notices and the note on the scores worded all of them as
+     * modified files. When several kinds come together the strongest one names
+     * the alarm: a changed file first, then the check switched off, then its
+     * hooks, then the tasks.
+     *
+     * @since 3.0.5
+     *
+     * @param array  $findings Findings.
+     * @param string $severity Only look at the findings of this severity, or '' for all of them.
+     * @return string files|off|hooks|tasks, or '' when there is none to look at.
+     */
+    public static function findings_kind( $findings, $severity = '' ) {
+        $rank  = array(
+            'tasks' => 1,
+            'hooks' => 2,
+            'off'   => 3,
+            'files' => 4,
+        );
+        $codes = array(
+            'cron_cleared_repeatedly' => 'tasks',
+            'self_hooks_removed'      => 'hooks',
+            'self_disabled'           => 'off',
+        );
+        $kind  = '';
+
+        foreach ( (array) $findings as $finding ) {
+            if ( ! is_array( $finding ) ) {
+                continue;
+            }
+            if ( '' !== $severity && $severity !== ( isset( $finding['severity'] ) ? (string) $finding['severity'] : '' ) ) {
+                continue;
+            }
+            // Whatever is not one of the three is a finding about the files.
+            $code      = isset( $finding['code'] ) ? (string) $finding['code'] : '';
+            $this_kind = isset( $codes[ $code ] ) ? $codes[ $code ] : 'files';
+            if ( '' === $kind || $rank[ $this_kind ] > $rank[ $kind ] ) {
+                $kind = $this_kind;
+            }
+        }
+
+        return $kind;
+    }
+
+    /**
+     * Whether a set of findings holds any of these codes
+     *
+     * @since 3.0.5
+     *
+     * @param array $findings Findings.
+     * @param array $codes    Finding codes.
+     * @return bool
+     */
+    private static function has_code( $findings, $codes ) {
+        foreach ( (array) $findings as $finding ) {
+            if ( is_array( $finding ) && isset( $finding['code'] ) && in_array( $finding['code'], $codes, true ) ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether a set of findings is only about scheduled tasks
+     *
+     * @since 3.0.5
+     *
+     * @param array  $findings Findings.
+     * @param string $severity Only look at the findings of this severity, or '' for all of them.
+     * @return bool True when there is at least one and all of them are about tasks.
+     */
+    public static function findings_are_about_tasks( $findings, $severity = '' ) {
+        return 'tasks' === self::findings_kind( $findings, $severity );
+    }
+
+    /**
+     * What the alarm of this site is about, for the texts that announce it
+     *
+     * @since 3.0.5
+     *
+     * @param array $state   State.
+     * @param bool  $enabled Whether the self-check runs (see is_on()).
+     * @return string files|off|hooks|tasks, or '' when there is no alarm.
+     */
+    public static function alarm_kind( $state, $enabled = true ) {
+        // The last check of the files ended in critical: files, whatever else
+        // there is. That includes the check being switched off afterwards,
+        // which is what somebody who changed a file would do next: nothing
+        // writes the state from then on, so it still holds what was found.
+        $files = 'critical' === ( isset( $state['last_status'] ) ? (string) $state['last_status'] : '' );
+        if ( ! $enabled ) {
+            return $files ? 'files' : 'off';
+        }
+        if ( 'critical' !== self::tone( $state, true ) ) {
+            return '';
+        }
+        if ( $files ) {
+            return 'files';
+        }
+
+        $kind = self::findings_kind( self::state_findings( $state, true ), 'critical' );
+        if ( '' === $kind ) {
+            // Critical with no critical finding to read: the removed hooks are
+            // what tone() looks at before anything else.
+            return empty( $state['hooks_removed']['methods'] ) ? 'files' : 'hooks';
+        }
+
+        return $kind;
+    }
+
+    /**
+     * Whether the critical state of this site is about scheduled tasks and not about files
+     *
+     * @since 3.0.5
+     *
+     * @param array $state   State.
+     * @param bool  $enabled Whether the self-check runs (see is_on()).
+     * @return bool
+     */
+    public static function alarm_is_about_tasks( $state, $enabled = true ) {
+        return 'tasks' === self::alarm_kind( $state, $enabled );
     }
 
     /**
@@ -2287,6 +2851,34 @@ class Vigilante_Self_Integrity {
      * @return string critical|warning|info|ok|off|none
      */
     public static function tone( $state, $enabled = true ) {
+        return self::tone_of( $state, $enabled, false );
+    }
+
+    /**
+     * The tone that counts for the two scores
+     *
+     * The same as tone(), except that tasks restored more than once, while
+     * that is only a warning, do not count: Vigilant has already scheduled
+     * them again and its files are as verified as they were, which is what the
+     * points of this check are for. The box and the notice still show it.
+     *
+     * @since 3.0.5
+     *
+     * @param array $state   State.
+     * @param bool  $enabled Whether the self-check runs (see is_on()).
+     * @return string critical|warning|info|ok|off|none
+     */
+    public static function score_tone( $state, $enabled = true ) {
+        return self::tone_of( $state, $enabled, true );
+    }
+
+    /**
+     * @param array $state     State.
+     * @param bool  $enabled   Whether the self-check runs.
+     * @param bool  $for_score Leave out the warnings about restored tasks.
+     * @return string
+     */
+    private static function tone_of( $state, $enabled, $for_score ) {
         if ( ! $enabled ) {
             // Switched off by code is an alarm, not a neutral state: see
             // state_findings().
@@ -2302,6 +2894,9 @@ class Vigilante_Self_Integrity {
         $worst    = 'none';
         foreach ( $findings as $finding ) {
             $severity = isset( $finding['severity'] ) ? (string) $finding['severity'] : '';
+            if ( $for_score && 'warning' === $severity && 'cron_cleared_repeatedly' === ( isset( $finding['code'] ) ? (string) $finding['code'] : '' ) ) {
+                continue;
+            }
             if ( 'critical' === $severity ) {
                 $worst = 'critical';
                 break;
@@ -2342,17 +2937,24 @@ class Vigilante_Self_Integrity {
         $this->save_state( $state );
 
         $ficheros = self::disabled_by();
-        $this->maybe_send_self_alert(
-            array(
-                $this->finding(
-                    'self_disabled',
-                    $ficheros ? implode( ', ', $ficheros ) : '',
-                    'critical',
-                    __( 'Vigilant self-protection is switched off by code on this site.', 'vigilante' )
-                ),
+        $findings = array(
+            $this->finding(
+                'self_disabled',
+                $ficheros ? implode( ', ', $ficheros ) : '',
+                'critical',
+                __( 'Vigilant self-protection is switched off by code on this site.', 'vigilante' )
             ),
-            'disabled'
         );
+        // Switched off after the last check had found changed files: the alert
+        // carries them too, so it is not read as only switched off.
+        if ( 'critical' === ( isset( $state['last_status'] ) ? (string) $state['last_status'] : '' ) && isset( $state['last_findings'] ) && is_array( $state['last_findings'] ) ) {
+            foreach ( $state['last_findings'] as $stored ) {
+                if ( is_array( $stored ) && isset( $stored['code'], $stored['file'], $stored['severity'] ) && 'critical' === $stored['severity'] ) {
+                    $findings[] = $stored;
+                }
+            }
+        }
+        $this->maybe_send_self_alert( $findings, 'disabled' );
         $this->log(
             'self_disabled',
             $ficheros
@@ -2387,7 +2989,7 @@ class Vigilante_Self_Integrity {
             'manifest_invalid'        => __( 'Manifest not valid', 'vigilante' ),
             'manifest_unverified'     => __( 'Manifest changed, unverifiable against wp.org', 'vigilante' ),
             'no_anchors'              => __( 'No verification anchors available', 'vigilante' ),
-            'cron_cleared_repeatedly' => __( 'Cron event repeatedly cleared', 'vigilante' ),
+            'cron_cleared_repeatedly' => __( 'Scheduled task missing more than once', 'vigilante' ),
             'self_disabled'           => __( 'Self-protection switched off by code', 'vigilante' ),
             'self_hooks_removed'      => __( 'Self-protection hooks removed', 'vigilante' ),
             'self_stale'              => __( 'Not checked recently', 'vigilante' ),

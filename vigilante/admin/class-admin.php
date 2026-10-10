@@ -1031,6 +1031,14 @@ class Vigilante_Admin {
     /**
      * Calculate comprehensive security score (0-100)
      *
+     * The maximum is the same for every site, 129 points. A module that is
+     * switched off loses its weight and the points of its details, which stay
+     * in the total. Until 3.0.4 the details of a module only counted, on both
+     * sides of the fraction, while the module was on: a site with almost
+     * everything off kept a middling score, because what it had switched off
+     * left the total as well, and switching Security Audit off with no alert
+     * configured raised the score.
+     *
      * @param array $options Plugin options.
      * @return int Security score.
      */
@@ -1058,9 +1066,9 @@ class Vigilante_Admin {
         }
 
         // Firewall details (10 points)
+        $max_score += 10;
         if ( ! empty( $options['modules']['firewall'] ) ) {
             $firewall = $options['firewall'] ?? array();
-            $max_score += 10;
             
             $firewall_checks = array(
                 'block_sql_injection',
@@ -1080,9 +1088,9 @@ class Vigilante_Admin {
         }
 
         // Login security details (10 points)
+        $max_score += 10;
         if ( ! empty( $options['modules']['login_security'] ) ) {
             $login = $options['login_security'] ?? array();
-            $max_score += 10;
             
             // Max attempts configured
             if ( isset( $login['max_attempts'] ) && $login['max_attempts'] <= 5 ) {
@@ -1099,9 +1107,9 @@ class Vigilante_Admin {
         }
 
         // Security headers details (10 points)
+        $max_score += 10;
         if ( ! empty( $options['modules']['security_headers'] ) ) {
             $headers = $options['security_headers'] ?? array();
-            $max_score += 10;
             
             if ( ! empty( $headers['x_frame_options'] ) ) {
                 $score += 2;
@@ -1118,9 +1126,9 @@ class Vigilante_Admin {
         }
 
         // User security details (10 points)
+        $max_score += 10;
         if ( ! empty( $options['modules']['user_security'] ) ) {
             $user = $options['user_security'] ?? array();
-            $max_score += 10;
             
             if ( ! empty( $user['block_insecure_usernames'] ) ) {
                 $score += 3;
@@ -1136,12 +1144,12 @@ class Vigilante_Admin {
             }
         }
 
-        // Audit alerts details (6 points) - only when Security Audit is on,
-        // because the alerting layer rides on top of the activity log. Leaving
-        // both alert legs off keeps these points unearned.
+        // Audit alerts details (6 points) - earned only when Security Audit is
+        // on, because the alerting layer rides on top of the activity log.
+        // Leaving both alert legs off keeps these points unearned.
+        $max_score += 6;
         if ( ! empty( $options['modules']['activity_log'] ) ) {
             $alerts = isset( $options['audit_alerts'] ) ? (array) $options['audit_alerts'] : array();
-            $max_score += 6;
             if ( Vigilante_Audit_Alerts::immediate_is_active( $alerts ) ) {
                 $score += 3;
             }
@@ -1164,8 +1172,11 @@ class Vigilante_Admin {
         if ( $self_enabled ) {
             $score += 10;
             // The five points are for a check that ran and came out clean: a
-            // site that has never checked itself has not earned them.
-            if ( in_array( $self_tone, array( 'ok', 'info' ), true ) ) {
+            // site that has never checked itself has not earned them. Tasks
+            // that Vigilant had to schedule again, while that is only a
+            // warning, do not take them away: the files are as clean as they
+            // were (Vigilante_Self_Integrity::score_tone()).
+            if ( in_array( Vigilante_Self_Integrity::score_tone( Vigilante_Self_Integrity::display_state(), $self_enabled ), array( 'ok', 'info' ), true ) ) {
                 $score += 5;
             }
         }
@@ -1196,6 +1207,22 @@ class Vigilante_Admin {
     }
 
     /**
+     * Recommendation of the Dashboard for a critical self-protection state
+     *
+     * @param string $kind What the alarm is about, from Vigilante_Self_Integrity::alarm_kind().
+     * @return string
+     */
+    private function self_critical_recommendation( $kind ) {
+        if ( 'tasks' === $kind ) {
+            return __( 'Something keeps removing Vigilant scheduled tasks: File Integrity says what to look for.', 'vigilante' );
+        }
+        if ( 'hooks' === $kind ) {
+            return __( 'Something removed the hooks of Vigilant self-protection: File Integrity says what to look for.', 'vigilante' );
+        }
+        return __( 'Vigilant own files have been changed: repair Vigilant from File Integrity before anything else.', 'vigilante' );
+    }
+
+    /**
      * Get security recommendations based on current settings
      *
      * @param array $options Plugin options.
@@ -1208,14 +1235,9 @@ class Vigilante_Admin {
         // else on this card means much.
         $vg_self_enabled = Vigilante_Self_Integrity::is_on();
         $vg_self_tone    = Vigilante_Self_Integrity::tone( Vigilante_Self_Integrity::display_state(), $vg_self_enabled );
-        if ( ! $vg_self_enabled ) {
-            $recommendations[] = array(
-                'icon'     => 'shield',
-                'priority' => 'high',
-                'tab'      => 'file-integrity',
-                'message'  => __( 'Turn Vigilant self-protection on, so a change to Vigilant own files does not go unnoticed.', 'vigilante' ),
-            );
-        } elseif ( 'off' === $vg_self_tone ) {
+        // Switched off has no setting to turn back on: it takes code on the
+        // site, and the recommendation says where to look for it.
+        if ( 'off' === $vg_self_tone ) {
             $recommendations[] = array(
                 'icon'     => 'warning',
                 'priority' => 'critical',
@@ -1227,7 +1249,7 @@ class Vigilante_Admin {
                 'icon'     => 'warning',
                 'priority' => 'critical',
                 'tab'      => 'file-integrity',
-                'message'  => __( 'Vigilant own files have been changed: repair Vigilant from File Integrity before anything else.', 'vigilante' ),
+                'message'  => $this->self_critical_recommendation( Vigilante_Self_Integrity::alarm_kind( Vigilante_Self_Integrity::display_state(), $vg_self_enabled ) ),
             );
         } elseif ( 'warning' === $vg_self_tone ) {
             $recommendations[] = array(
@@ -1840,8 +1862,9 @@ class Vigilante_Admin {
                 'testHeaders'         => __( 'Test Headers', 'vigilante' ),
                 'testing'             => __( 'Testing...', 'vigilante' ),
                 'score'               => __( 'Score', 'vigilante' ),
-                'enabledHeaders'      => __( 'Enabled headers', 'vigilante' ),
-                'missingHeaders'      => __( 'Missing headers', 'vigilante' ),
+                'enabledHeaders'      => __( 'Passed', 'vigilante' ),
+                'missingHeaders'      => __( 'Failing', 'vigilante' ),
+                'headersMeasured'     => __( 'Measured right now on the home page of the site, with the same checks as Security Check.', 'vigilante' ),
                 'warnings'            => __( 'Warnings', 'vigilante' ),
                 // File integrity scan results strings
                 'scanResults'         => __( 'Scan Results', 'vigilante' ),
@@ -1988,9 +2011,6 @@ class Vigilante_Admin {
                 'searchNoResults'              => __( 'No matching settings found.', 'vigilante' ),
                 /* translators: %d: number of results that did not fit in the list. */
                 'searchMoreResults'            => __( '%d more results. Refine the search to see them.', 'vigilante' ),
-                // Modules string
-                /* translators: 1: enabled count, 2: total count */
-                'modulesEnabled'               => __( '%1$d / %2$d modules enabled', 'vigilante' ),
                 // Activity log label maps for JS rendering
                 'eventTypeLabels'              => array(
                     'login'    => __( 'Login', 'vigilante' ),
@@ -2076,6 +2096,7 @@ class Vigilante_Admin {
                 'analyzerQualityFair'          => __( 'Fair', 'vigilante' ),
                 'analyzerQualityPoor'          => __( 'Poor', 'vigilante' ),
                 'analyzerQualityCritical'      => __( 'Critical', 'vigilante' ),
+                'analyzerNotMeasured'          => __( 'Not measured', 'vigilante' ),
                 'analyzerLearnMore'            => __( 'Learn more', 'vigilante' ),
                 'analyzerInfoAllClear'         => __( 'All clear', 'vigilante' ),
                 /* translators: %d: number of findings in an info-only category */
@@ -2139,7 +2160,9 @@ class Vigilante_Admin {
                 <span class="dashicons dashicons-shield" aria-hidden="true"></span>
                 <strong>
                     <?php
-                    if ( 'critical' === $tone ) {
+                    if ( 'critical' === $tone && in_array( $summary['kind'], array( 'tasks', 'hooks' ), true ) ) {
+                        echo esc_html( $this->self_integrity_headline( $tone, $summary['state'] ) );
+                    } elseif ( 'critical' === $tone ) {
                         esc_html_e( 'Vigilant detected changes in its own files', 'vigilante' );
                     } elseif ( 'off' === $tone ) {
                         esc_html_e( 'Vigilant self-protection is switched off by code', 'vigilante' );
@@ -2152,14 +2175,20 @@ class Vigilante_Admin {
             <p class="vigilante-self-notice-text">
                 <span>
                     <?php
-                    if ( 'critical' === $tone ) {
+                    if ( 'critical' === $tone && ! empty( $summary['tasks'] ) ) {
+                        esc_html_e( 'Vigilant scheduled them again each time, but something keeps removing them. File Integrity says what to look for.', 'vigilante' );
+                    } elseif ( 'critical' === $tone && 'hooks' === $summary['kind'] ) {
+                        esc_html_e( 'Code on this site removed hooks that run the self-check of Vigilant. File Integrity says which ones and what to look for.', 'vigilante' );
+                    } elseif ( 'critical' === $tone ) {
                         esc_html_e( 'Your security plugin may have been tampered with, and while that is true nothing it reports can be trusted.', 'vigilante' );
                     } elseif ( 'off' === $tone ) {
                         esc_html_e( 'Nothing is checking that Vigilant own files are intact. File Integrity says which file switches it off.', 'vigilante' );
                     } else {
                         esc_html_e( 'File Integrity says what was found, what it means and what to do about it.', 'vigilante' );
                     }
-                    if ( $network ) {
+                    // Repairing is for a case about the files: tasks, removed
+                    // hooks and a filter are not repaired with a clean copy.
+                    if ( $network && ! empty( $summary['about_files'] ) ) {
                         echo ' ' . esc_html__( 'Only your network administrator can repair Vigilant, because its files are shared by every site in the network. Let them know.', 'vigilante' );
                     }
                     ?>
@@ -2663,8 +2692,8 @@ class Vigilante_Admin {
     /**
      * Render the Security Analyzer (Security Check) widget + expandable full report.
      *
-     * Lives in the Dashboard tab between the Configuration Score status card and
-     * the modules grid. Uses the last persisted scan to hydrate server-side so the
+     * Lives in the Dashboard tab above the configuration card and the modules
+     * grid: it carries the only letter of the page. Uses the last persisted scan to hydrate server-side so the
      * first paint shows real data; "Scan now" runs the 2-phase AJAX to refresh.
      *
      * @param array $last_scan      Result of Vigilante_Security_Analyzer::get_last_scan().
@@ -2697,12 +2726,32 @@ class Vigilante_Admin {
         $self_summary = $this->self_integrity_summary();
         $self_capped  = in_array( $self_summary['tone'], array( 'critical', 'off' ), true )
             || ( 'self_integrity' === ( isset( $last_scan['capped_by'] ) ? $last_scan['capped_by'] : '' ) );
+        // Why the note under the title says the score is capped: something
+        // that is true now, about tasks or about files, or only what the
+        // stored report found when it ran. In that last case the note does not
+        // say that anything is wrong now: a report stored before the notice
+        // about tasks closed, or before a repair, kept saying in the present
+        // that the files had been changed until the next scan.
+        $self_capped_now = in_array( $self_summary['tone'], array( 'critical', 'off' ), true );
+        $self_capped_why = 'stored';
+        if ( $self_capped_now ) {
+            $self_capped_why = 'files';
+            if ( 'tasks' === $self_summary['kind'] ) {
+                $self_capped_why = 'tasks';
+            } elseif ( in_array( $self_summary['kind'], array( 'off', 'hooks' ), true ) ) {
+                // The check itself is switched off or unhooked: no file was found changed.
+                $self_capped_why = 'check';
+            }
+        }
         if ( $self_capped && $has_data && $score > Vigilante_Security_Analyzer::SCORE_CAP_ON_TAMPER ) {
             $score = Vigilante_Security_Analyzer::SCORE_CAP_ON_TAMPER;
-            $grade = 'E';
+        }
+        if ( $has_data && '' !== $grade ) {
+            $grade = Vigilante_SA_Helpers::grade_for_score( $score );
         }
 
-        $quality = self::analyzer_quality_tag( $score );
+        $quality   = self::analyzer_quality_tag( $score );
+        $not_measured = isset( $counts['skip'] ) ? (int) $counts['skip'] : 0;
         ?>
         <div class="vigilante-analyzer" id="vigilante-analyzer"
              data-has-data="<?php echo $has_data ? '1' : '0'; ?>">
@@ -2729,10 +2778,20 @@ class Vigilante_Admin {
             </div>
 
             <?php if ( $self_capped ) : ?>
-            <p class="vigilante-analyzer-capped">
+            <p class="vigilante-analyzer-capped" data-why="<?php echo esc_attr( $self_capped_why ); ?>">
                 <span class="dashicons dashicons-shield" aria-hidden="true"></span>
-                <strong><?php esc_html_e( 'This score is not reliable right now.', 'vigilante' ); ?></strong>
-                <?php esc_html_e( 'Vigilant own files have been changed, and every other result on this page is produced by that same code. The score is held at the bottom of the scale until the files verify clean again.', 'vigilante' ); ?>
+                <strong><?php 'stored' === $self_capped_why ? esc_html_e( 'This score is from an earlier scan.', 'vigilante' ) : esc_html_e( 'This score is not reliable right now.', 'vigilante' ); ?></strong>
+                <?php
+                if ( 'stored' === $self_capped_why ) {
+                    esc_html_e( 'When this scan ran, Vigilant self-protection was reporting a critical finding, so the score was held at the bottom of the scale. Run a new scan to bring it up to date.', 'vigilante' );
+                } elseif ( 'tasks' === $self_capped_why ) {
+                    esc_html_e( 'Something keeps removing Vigilant scheduled tasks, so its scans and its daily check do not run when they should. The score is held at the bottom of the scale while that goes on.', 'vigilante' );
+                } elseif ( 'check' === $self_capped_why ) {
+                    esc_html_e( 'Code on this site is keeping Vigilant self-protection from running as it should, so the code that produces every other result on this page is not being checked as it should. The score is held at the bottom of the scale while that goes on.', 'vigilante' );
+                } else {
+                    esc_html_e( 'Vigilant own files have been changed, and every other result on this page is produced by that same code. The score is held at the bottom of the scale until the files verify clean again.', 'vigilante' );
+                }
+                ?>
                 <a href="<?php echo esc_url( admin_url( 'admin.php?page=vigilante&tab=file-integrity#vigilante-section-fi-self' ) ); ?>">
                     <?php esc_html_e( 'See what to do', 'vigilante' ); ?>
                 </a>
@@ -2778,6 +2837,18 @@ class Vigilante_Admin {
                         <span class="dashicons dashicons-dismiss" aria-hidden="true"></span>
                         <strong data-role="fail"><?php echo esc_html( isset( $counts['fail'] ) ? $counts['fail'] : 0 ); ?></strong>
                         <span class="vigilante-analyzer-count-label"><?php esc_html_e( 'Failing', 'vigilante' ); ?></span>
+                    </span>
+                    <?php
+                    // What could not be measured is left out of the score, so
+                    // it is said here: a score over fewer checks is not the
+                    // same score.
+                    ?>
+                    <span class="vigilante-analyzer-count vigilante-analyzer-count--skip" data-role="skip-wrap"
+                          title="<?php esc_attr_e( 'Checks that could not be run this time. They are not part of the score.', 'vigilante' ); ?>"
+                          <?php echo $not_measured > 0 ? '' : 'hidden'; ?>>
+                        <span class="dashicons dashicons-minus" aria-hidden="true"></span>
+                        <strong data-role="skip"><?php echo esc_html( $not_measured ); ?></strong>
+                        <span class="vigilante-analyzer-count-label"><?php esc_html_e( 'Not measured', 'vigilante' ); ?></span>
                     </span>
                 </div>
 
@@ -2858,16 +2929,27 @@ class Vigilante_Admin {
                     <?php foreach ( $categories_def as $slug => $meta ) :
                         $cat         = isset( $categories[ $slug ] ) ? $categories[ $slug ] : array();
                         $earned      = isset( $cat['earned'] ) ? (int) $cat['earned'] : 0;
-                        // Always use the declared meta as the source of truth for the maximum.
-                        // The cached scan may carry an old max if a check was added/removed
-                        // between releases (see 2.6.1: closed_plugins raised internal from 22 to 28
-                        // but cached scans still reported max=22 until reset).
-                        $cat_max     = (int) $meta['max'];
-                        $info_only   = ! empty( $meta['info_only'] ) || 0 === (int) $meta['max'];
-                        $cat_pct     = $cat_max > 0 ? (int) round( ( $earned / $cat_max ) * 100 ) : 0;
                         $checks      = isset( $cat['checks'] ) ? (array) $cat['checks'] : array();
+                        $info_only   = ! empty( $meta['info_only'] ) || 0 === (int) $meta['max'];
+                        // The maximum of a category is what its checks could
+                        // score this time: one that could not be measured, or
+                        // that is only informative, is not in it. The report
+                        // adds it up from the checks themselves
+                        // (Vigilante_Security_Analyzer::summarize_categories()),
+                        // so it cannot drift from them. Before the first scan
+                        // there are no checks and the declared figure is shown.
+                        $cat_max     = ( ! empty( $checks ) && isset( $cat['max'] ) ) ? (int) $cat['max'] : (int) $meta['max'];
+                        $cat_pct     = $cat_max > 0 ? (int) round( ( $earned / $cat_max ) * 100 ) : 0;
                         $cat_counts  = isset( $cat['counts'] ) && is_array( $cat['counts'] ) ? $cat['counts'] : array( 'pass' => 0, 'warn' => 0, 'fail' => 0, 'info' => 0 );
                         $cat_quality = self::analyzer_quality_tag( $cat_pct );
+                        // Nothing in the category could be scored: that is not
+                        // a zero, and it does not get the red label of one.
+                        if ( ! $info_only && ! empty( $checks ) && 0 === $cat_max ) {
+                            $cat_quality = array(
+                                'label' => __( 'Not measured', 'vigilante' ),
+                                'slug'  => 'info',
+                            );
+                        }
                         $info_count  = isset( $cat_counts['info'] ) ? (int) $cat_counts['info'] : 0;
                         ?>
                         <details class="vigilante-analyzer-category<?php echo $info_only ? ' vigilante-analyzer-category--info' : ''; ?>"
@@ -2918,7 +3000,7 @@ class Vigilante_Admin {
                                 <?php endif; ?>
                                 <?php if ( ! $info_only ) : ?>
                                     <span class="vigilante-analyzer-category-score">
-                                        <span data-role="earned"><?php echo esc_html( $earned ); ?></span><span class="vigilante-analyzer-category-score-sep">/</span><?php echo esc_html( $cat_max ); ?>
+                                        <span data-role="earned"><?php echo esc_html( $earned ); ?></span><span class="vigilante-analyzer-category-score-sep">/</span><span data-role="max"><?php echo esc_html( $cat_max ); ?></span>
                                         <span class="vigilante-analyzer-category-score-unit"><?php esc_html_e( 'pts', 'vigilante' ); ?></span>
                                     </span>
                                     <span class="vigilante-analyzer-category-bar" aria-hidden="true">
@@ -2997,21 +3079,25 @@ class Vigilante_Admin {
      * @return array{label:string,slug:string}
      */
     public static function analyzer_quality_tag( $pct ) {
-        $pct = max( 0, min( 100, (int) $pct ) );
-        // "Excellent" is reserved for a perfect score — a single missing point drops to Good.
-        if ( 100 === $pct ) {
-            return array( 'label' => __( 'Excellent', 'vigilante' ), 'slug' => 'a' );
+        if ( ! class_exists( 'Vigilante_SA_Helpers' ) ) {
+            require_once VIGILANTE_INCLUDES_DIR . 'security-analyzer/class-sa-helpers.php';
         }
-        if ( $pct >= 70 ) {
-            return array( 'label' => __( 'Good', 'vigilante' ), 'slug' => 'b' );
-        }
-        if ( $pct >= 50 ) {
-            return array( 'label' => __( 'Fair', 'vigilante' ), 'slug' => 'c' );
-        }
-        if ( $pct >= 30 ) {
-            return array( 'label' => __( 'Poor', 'vigilante' ), 'slug' => 'd' );
-        }
-        return array( 'label' => __( 'Critical', 'vigilante' ), 'slug' => 'e' );
+
+        // The word follows the letter, and the letter has one scale:
+        // Vigilante_SA_Helpers::grade_for_score().
+        $labels = array(
+            'A' => __( 'Excellent', 'vigilante' ),
+            'B' => __( 'Good', 'vigilante' ),
+            'C' => __( 'Fair', 'vigilante' ),
+            'D' => __( 'Poor', 'vigilante' ),
+            'E' => __( 'Critical', 'vigilante' ),
+        );
+        $grade  = Vigilante_SA_Helpers::grade_for_score( $pct );
+
+        return array(
+            'label' => $labels[ $grade ],
+            'slug'  => strtolower( $grade ),
+        );
     }
 
     /**
@@ -3115,8 +3201,91 @@ class Vigilante_Admin {
      * Render dashboard tab
      */
     /**
+     * The Vigilant configuration card of the Dashboard: how much is switched on
+     *
+     * A bar with a percentage and, on purpose, neither a circle nor a letter.
+     * Until 3.0.4 this was the Configuration Score, drawn exactly like the
+     * score of Security Check next to it, and two letters side by side read
+     * as two grades of the same site that did not agree. The grade is the one
+     * of Security Check, which measures the site; this only counts settings,
+     * so it sits with the recommendations and the module switches it counts.
+     * The figure is still the one of calculate_security_score().
+     *
+     * @since 3.0.5
+     *
+     * @param int         $security_score What calculate_security_score() gives, 0 to 100.
+     * @param array       $options        The settings of the plugin.
+     * @param string|bool $active_preset  Slug of the preset in force, if any.
+     * @param array       $presets        The presets, by slug.
+     */
+    private function render_configuration_card( $security_score, $options, $active_preset, $presets ) {
+        $modules    = ( isset( $options['modules'] ) && is_array( $options['modules'] ) ) ? $options['modules'] : array();
+        $modules_on = count( array_filter( $modules ) );
+        $level      = max( 0, min( 100, (int) $security_score ) );
+        ?>
+            <div class="vigilante-status-card vigilante-configuration-card">
+                <h2><?php esc_html_e( 'Vigilant configuration', 'vigilante' ); ?></h2>
+                <p class="vigilante-score-kind description">
+                    <?php esc_html_e( 'How much of what Vigilant offers is switched on here.', 'vigilante' ); ?>
+                </p>
+                <div class="vigilante-configuration-level">
+                    <div class="vigilante-configuration-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+                         aria-valuenow="<?php echo esc_attr( $level ); ?>"
+                         aria-label="<?php esc_attr_e( 'Vigilant configuration', 'vigilante' ); ?>">
+                        <span class="vigilante-configuration-bar-fill" style="width: <?php echo esc_attr( $level ); ?>%;"></span>
+                    </div>
+                    <strong class="vigilante-configuration-percent"><?php echo esc_html( $level ); ?>%</strong>
+                    <div class="vigilante-config-status">
+                        <?php if ( $active_preset && isset( $presets[ $active_preset ] ) ) : ?>
+                            <span class="vigilante-preset-badge vigilante-preset-<?php echo esc_attr( $active_preset ); ?>">
+                                <?php echo esc_html( $presets[ $active_preset ]['name'] ); ?>
+                            </span>
+                        <?php else : ?>
+                            <span class="vigilante-preset-badge vigilante-preset-custom">
+                                <?php esc_html_e( 'Custom Configuration', 'vigilante' ); ?>
+                            </span>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <p class="vigilante-configuration-modules description">
+                    <?php
+                    echo esc_html(
+                        sprintf(
+                            /* translators: 1: number of modules switched on, 2: number of modules */
+                            __( '%1$d of %2$d modules switched on.', 'vigilante' ),
+                            $modules_on,
+                            count( $modules )
+                        )
+                    );
+                    ?>
+                </p>
+
+                <?php 
+                $recommendations = $this->get_security_recommendations( $options );
+                if ( ! empty( $recommendations ) ) : 
+                ?>
+                <div class="vigilante-recommendations">
+                    <h4><?php esc_html_e( 'Recommendations', 'vigilante' ); ?></h4>
+                    <ul class="vigilante-recommendations-grid">
+                        <?php foreach ( $recommendations as $rec ) : ?>
+                        <li>
+                            <span class="dashicons dashicons-<?php echo esc_attr( $rec['icon'] ); ?> vigilante-priority-<?php echo esc_attr( $rec['priority'] ); ?>"></span>
+                            <?php echo esc_html( $rec['message'] ); ?>
+                            <?php if ( ! empty( $rec['tab'] ) ) : ?>
+                                <a href="<?php echo esc_url( admin_url( 'admin.php?page=vigilante&tab=' . $rec['tab'] ) ); ?>" class="vigilante-rec-link" title="<?php esc_attr_e( 'Go to settings', 'vigilante' ); ?>"><span class="dashicons dashicons-arrow-right-alt2"></span></a>
+                            <?php endif; ?>
+                        </li>
+                        <?php endforeach; ?>
+                    </ul>
+                </div>
+                <?php endif; ?>
+            </div>
+        <?php
+    }
+
+    /**
      * One line strip at the top of the Dashboard tab: the state of Vigilant own
-     * files, above the Configuration Score and the Security Check, because
+     * files, above the Security Check and the configuration card, because
      * nothing else on this screen means much while it is red.
      */
     private function render_self_protection_strip() {
@@ -3186,65 +3355,9 @@ class Vigilante_Admin {
         ?>
         <div class="vigilante-dashboard">
             <?php $this->render_self_protection_strip(); ?>
-            <div class="vigilante-status-card">
-                <h2><?php esc_html_e( 'Configuration Score', 'vigilante' ); ?></h2>
-                <p class="vigilante-score-kind description">
-                    <?php esc_html_e( 'How well Vigilante is configured right now. Pair it with the Security Check below to see the real-world result.', 'vigilante' ); ?>
-                </p>
-                <div class="vigilante-security-score">
-                    <?php
-                    // Grade thresholds: A (90+), B (70-89), C (50-69), D (30-49), E (0-29)
-                    if ( $security_score >= 90 ) {
-                        $grade = 'A';
-                    } elseif ( $security_score >= 70 ) {
-                        $grade = 'B';
-                    } elseif ( $security_score >= 50 ) {
-                        $grade = 'C';
-                    } elseif ( $security_score >= 30 ) {
-                        $grade = 'D';
-                    } else {
-                        $grade = 'E';
-                    }
-                    ?>
-                    <div class="vigilante-score-circle vigilante-grade-<?php echo esc_attr( strtolower( $grade ) ); ?>">
-                        <span class="vigilante-grade"><?php echo esc_html( $grade ); ?></span>
-                        <span class="vigilante-score-text"><?php echo esc_html( $security_score ); ?>%</span>
-                    </div>
-                    <div class="vigilante-config-status">
-                        <?php if ( $active_preset && isset( $presets[ $active_preset ] ) ) : ?>
-                            <span class="vigilante-preset-badge vigilante-preset-<?php echo esc_attr( $active_preset ); ?>">
-                                <?php echo esc_html( $presets[ $active_preset ]['name'] ); ?>
-                            </span>
-                        <?php else : ?>
-                            <span class="vigilante-preset-badge vigilante-preset-custom">
-                                <?php esc_html_e( 'Custom Configuration', 'vigilante' ); ?>
-                            </span>
-                        <?php endif; ?>
-                    </div>
-                </div>
-                
-                <?php 
-                $recommendations = $this->get_security_recommendations( $options );
-                if ( ! empty( $recommendations ) ) : 
-                ?>
-                <div class="vigilante-recommendations">
-                    <h4><?php esc_html_e( 'Recommendations', 'vigilante' ); ?></h4>
-                    <ul class="vigilante-recommendations-grid">
-                        <?php foreach ( $recommendations as $rec ) : ?>
-                        <li>
-                            <span class="dashicons dashicons-<?php echo esc_attr( $rec['icon'] ); ?> vigilante-priority-<?php echo esc_attr( $rec['priority'] ); ?>"></span>
-                            <?php echo esc_html( $rec['message'] ); ?>
-                            <?php if ( ! empty( $rec['tab'] ) ) : ?>
-                                <a href="<?php echo esc_url( admin_url( 'admin.php?page=vigilante&tab=' . $rec['tab'] ) ); ?>" class="vigilante-rec-link" title="<?php esc_attr_e( 'Go to settings', 'vigilante' ); ?>"><span class="dashicons dashicons-arrow-right-alt2"></span></a>
-                            <?php endif; ?>
-                        </li>
-                        <?php endforeach; ?>
-                    </ul>
-                </div>
-                <?php endif; ?>
-            </div>
-
             <?php $this->render_analyzer_widget( $analyzer_last_scan, $analyzer_history, $analyzer_categories_def, $analyzer_settings ); ?>
+
+            <?php $this->render_configuration_card( $security_score, $options, $active_preset, $presets ); ?>
 
             <div class="vigilante-modules-grid">
                 <h2 id="vigilante-section-dashboard-modules"><?php esc_html_e( 'Security Modules', 'vigilante' ); ?></h2>
@@ -6683,6 +6796,13 @@ class Vigilante_Admin {
         $anchors = ( isset( $state['anchors'] ) && is_array( $state['anchors'] ) ) ? $state['anchors'] : array();
         switch ( $tone ) {
             case 'critical':
+                $kind = Vigilante_Self_Integrity::alarm_kind( $state, Vigilante_Self_Integrity::is_on() );
+                if ( 'tasks' === $kind ) {
+                    return __( 'Vigilant scheduled tasks keep being removed', 'vigilante' );
+                }
+                if ( 'hooks' === $kind ) {
+                    return __( 'Something removed the hooks of Vigilant self-protection', 'vigilante' );
+                }
                 return __( 'Changes detected in Vigilant own files', 'vigilante' );
             case 'warning':
                 return ( $files < 1 )
@@ -6735,12 +6855,29 @@ class Vigilante_Admin {
         $enabled  = Vigilante_Self_Integrity::is_on();
         $state    = Vigilante_Self_Integrity::display_state();
         $findings = Vigilante_Self_Integrity::state_findings( $state, $enabled );
+        $groups   = $this->self_findings_by_case( $findings );
+        // Whether any case on screen is one a clean copy of the plugin fixes,
+        // which is what the guidance marks as repair: the notice only sends
+        // to whoever can repair then. Tasks, removed hooks, a filter and a
+        // check that has not run for days are not.
+        $about_files = false;
+        foreach ( $groups as $group ) {
+            if ( ! empty( $group['repair'] ) ) {
+                $about_files = true;
+                break;
+            }
+        }
         $summary = array(
-            'state'    => $state,
-            'findings' => $findings,
-            'groups'   => $this->self_findings_by_case( $findings ),
-            'tone'     => Vigilante_Self_Integrity::tone( $state, $enabled ),
-            'enabled'  => $enabled,
+            'state'       => $state,
+            'findings'    => $findings,
+            'groups'      => $groups,
+            'about_files' => $about_files,
+            'tone'        => Vigilante_Self_Integrity::tone( $state, $enabled ),
+            'enabled'     => $enabled,
+            // What the alarm is about (files, off, hooks or tasks), so no
+            // text says that files changed when that is not what was found.
+            'kind'        => Vigilante_Self_Integrity::alarm_kind( $state, $enabled ),
+            'tasks'       => Vigilante_Self_Integrity::alarm_is_about_tasks( $state, $enabled ),
         );
         $cached = $summary;
         return $summary;
@@ -6809,12 +6946,40 @@ class Vigilante_Admin {
             <div class="vigilante-self-cases">
                 <?php
                 $first = true;
+                /*
+                 * Reinstalling fixes files, not a filter someone wrote, a hook
+                 * someone removed or a scheduled task that went missing: the
+                 * button only appears when at least one of the cases on screen
+                 * is one a clean copy solves. Offering it next to "switched off
+                 * by code" was telling the person to fix something else. And
+                 * when every case is about scheduled tasks there is nothing to
+                 * repair, so the note about repairing by hand stays out too.
+                 */
+                $vg_offer_repair = false;
+                $vg_scan_helps   = false;
                 foreach ( $groups as $group ) {
-                    $this->render_self_case( $group, $group['files'], $group['severity'], $first );
+                    $vg_is_task = ( 0 === strpos( (string) $group['key'], 'cron_' ) );
+                    $vg_unit    = 'file';
+                    if ( $vg_is_task ) {
+                        $vg_unit = 'task';
+                    } elseif ( 'hooks_removed' === $group['key'] ) {
+                        $vg_unit = 'hook';
+                    }
+                    $this->render_self_case( $group, $group['files'], $group['severity'], $first, $vg_unit );
                     $first = false;
+                    if ( ! empty( $group['repair'] ) ) {
+                        $vg_offer_repair = true;
+                    }
+                    // A scan checks files: it clears nothing about a task, which
+                    // closes on its own, nor about removed hooks, which the next
+                    // admin page looks for again.
+                    if ( ! $vg_is_task && 'hooks_removed' !== $group['key'] ) {
+                        $vg_scan_helps = true;
+                    }
                 }
 
-                if ( in_array( $tone, array( 'critical', 'warning' ), true ) ) {
+                // How to replace the files by hand is for a case a clean copy fixes.
+                if ( $vg_offer_repair && in_array( $tone, array( 'critical', 'warning' ), true ) ) {
                     $can_repair = class_exists( 'Vigilante_Self_Repair' ) && Vigilante_Self_Repair::can_repair();
                     if ( ! $can_repair ) {
                         if ( class_exists( 'Vigilante_Self_Repair' ) && ! Vigilante_Self_Repair::folder_is_the_distributed_one() ) {
@@ -6844,7 +7009,8 @@ class Vigilante_Admin {
                 ?>
             </div>
 
-            <?php if ( $total > count( $findings ) ) : ?>
+            <?php // Switched off, the box only holds that case: the stored total is of the last check that ran. ?>
+            <?php if ( $enabled && $total > count( $findings ) ) : ?>
             <p class="description">
                 <?php
                 printf(
@@ -6857,22 +7023,6 @@ class Vigilante_Admin {
             </p>
             <?php endif; ?>
 
-            <?php
-            /*
-             * Reinstalling fixes files, not a filter someone wrote or a hook
-             * someone removed: the button only appears when at least one of the
-             * cases on screen is one a clean copy solves. Offering it next to
-             * "switched off by code" was telling the person to fix something
-             * else.
-             */
-            $vg_offer_repair = false;
-            foreach ( $groups as $vg_group ) {
-                if ( ! empty( $vg_group['repair'] ) ) {
-                    $vg_offer_repair = true;
-                    break;
-                }
-            }
-            ?>
             <p class="vigilante-self-actions">
                 <?php if ( $vg_offer_repair && class_exists( 'Vigilante_Self_Repair' ) && Vigilante_Self_Repair::can_repair() ) : ?>
                     <a class="button button-primary" href="<?php echo esc_url( Vigilante_Self_Repair::action_url() ); ?>">
@@ -6881,7 +7031,7 @@ class Vigilante_Admin {
                     <span class="description">
                         <?php esc_html_e( 'It downloads a clean copy from WordPress.org, asks before changing anything, and keeps your settings and log.', 'vigilante' ); ?>
                     </span>
-                <?php else : ?>
+                <?php elseif ( $vg_scan_helps ) : ?>
                     <span class="description">
                         <?php esc_html_e( 'After fixing it, run a new scan with the Run Scan Now button above.', 'vigilante' ); ?>
                     </span>
@@ -6940,8 +7090,11 @@ class Vigilante_Admin {
      * @param array  $files    Paths this case was found in.
      * @param string $severity critical|warning, empty for the how-to-repair row.
      * @param bool   $open     Whether the row starts open.
+     * @param string $unit     What is being counted, file, task or hook: a
+     *                         scheduled task and a removed hook were counted
+     *                         as "1 file" until 3.0.4.
      */
-    private function render_self_case( $guidance, $files = array(), $severity = '', $open = false ) {
+    private function render_self_case( $guidance, $files = array(), $severity = '', $open = false, $unit = 'file' ) {
         $shown  = array_slice( (array) $files, 0, 20 );
         $hidden = count( (array) $files ) - count( $shown );
         ?>
@@ -6951,11 +7104,25 @@ class Vigilante_Admin {
                 <?php if ( ! empty( $files ) ) : ?>
                     <span class="vigilante-self-case-count">
                         <?php
-                        printf(
-                            /* translators: %d: number of files of this finding */
-                            esc_html( _n( '%d file', '%d files', count( (array) $files ), 'vigilante' ) ),
-                            (int) count( (array) $files )
-                        );
+                        if ( 'task' === $unit ) {
+                            printf(
+                                /* translators: %d: number of scheduled tasks of this finding */
+                                esc_html( _n( '%d task', '%d tasks', count( (array) $files ), 'vigilante' ) ),
+                                (int) count( (array) $files )
+                            );
+                        } elseif ( 'hook' === $unit ) {
+                            printf(
+                                /* translators: %d: number of removed hooks of this finding */
+                                esc_html( _n( '%d hook', '%d hooks', count( (array) $files ), 'vigilante' ) ),
+                                (int) count( (array) $files )
+                            );
+                        } else {
+                            printf(
+                                /* translators: %d: number of files of this finding */
+                                esc_html( _n( '%d file', '%d files', count( (array) $files ), 'vigilante' ) ),
+                                (int) count( (array) $files )
+                            );
+                        }
                         ?>
                     </span>
                 <?php endif; ?>
@@ -9504,11 +9671,97 @@ class Vigilante_Admin {
             wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
         }
 
-        // Get security grade from settings (not from actual HTTP request)
-        $security_headers = new Vigilante_Security_Headers( $this->settings );
-        $results = $security_headers->get_security_grade();
+        $results = $this->headers_test_results();
+        if ( is_wp_error( $results ) ) {
+            wp_send_json_error( $results->get_error_message() );
+        }
 
         wp_send_json_success( $results );
+    }
+
+    /**
+     * What the Test Headers button shows: the headers that reach the browser
+     *
+     * Asks the home page and runs the header checks of Security Check on the
+     * answer, so the two can never say different things about the same site.
+     * Until 3.0.4 the button read the settings of the tab, graded them on a
+     * scale of its own and listed them as enabled headers: on a server that
+     * does not apply the rules of Vigilant it showed a B while Security
+     * Check, which does look, said that no header arrived.
+     *
+     * @since 3.0.5
+     *
+     * The lists carry text read from the answer of the site (the value of a
+     * header), so whoever prints them escapes them: displayHeaderResults()
+     * in assets/js/admin.js.
+     *
+     * They travel as passed, failing and notes. The names they had until
+     * 3.0.4 (headers, missing and warnings) stay in the answer, empty: a
+     * page that was open when the plugin was updated still runs the script
+     * it loaded, which prints those three without escaping them, and it must
+     * get the grade and no text read from the site.
+     *
+     * @return array|WP_Error grade, score (0 to 100), passed, failing and notes.
+     */
+    private function headers_test_results() {
+        if ( ! class_exists( 'Vigilante_Security_Analyzer' ) ) {
+            require_once VIGILANTE_INCLUDES_DIR . 'class-security-analyzer.php';
+        }
+        // The constructor loads the checks and their helpers.
+        new Vigilante_Security_Analyzer( $this->settings, $this->activity_log );
+        $no_answer = new WP_Error( 'vigilante_no_answer', __( 'Could not fetch the homepage to read response headers.', 'vigilante' ) );
+        // A new request every time: the button is pressed right after saving.
+        // With no answer there is nothing to grade, and the checks would ask
+        // for the page a second time.
+        if ( null === Vigilante_SA_Helpers::probe_home( true ) ) {
+            return $no_answer;
+        }
+
+        $category = new Vigilante_SA_Category_Headers( $this->settings );
+        $passed   = array();
+        $failed   = array();
+        $notes    = array();
+        $earned   = 0;
+        $max      = 0;
+
+        foreach ( $category->run( 'slow' ) as $check ) {
+            if ( Vigilante_SA_Check_Result::STATE_SKIP === $check->state ) {
+                continue;
+            }
+            if ( Vigilante_SA_Check_Result::STATE_INFO === $check->state ) {
+                $notes[] = $check->detail;
+                continue;
+            }
+            $earned += (int) $check->score;
+            $max    += (int) $check->max;
+            // The three lists are the three counters of Security Check.
+            if ( Vigilante_SA_Check_Result::STATE_PASS === $check->state ) {
+                $passed[] = $check->detail;
+            } elseif ( Vigilante_SA_Check_Result::STATE_WARN === $check->state ) {
+                $notes[] = $check->detail;
+            } else {
+                $failed[] = $check->detail;
+            }
+        }
+
+        if ( $max < 1 ) {
+            return $no_answer;
+        }
+
+        $score  = (int) round( 100 * $earned / $max );
+        $sender = new Vigilante_Security_Headers( $this->settings );
+
+        return array(
+            'grade'    => Vigilante_SA_Helpers::grade_for_score( $score ),
+            'score'    => $score,
+            'passed'   => $passed,
+            'failing'  => $failed,
+            'notes'    => array_merge( $notes, $sender->get_csp_warnings() ),
+            // For the script of a page opened before the update: see above.
+            'headers'  => array(),
+            'missing'  => array(),
+            'warnings' => array(),
+        );
     }
 
     /**

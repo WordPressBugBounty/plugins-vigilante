@@ -552,113 +552,45 @@ class Vigilante_Security_Headers {
     }
 
     /**
-     * Get security grade based on enabled headers
+     * Warnings about the Content-Security-Policy as it is configured
      *
-     * @return array
+     * They are about what is saved in the tab, not about what reaches the
+     * browser: that is measured by the checks of Security Check, which is
+     * also what the Test Headers button shows. Until 3.0.4 that button graded
+     * these settings and listed them as enabled headers without asking the
+     * site for anything.
+     *
+     * @since 3.0.5
+     *
+     * @return string[]
      */
-    public function get_security_grade() {
-        $score = 0;
-        $enabled = array();
-        $missing = array();
+    public function get_csp_warnings() {
         $warnings = array();
 
-        // X-Frame-Options (15 points)
-        if ( ! empty( $this->options['x_frame_options'] ) ) {
-            $score += 15;
-            $enabled[] = 'X-Frame-Options: ' . $this->options['x_frame_options'];
-        } else {
-            $missing[] = 'X-Frame-Options';
+        if ( empty( $this->options['csp']['enabled'] ) ) {
+            return $warnings;
         }
 
-        // X-Content-Type-Options (15 points)
-        if ( ! empty( $this->options['x_content_type_options'] ) ) {
-            $score += 15;
-            $enabled[] = 'X-Content-Type-Options: nosniff';
-        } else {
-            $missing[] = 'X-Content-Type-Options';
+        if ( ! empty( $this->options['csp']['report_only'] ) ) {
+            $warnings[] = __( 'CSP is in report-only mode: the browser reports what the policy would block, and blocks nothing.', 'vigilante' );
+            return $warnings;
         }
 
-        // HSTS (20 points)
-        if ( ! empty( $this->options['hsts']['enabled'] ) ) {
-            $hsts = $this->options['hsts'];
-            if ( $hsts['max_age'] >= 31536000 ) {
-                $score += 20;
-            } else {
-                $score += 10;
-                $warnings[] = 'HSTS max-age should be at least 1 year (31536000 seconds)';
+        if ( $this->is_csp_restrictive() ) {
+            $warnings[] = __( 'Restrictive CSP detected. Admin area is automatically excluded to prevent breaking the dashboard and block editor.', 'vigilante' );
+        }
+
+        foreach ( $this->get_csp_compatibility_issues() as $issue ) {
+            if ( 'high' === $issue['severity'] ) {
+                $warnings[] = sprintf(
+                    /* translators: 1: CSP directive name, 2: Issue description */
+                    __( 'CSP %1$s: %2$s', 'vigilante' ),
+                    $issue['directive'],
+                    $issue['issue']
+                );
             }
-            $enabled[] = 'Strict-Transport-Security';
-        } else {
-            $missing[] = 'Strict-Transport-Security (HSTS)';
         }
 
-        // CSP (30 points; absorbs the 10 points freed by retiring the deprecated X-XSS-Protection)
-        if ( ! empty( $this->options['csp']['enabled'] ) ) {
-            if ( empty( $this->options['csp']['report_only'] ) ) {
-                $score += 30;
-                $enabled[] = 'Content-Security-Policy';
-                
-                // Add warning if CSP is restrictive
-                if ( $this->is_csp_restrictive() ) {
-                    $warnings[] = __( 'Restrictive CSP detected. Admin area is automatically excluded to prevent breaking the dashboard and block editor.', 'vigilante' );
-                }
-
-                // Check for specific compatibility issues
-                $csp_issues = $this->get_csp_compatibility_issues();
-                foreach ( $csp_issues as $issue ) {
-                    if ( 'high' === $issue['severity'] ) {
-                        $warnings[] = sprintf(
-                            /* translators: 1: CSP directive name, 2: Issue description */
-                            __( 'CSP %1$s: %2$s', 'vigilante' ),
-                            $issue['directive'],
-                            $issue['issue']
-                        );
-                    }
-                }
-            } else {
-                $score += 15;
-                $enabled[] = 'Content-Security-Policy-Report-Only';
-                $warnings[] = 'CSP is in report-only mode (recommended for testing)';
-            }
-        } else {
-            $missing[] = 'Content-Security-Policy';
-        }
-
-        // Referrer-Policy (10 points)
-        if ( ! empty( $this->options['referrer_policy'] ) ) {
-            $score += 10;
-            $enabled[] = 'Referrer-Policy: ' . $this->options['referrer_policy'];
-        } else {
-            $missing[] = 'Referrer-Policy';
-        }
-
-        // Permissions-Policy (10 points)
-        if ( ! empty( $this->options['permissions_policy']['enabled'] ) ) {
-            $score += 10;
-            $enabled[] = 'Permissions-Policy';
-        } else {
-            $missing[] = 'Permissions-Policy';
-        }
-
-        // Calculate grade
-        if ( $score >= 90 ) {
-            $grade = 'A';
-        } elseif ( $score >= 80 ) {
-            $grade = 'B';
-        } elseif ( $score >= 70 ) {
-            $grade = 'C';
-        } elseif ( $score >= 60 ) {
-            $grade = 'D';
-        } else {
-            $grade = 'F';
-        }
-
-        return array(
-            'grade'    => $grade,
-            'score'    => $score,
-            'headers'  => $enabled,
-            'missing'  => $missing,
-            'warnings' => $warnings,
-        );
+        return $warnings;
     }
 }

@@ -72,9 +72,17 @@ class Vigilante_SA_Category_Files {
             return Vigilante_SA_Check_Result::pass( $args );
         }
 
-        if ( Vigilante_SA_Helpers::public_url_returns_ok( 'wp-content/debug.log' ) ) {
+        $state = Vigilante_SA_Helpers::public_url_state( 'wp-content/debug.log' );
+
+        if ( 'reachable' === $state ) {
             $args['detail'] = __( 'wp-content/debug.log is reachable publicly. Errors and paths are leaking.', 'vigilante' );
             return Vigilante_SA_Check_Result::fail( $args );
+        }
+
+        // No answer is not a file that is protected.
+        if ( 'unknown' === $state ) {
+            $args['detail'] = Vigilante_SA_Helpers::unreachable_detail( '/wp-content/debug.log' );
+            return Vigilante_SA_Check_Result::skip( $args );
         }
 
         $args['detail'] = __( 'wp-content/debug.log exists but is not publicly reachable.', 'vigilante' );
@@ -90,9 +98,16 @@ class Vigilante_SA_Category_Files {
             'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'firewall', 'vigilante-section-firewall-server' ),
         );
 
-        if ( Vigilante_SA_Helpers::public_url_returns_ok( '.env' ) ) {
+        $state = Vigilante_SA_Helpers::public_url_state( '.env' );
+
+        if ( 'reachable' === $state ) {
             $args['detail'] = __( 'A public /.env file is reachable at the site root. This typically leaks credentials.', 'vigilante' );
             return Vigilante_SA_Check_Result::fail( $args );
+        }
+
+        if ( 'unknown' === $state ) {
+            $args['detail'] = Vigilante_SA_Helpers::unreachable_detail( '/.env' );
+            return Vigilante_SA_Check_Result::skip( $args );
         }
 
         $args['detail'] = __( 'No public /.env file is reachable.', 'vigilante' );
@@ -108,9 +123,16 @@ class Vigilante_SA_Category_Files {
             'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'firewall', 'vigilante-section-firewall-server' ),
         );
 
-        if ( Vigilante_SA_Helpers::public_url_returns_ok( '.git/config' ) ) {
+        $state = Vigilante_SA_Helpers::public_url_state( '.git/config' );
+
+        if ( 'reachable' === $state ) {
             $args['detail'] = __( 'A public /.git/config file is reachable. The repository contents may be cloneable.', 'vigilante' );
             return Vigilante_SA_Check_Result::fail( $args );
+        }
+
+        if ( 'unknown' === $state ) {
+            $args['detail'] = Vigilante_SA_Helpers::unreachable_detail( '/.git/config' );
+            return Vigilante_SA_Check_Result::skip( $args );
         }
 
         $args['detail'] = __( 'No public /.git/config file is reachable.', 'vigilante' );
@@ -135,11 +157,12 @@ class Vigilante_SA_Category_Files {
             'wp-config-sample.php.bak',
         );
 
-        $leaked = array();
-        foreach ( $candidates as $rel ) {
-            if ( Vigilante_SA_Helpers::abspath_file_exists( $rel ) && Vigilante_SA_Helpers::public_url_returns_ok( $rel ) ) {
-                $leaked[] = $rel;
-            }
+        list( $leaked, $unknown ) = $this->reachable_among( $candidates );
+
+        if ( empty( $leaked ) && ! empty( $unknown ) ) {
+            $args['data']   = array( 'unknown' => $unknown );
+            $args['detail'] = Vigilante_SA_Helpers::unreachable_detail( '/' . implode( ', /', $unknown ) );
+            return Vigilante_SA_Check_Result::skip( $args );
         }
 
         if ( empty( $leaked ) ) {
@@ -217,15 +240,13 @@ class Vigilante_SA_Category_Files {
             'test.php',
         );
 
-        $leaked = array();
-        foreach ( $candidates as $rel ) {
-            if ( 'install.php' === $rel ) {
-                // Skip WP core install.php (always present during setup).
-                continue;
-            }
-            if ( Vigilante_SA_Helpers::abspath_file_exists( $rel ) && Vigilante_SA_Helpers::public_url_returns_ok( $rel ) ) {
-                $leaked[] = $rel;
-            }
+        // WP core install.php is always present during setup: not asked for.
+        list( $leaked, $unknown ) = $this->reachable_among( array_diff( $candidates, array( 'install.php' ) ) );
+
+        if ( empty( $leaked ) && ! empty( $unknown ) ) {
+            $args['data']   = array( 'unknown' => $unknown );
+            $args['detail'] = Vigilante_SA_Helpers::unreachable_detail( '/' . implode( ', /', $unknown ) );
+            return Vigilante_SA_Check_Result::skip( $args );
         }
 
         if ( empty( $leaked ) ) {
@@ -260,18 +281,28 @@ class Vigilante_SA_Category_Files {
         // a savvy user might define DISABLE_WP_CRON manually outside the plugin.
         $constant_active   = defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON;
         $disable_setting   = (int) $this->settings->get_option( 'wp_hardening', 'disable_wp_cron', 0 );
-        $htaccess_setting  = (int) $this->settings->get_option( 'firewall', 'protect_wp_cron', 0 );
+        // Whether the rule is in force is read from .htaccess itself and not
+        // worked out from the settings. The Protection block that carries it is
+        // written and removed from four places that do not agree on when (the
+        // Firewall module alone, or also the two server identity settings of
+        // the headers tab), so the saved setting says what was asked for and
+        // only the file says what is there.
+        $rule_saved        = (bool) $this->settings->get_option( 'firewall', 'protect_wp_cron', 0 );
+        $htaccess_setting  = (int) $this->wp_cron_rule_is_written();
 
         $url      = home_url( '/wp-cron.php?doing_wp_cron=probe' );
         $response = Vigilante_SA_Helpers::get( $url, array( 'redirection' => 0, 'timeout' => 2 ) );
         if ( is_wp_error( $response ) ) {
-            $args['detail'] = __( 'Could not reach wp-cron.php from this server. If a firewall is blocking it, that is the desired state.', 'vigilante' );
+            // No answer proves nothing either way: a firewall that drops the
+            // request looks the same from here as a server that was slow.
+            // Until 3.0.4 it passed.
+            $args['detail'] = Vigilante_SA_Helpers::unreachable_detail( '/wp-cron.php' );
             $args['data']   = array(
                 'constant_active'  => $constant_active,
                 'disable_setting'  => (bool) $disable_setting,
                 'htaccess_setting' => (bool) $htaccess_setting,
             );
-            return Vigilante_SA_Check_Result::pass( $args );
+            return Vigilante_SA_Check_Result::skip( $args );
         }
 
         $code = (int) wp_remote_retrieve_response_code( $response );
@@ -313,7 +344,70 @@ class Vigilante_SA_Category_Files {
             return Vigilante_SA_Check_Result::warn( $args );
         }
 
+        if ( $rule_saved ) {
+            $args['detail'] = __( '"Protect wp-cron.php" is saved in Vigilant, but its rule is not in .htaccess, so /wp-cron.php is still reachable. Open the Firewall tab and save it to write the rule again.', 'vigilante' );
+            return Vigilante_SA_Check_Result::warn( $args );
+        }
+
         $args['detail'] = __( '/wp-cron.php is publicly reachable. WordPress is using the default page-view trigger, which is functional but lets attackers spam the URL to exhaust resources. If your host supports real cron, enable both "Disable WP Cron" (WP Hardening) and "Protect wp-cron.php" (Firewall) and add a server-side cron job calling wp-cron.php from CLI.', 'vigilante' );
         return Vigilante_SA_Check_Result::warn( $args );
+    }
+
+    /**
+     * Whether the rule that blocks wp-cron.php is inside Vigilant's block in .htaccess
+     *
+     * @since 3.0.5
+     *
+     * @return bool
+     */
+    private function wp_cron_rule_is_written() {
+        if ( ! class_exists( 'Vigilante_Htaccess_Manager' ) ) {
+            require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-manager.php';
+        }
+
+        $content = Vigilante_Htaccess_Manager::get_instance()->get_content();
+
+        if ( ! is_string( $content ) ) {
+            return false;
+        }
+
+        $start = strpos( $content, '# BEGIN Vigilante Protection' );
+        $end   = strpos( $content, '# END Vigilante Protection' );
+
+        if ( false === $start || false === $end || $end < $start ) {
+            return false;
+        }
+
+        return false !== strpos( substr( $content, $start, $end - $start ), '<Files "wp-cron.php">' );
+    }
+
+    /**
+     * Which of these files of the site root are on disk and can be fetched
+     *
+     * @since 3.0.5
+     *
+     * @param string[] $candidates Paths relative to ABSPATH.
+     * @return array Two lists: the ones a request reached, and the ones that
+     *               are on disk but whose request got no answer.
+     */
+    private function reachable_among( array $candidates ) {
+        $leaked  = array();
+        $unknown = array();
+
+        foreach ( $candidates as $rel ) {
+            if ( ! Vigilante_SA_Helpers::abspath_file_exists( $rel ) ) {
+                continue;
+            }
+
+            $state = Vigilante_SA_Helpers::public_url_state( $rel );
+
+            if ( 'reachable' === $state ) {
+                $leaked[] = $rel;
+            } elseif ( 'unknown' === $state ) {
+                $unknown[] = $rel;
+            }
+        }
+
+        return array( $leaked, $unknown );
     }
 }

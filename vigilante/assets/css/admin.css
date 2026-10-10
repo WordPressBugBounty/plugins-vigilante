@@ -399,6 +399,44 @@
     margin-top: 15px;
 }
 
+/* Vigilant configuration: a level, not a grade. No circle, no letter and
+   none of the grade colours, so it is not read as a second score. */
+.vigilante-configuration-level {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.vigilante-configuration-bar {
+    flex: 1 1 240px;
+    height: 10px;
+    border: 1px solid #dcdcde;
+    border-radius: 5px;
+    background: #f0f0f1;
+    overflow: hidden;
+}
+
+.vigilante-configuration-bar-fill {
+    display: block;
+    height: 100%;
+    background: #999999;
+}
+
+.vigilante-configuration-percent {
+    min-width: 44px;
+    font-size: 16px;
+    text-align: right;
+}
+
+.vigilante-configuration-level .vigilante-config-status {
+    margin-top: 0;
+}
+
+.vigilante-configuration-modules {
+    margin: 8px 0 0;
+}
+
 .vigilante-preset-badge {
     display: inline-block;
     padding: 5px 12px;
@@ -2793,6 +2831,15 @@
 
 .vigilante-analyzer-count--fail .dashicons {
     color: #c62828;
+}
+
+.vigilante-analyzer-count--skip .dashicons {
+    color: #646970;
+}
+
+/* display: flex above would otherwise win over the hidden attribute. */
+.vigilante-analyzer-count[hidden] {
+    display: none;
 }
 
 /* Sparkline (trend) */

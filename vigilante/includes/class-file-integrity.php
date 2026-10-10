@@ -6123,6 +6123,7 @@ class Vigilante_File_Integrity {
         // without a superglobal of the request, so only the files that name
         // one are prepared that way, about one in twenty. The third is looked
         // for in the file as it is and checked again that way when it matches.
+        // The dynamic function constructor, further down, reuses the copy.
         $code = null;
 
         if ( $this->found( '/\$_(?:GET|POST|REQUEST|COOKIE|SERVER)\b/', $content ) ) {
@@ -6156,10 +6157,23 @@ class Vigilante_File_Integrity {
             return __( 'a file from another server is included', 'vigilante' );
         }
 
-        // Deprecated dynamic function constructor, nearly always malicious in modern code
-        if ( ! empty( $cf ) && $this->needle_present( $content, $cf ) ) {
-            // The name alone, for the same reason as the labels above.
-            return rtrim( $cf, '(' );
+        // Deprecated dynamic function constructor, nearly always malicious in
+        // modern code. It is a call, so it is looked for in the code and not
+        // in the comments, like the three above: an old call left commented
+        // out runs nothing, and plugins that are not on WordPress.org keep
+        // them. Only the files that name it are prepared that way, and the
+        // search goes straight to the copy without comments, so a comment
+        // between the name and its parenthesis hides nothing either.
+        if ( ! empty( $cf ) && false !== stripos( $content, rtrim( $cf, '(' ) ) ) {
+            if ( null === $code ) {
+                $code = $this->blank_comments( $content );
+            }
+
+            // When PHP cannot be asked what is a comment, the match stands.
+            if ( $this->needle_present( false === $code ? $content : $code, $cf ) ) {
+                // The name alone, for the same reason as the labels above.
+                return rtrim( $cf, '(' );
+            }
         }
 
         // Remote fetch piped into unserialize: a PHP object-injection / supply-chain

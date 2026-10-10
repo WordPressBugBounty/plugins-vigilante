@@ -246,7 +246,10 @@ class Vigilante_SA_Category_SSL {
             'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'headers', 'vigilante-section-headers-main' ),
         );
 
-        $fix_setting = (int) $this->settings->get_option( 'security_headers', 'fix_mixed_content', 0 );
+        // The fix is applied by the HTTPS enforcer, which only loads with the
+        // Security Headers module on.
+        $fix_setting = (int) ( $this->settings->is_module_enabled( 'security_headers' )
+            && $this->settings->get_option( 'security_headers', 'fix_mixed_content', 0 ) );
         $probe       = Vigilante_SA_Helpers::probe_home();
 
         if ( null === $probe ) {

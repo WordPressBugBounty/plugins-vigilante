@@ -27,24 +27,21 @@ class Vigilante_Security_Analyzer {
     const OPTION_HISTORY      = 'vigilante_analyzer_history';
     const OPTION_FIX_LOG      = 'vigilante_analyzer_fix_log';
     const HISTORY_LIMIT       = 30;
-    // Legacy constant kept for backward compatibility. The real source of truth
-    // is total_max_points(), which sums the declared "max" of every category
-    // in get_categories(). Bump this only when manually verifying the sum.
-    const TOTAL_MAX_POINTS    = 106;
     const REGRESSION_THRESHOLD = 10; // Points dropped before sending the alert email.
     /*
      * Highest score a site can show while the self-protection check reports
      * tampering: every other result of this report was computed by the same
      * code whose files were reported as changed, so a high number next to it
-     * would be a lie. 29 is the top of grade E in compute_grade().
+     * would be a lie. 29 sits inside grade E of
+     * Vigilante_SA_Helpers::grade_for_score().
      */
     const SCORE_CAP_ON_TAMPER = 29;
 
     /**
-     * Sum of the declared "max" of every category. This is the canonical
-     * maximum a scan can earn. Using this instead of the constant prevents
-     * the desync we hit in 2.6.0 (a new check raised the internal category
-     * max but the global total stayed at the pre-bump value).
+     * Sum of the declared "max" of every category: what a scan earns when
+     * every check can be measured. It is what the widget shows before the
+     * first scan. A report is graded against what it did measure, which
+     * summarize_categories() adds up from the checks themselves.
      *
      * @return int
      */
@@ -86,12 +83,15 @@ class Vigilante_Security_Analyzer {
             'wp_exposure' => array(
                 'slug'  => 'wp_exposure',
                 'label' => __( 'WordPress Exposure', 'vigilante' ),
-                'max'   => 18,
+                // 18 -> 13: the active theme row is informational now. Whether
+                // the theme has an update pending is already scored by the
+                // theme_updates check of the internal category.
+                'max'   => 13,
             ),
             'access'      => array(
                 'slug'  => 'access',
                 'label' => __( 'Access & Authentication', 'vigilante' ),
-                'max'   => 20,
+                'max'   => 18,
             ),
             'files'       => array(
                 'slug'  => 'files',
@@ -222,14 +222,12 @@ class Vigilante_Security_Analyzer {
      * @return array
      */
     private function build_report( $results, $phase, $started ) {
-        $cat_meta = self::get_categories();
-
         $categories = array();
-        foreach ( $cat_meta as $slug => $meta ) {
+        foreach ( self::get_categories() as $slug => $meta ) {
             $categories[ $slug ] = array(
                 'slug'   => $slug,
                 'label'  => $meta['label'],
-                'max'    => $meta['max'],
+                'max'    => 0,
                 'earned' => 0,
                 'checks' => array(),
                 'counts' => array(
@@ -242,68 +240,19 @@ class Vigilante_Security_Analyzer {
             );
         }
 
-        $total_earned = 0;
-        $total_max    = 0;
-        $counts       = array(
-            'pass' => 0,
-            'warn' => 0,
-            'fail' => 0,
-            'info' => 0,
-            'skip' => 0,
-        );
-
         foreach ( $results as $r ) {
-            if ( ! ( $r instanceof Vigilante_SA_Check_Result ) ) {
+            if ( ! ( $r instanceof Vigilante_SA_Check_Result ) || ! isset( $categories[ $r->category ] ) ) {
                 continue;
             }
-            $slug = $r->category;
-            if ( ! isset( $categories[ $slug ] ) ) {
-                continue;
-            }
-            $categories[ $slug ]['checks'][]             = $r->to_array();
-            $categories[ $slug ]['counts'][ $r->state ]  = isset( $categories[ $slug ]['counts'][ $r->state ] )
-                ? $categories[ $slug ]['counts'][ $r->state ] + 1
-                : 1;
-            $counts[ $r->state ] = isset( $counts[ $r->state ] ) ? $counts[ $r->state ] + 1 : 1;
-
-            if ( $r->counts_for_score() ) {
-                $categories[ $slug ]['earned'] += $r->score;
-                $total_earned                  += $r->score;
-                $total_max                     += $r->max;
-            }
+            $categories[ $r->category ]['checks'][] = $r->to_array();
         }
 
-        // Normalize against the declared category max so skipped checks don't erode the score.
-        $declared_max = self::total_max_points();
-        $grade        = Vigilante_SA_Helpers::compute_grade( $total_earned, $declared_max );
-
-        // Self-protection caps the score (see SCORE_CAP_ON_TAMPER). The same
-        // cap is applied when phases are merged, in rebuild_from_categories().
-        $capped_by = '';
-        foreach ( $results as $r ) {
-            if ( $r instanceof Vigilante_SA_Check_Result
-                && 'self_integrity' === $r->id
-                && Vigilante_SA_Check_Result::STATE_FAIL === $r->state ) {
-                $capped_by = 'self_integrity';
-                break;
-            }
-        }
-        if ( 'self_integrity' === $capped_by && $grade['score'] > self::SCORE_CAP_ON_TAMPER ) {
-            $grade['score'] = self::SCORE_CAP_ON_TAMPER;
-            $grade['grade'] = 'E';
-        }
-
-        return array(
-            'ran_at'         => $started,
-            'phase'          => $phase,
-            'total_earned'   => $total_earned,
-            'total_max'      => $declared_max,
-            'total_evaluated'=> $total_max, // Actual evaluated max (excluding skipped).
-            'score'          => $grade['score'],
-            'grade'          => $grade['grade'],
-            'capped_by'      => $capped_by,
-            'counts'         => $counts,
-            'categories'     => $categories,
+        return array_merge(
+            array(
+                'ran_at' => $started,
+                'phase'  => $phase,
+            ),
+            self::summarize_categories( $categories )
         );
     }
 
@@ -358,8 +307,10 @@ class Vigilante_Security_Analyzer {
             $existing['categories'][ $slug ]['checks'] = $merged_checks;
         }
 
-        // Recompute totals from the merged categories.
-        $rebuilt         = $this->rebuild_from_categories( $existing['categories'] );
+        // Recompute totals from the merged categories, with the ones that have
+        // not run yet in their place: the loop above only copies those that
+        // came with checks.
+        $rebuilt         = self::summarize_categories( self::with_every_category( $existing['categories'] ) );
         $existing        = array_merge( $existing, $rebuilt );
         $existing['ran_at']  = $report['ran_at'];
         $existing['phase']   = $phase;
@@ -369,15 +320,36 @@ class Vigilante_Security_Analyzer {
     }
 
     /**
-     * Recompute totals and grade from a categories array (used when merging phases).
+     * Totals, counts and grade of a set of categories, added up from their checks
      *
-     * @param array $categories
-     * @return array subset with total_earned, total_max, total_evaluated, score, grade, counts.
+     * The one place where a report is scored: a fresh scan, two phases merged
+     * and a stored report read back all go through here.
+     *
+     * A check that could not be measured (skip) and one that is only
+     * informative (info) are left out of both sides of the fraction, in their
+     * category and in the total. Until 3.0.4 the score was divided by the
+     * declared maximum of every category, so each of them counted as a zero:
+     * a probe that timed out lowered the score as if the check had failed, and
+     * a site that had switched COOP off on purpose could not reach 100. The
+     * maximum of a category is therefore the sum of the checks it did score,
+     * which also means it cannot drift from them when a check is added.
+     *
+     * A category none of whose checks has run yet is another matter: the scan
+     * is not finished. It counts with its declared maximum and nothing earned,
+     * or a first scan whose remote phase never arrives (a timeout, a closed
+     * tab) would be graded over the local checks alone and read better than a
+     * finished one.
+     *
+     * @since 3.0.5
+     *
+     * @param array $categories Categories with their checks.
+     * @return array categories, total_earned, total_max, total_evaluated, score, grade, capped_by, counts.
      */
-    private function rebuild_from_categories( array $categories ) {
-        $total_earned     = 0;
-        $total_evaluated  = 0;
-        $counts           = array(
+    public static function summarize_categories( array $categories ) {
+        $total_earned = 0;
+        $total_max    = 0;
+        $capped_by    = '';
+        $counts       = array(
             'pass' => 0,
             'warn' => 0,
             'fail' => 0,
@@ -385,14 +357,18 @@ class Vigilante_Security_Analyzer {
             'skip' => 0,
         );
 
-        // Resolve the canonical "max" of every category from the declared meta.
-        // Without this, merging fast/slow phases preserves a stale "max" from
-        // the previous scan, which is what produced the 28/22 desync after
-        // 2.6.0 added the closed_plugins check.
-        $cat_meta = self::get_categories();
+        $declared = self::get_categories();
+        $started  = false;
+        foreach ( $categories as $cat ) {
+            if ( is_array( $cat ) && ! empty( $cat['checks'] ) ) {
+                $started = true;
+                break;
+            }
+        }
 
         foreach ( $categories as $slug => $cat ) {
             $cat_earned = 0;
+            $cat_max    = 0;
             $cat_counts = array(
                 'pass' => 0,
                 'warn' => 0,
@@ -400,57 +376,92 @@ class Vigilante_Security_Analyzer {
                 'info' => 0,
                 'skip' => 0,
             );
-            foreach ( (array) $cat['checks'] as $c ) {
-                $state = isset( $c['state'] ) ? $c['state'] : Vigilante_SA_Check_Result::STATE_SKIP;
+            $checks     = ( is_array( $cat ) && isset( $cat['checks'] ) ) ? (array) $cat['checks'] : array();
+
+            // Not run yet, in a scan that has started: pending, in full.
+            if ( empty( $checks ) && $started && isset( $declared[ $slug ] ) && empty( $declared[ $slug ]['info_only'] ) ) {
+                $cat_max = (int) $declared[ $slug ]['max'];
+            }
+
+            foreach ( $checks as $c ) {
+                $state = isset( $c['state'] ) ? (string) $c['state'] : Vigilante_SA_Check_Result::STATE_SKIP;
                 $cat_counts[ $state ] = isset( $cat_counts[ $state ] ) ? $cat_counts[ $state ] + 1 : 1;
                 $counts[ $state ]     = isset( $counts[ $state ] ) ? $counts[ $state ] + 1 : 1;
+
+                // Self-protection caps the score (see SCORE_CAP_ON_TAMPER).
+                if ( 'self_integrity' === ( isset( $c['id'] ) ? $c['id'] : '' )
+                    && Vigilante_SA_Check_Result::STATE_FAIL === $state ) {
+                    $capped_by = 'self_integrity';
+                }
 
                 if ( Vigilante_SA_Check_Result::STATE_INFO === $state || Vigilante_SA_Check_Result::STATE_SKIP === $state ) {
                     continue;
                 }
-                $cat_earned      += isset( $c['score'] ) ? (int) $c['score'] : 0;
-                $total_earned    += isset( $c['score'] ) ? (int) $c['score'] : 0;
-                $total_evaluated += isset( $c['max'] ) ? (int) $c['max'] : 0;
+                $cat_earned += isset( $c['score'] ) ? (int) $c['score'] : 0;
+                $cat_max    += isset( $c['max'] ) ? (int) $c['max'] : 0;
+            }
+
+            if ( ! is_array( $cat ) ) {
+                $categories[ $slug ] = array();
             }
             $categories[ $slug ]['earned'] = $cat_earned;
+            $categories[ $slug ]['max']    = $cat_max;
             $categories[ $slug ]['counts'] = $cat_counts;
 
-            // Force the canonical max so old cached scans get repaired the
-            // moment they're touched (no need to wait for a clean "all" phase).
-            if ( isset( $cat_meta[ $slug ]['max'] ) ) {
-                $categories[ $slug ]['max'] = (int) $cat_meta[ $slug ]['max'];
-            }
+            $total_earned += $cat_earned;
+            $total_max    += $cat_max;
         }
 
-        $total_max = self::total_max_points();
-        $grade     = Vigilante_SA_Helpers::compute_grade( $total_earned, $total_max );
+        $grade = Vigilante_SA_Helpers::compute_grade( $total_earned, $total_max );
 
-        // Self-protection caps the score (see SCORE_CAP_ON_TAMPER).
-        $capped_by = '';
-        foreach ( $categories as $cat ) {
-            foreach ( (array) $cat['checks'] as $c ) {
-                if ( 'self_integrity' === ( isset( $c['id'] ) ? $c['id'] : '' )
-                    && Vigilante_SA_Check_Result::STATE_FAIL === ( isset( $c['state'] ) ? $c['state'] : '' ) ) {
-                    $capped_by = 'self_integrity';
-                    break 2;
-                }
-            }
-        }
         if ( 'self_integrity' === $capped_by && $grade['score'] > self::SCORE_CAP_ON_TAMPER ) {
             $grade['score'] = self::SCORE_CAP_ON_TAMPER;
-            $grade['grade'] = 'E';
+            $grade['grade'] = Vigilante_SA_Helpers::grade_for_score( self::SCORE_CAP_ON_TAMPER );
         }
 
         return array(
-            'categories'     => $categories,
-            'total_earned'   => $total_earned,
-            'total_max'      => $total_max,
-            'total_evaluated'=> $total_evaluated,
-            'score'          => $grade['score'],
-            'grade'          => $grade['grade'],
-            'capped_by'      => $capped_by,
-            'counts'         => $counts,
+            'categories'      => $categories,
+            'total_earned'    => $total_earned,
+            'total_max'       => $total_max,
+            // Same figure as total_max since 3.0.5, kept for whoever reads it.
+            'total_evaluated' => $total_max,
+            'score'           => $grade['score'],
+            'grade'           => $grade['grade'],
+            'capped_by'       => $capped_by,
+            'counts'          => $counts,
         );
+    }
+
+    /**
+     * The categories of a report, with every declared one present
+     *
+     * A report stored after the local phase alone only holds the categories
+     * that phase filled, and summarize_categories() can only count as pending
+     * a category it is given. Without this, a first scan whose remote phase
+     * never arrived was graded over the four categories it had: 100 over 85
+     * points where the whole report gives 75 over 113. Found by the second
+     * cross review of 3.0.5.
+     *
+     * @since 3.0.5
+     *
+     * @param array $categories Categories of a stored or merged report.
+     * @return array The same, plus an empty entry for each one that was missing.
+     */
+    private static function with_every_category( array $categories ) {
+        foreach ( self::get_categories() as $slug => $meta ) {
+            if ( isset( $categories[ $slug ] ) && is_array( $categories[ $slug ] ) ) {
+                continue;
+            }
+            $categories[ $slug ] = array(
+                'slug'   => $slug,
+                'label'  => $meta['label'],
+                'max'    => 0,
+                'earned' => 0,
+                'checks' => array(),
+            );
+        }
+
+        return $categories;
     }
 
     /**
@@ -509,6 +520,17 @@ class Vigilante_Security_Analyzer {
                 'categories'   => array(),
             );
         }
+
+        // A stored report is read back under the rules in force: its checks
+        // are the ones that ran, and what they add up to and the letter they
+        // earn are worked out now. Otherwise the widget would show the sum
+        // and the letter of the version that stored it until the next scan,
+        // and the weekly comparison would set a score against one worked out
+        // differently.
+        if ( isset( $raw['categories'] ) && is_array( $raw['categories'] ) ) {
+            $raw = array_merge( $raw, self::summarize_categories( self::with_every_category( $raw['categories'] ) ) );
+        }
+
         return $raw;
     }
 
