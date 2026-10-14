@@ -1422,8 +1422,7 @@ class Vigilante_User_Security {
             return;
         }
 
-        $pending_users = $this->get_pending_users();
-        $count = count( $pending_users );
+        $count = $this->count_pending_users();
 
         if ( $count === 0 ) {
             return;
@@ -1589,6 +1588,34 @@ class Vigilante_User_Security {
         }
 
         return get_users( $args );
+    }
+
+    /**
+     * How many users are waiting for approval on this site
+     *
+     * The same query as get_pending_users(), asking only for the IDs. The
+     * notice of show_pending_users_notice() runs on every admin screen and
+     * only needs the number; whole user objects also fill the user and the
+     * meta caches of each of them, for nothing.
+     *
+     * @since 3.0.6
+     *
+     * @return int
+     */
+    private function count_pending_users() {
+        // phpcs:disable WordPress.DB.SlowDBQuery.slow_db_query_meta_key, WordPress.DB.SlowDBQuery.slow_db_query_meta_value -- Same query as get_pending_users(), IDs only.
+        $args = array(
+            'meta_key'   => self::site_user_meta_key( 'vigilante_pending_approval' ),
+            'meta_value' => '1',
+            'fields'     => 'ID',
+        );
+        // phpcs:enable WordPress.DB.SlowDBQuery.slow_db_query_meta_key, WordPress.DB.SlowDBQuery.slow_db_query_meta_value
+
+        if ( is_multisite() ) {
+            $args['blog_id'] = 0;
+        }
+
+        return count( get_users( $args ) );
     }
 
     /**

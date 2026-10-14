@@ -66,6 +66,22 @@ class Vigilante_Admin {
     private $tabs = array();
 
     /**
+     * Writes to wp-config.php and to .htaccess that did not happen while saving in this request
+     *
+     * @since 3.0.6
+     * @var array File name => array( 'names' => string[], 'code' => string, 'reason' => string ).
+     */
+    private $file_write_failures = array();
+
+    /**
+     * What wpconfig_write_problem() found, kept for the rest of the request
+     *
+     * @since 3.0.6
+     * @var array|null|false False until it has been worked out.
+     */
+    private $wpconfig_problem = false;
+
+    /**
      * Constructor
      *
      * @param Vigilante_Settings     $settings     Settings instance.
@@ -1462,6 +1478,19 @@ class Vigilante_Admin {
             }
         }
 
+        // A wp-config.php that cannot be changed leaves WP Hardening settings
+        // out of force, and this card counts them as set. It names them and
+        // the tab they are in.
+        $vg_wpconfig_problem = $this->wpconfig_write_problem();
+        if ( null !== $vg_wpconfig_problem && $vg_wpconfig_problem['pending'] ) {
+            $recommendations[] = array(
+                'icon'     => 'warning',
+                'priority' => 'high',
+                'message'  => $this->wpconfig_recommendation( $vg_wpconfig_problem ),
+                'tab'      => 'wp-hardening',
+            );
+        }
+
         // Sort by priority
         $priority_order = array( 'critical' => 0, 'high' => 1, 'medium' => 2, 'low' => 3 );
         usort( $recommendations, function( $a, $b ) use ( $priority_order ) {
@@ -2535,6 +2564,580 @@ class Vigilante_Admin {
         }
 
         return ' ' . __( 'The settings that end up in wp-config.php or .htaccess were left as they were.', 'vigilante' ) . ' ' . Vigilante_Settings::get_shared_files_notice();
+    }
+
+    /**
+     * Why wp-config.php cannot be changed right now, if it cannot
+     *
+     * Only the two reasons that can be read without trying to write: the file
+     * is not where Vigilant looks for it, or it is not writable. The others
+     * (a block that lost a marker, a file that does not look whole) come out
+     * of apply_security_constants() when somebody saves, and that answer is
+     * what note_wpconfig_write() reports then.
+     *
+     * Asked with wp_is_writable() and not through the writer: its
+     * is_wpconfig_writable() starts WP_Filesystem(), which creates and removes
+     * a test file in wp-content on every call, and this runs on every view of
+     * the Dashboard. It is also the truer answer where WordPress writes over
+     * FTP, whose is_writable() says yes to everything.
+     *
+     * These readers live here and not in Vigilante_Wpconfig_Security on
+     * purpose: they only read, and that file is left as it is.
+     *
+     * @since 3.0.6
+     *
+     * @return WP_Error|null Null when neither of the two stands in the way.
+     */
+    private function wpconfig_write_blocker() {
+        // WordPress also loads a wp-config.php kept one folder above; the
+        // writer only knows the one next to WordPress.
+        if ( ! file_exists( ABSPATH . 'wp-config.php' ) ) {
+            return new WP_Error( 'no_config', __( 'wp-config.php is not in the WordPress folder, which is where Vigilant looks for it', 'vigilante' ) );
+        }
+
+        if ( ! wp_is_writable( ABSPATH . 'wp-config.php' ) ) {
+            return new WP_Error( 'not_writable', __( 'wp-config.php is not writable', 'vigilante' ) );
+        }
+
+        return null;
+    }
+
+    /**
+     * What the settings ask for that wp-config.php does not say, and the other way round
+     *
+     * Read from the file and not from the settings: the constants that the
+     * block in the file defines, against the ones generate_constants() would
+     * write now. Comments, the date and the version of the block stay out of
+     * the comparison, so a block written by an older version counts as up to
+     * date for as long as it defines the same.
+     *
+     * @since 3.0.6
+     *
+     * @param Vigilante_Wpconfig_Security $wpconfig  The writer, built with the settings to compare with.
+     * @param bool                        $module_on Whether WP Hardening is on, which is when the block belongs in the file.
+     * @return array {
+     *     @type string[] $missing Constants the settings ask for that the file does not define that way.
+     *     @type string[] $stale   Constants the block still defines and the settings no longer ask for.
+     * }
+     */
+    private function wpconfig_pending_constants( $wpconfig, $module_on ) {
+        $wanted = $module_on ? $this->wpconfig_defines_in( $wpconfig->generate_constants() ) : array();
+        $found  = $this->wpconfig_defines_in( $this->wpconfig_block_in_file() );
+
+        $missing = array();
+        foreach ( $wanted as $name => $value ) {
+            if ( isset( $found[ $name ] ) && $found[ $name ] === $value ) {
+                continue;
+            }
+
+            // In force anyway, whoever defines it. WordPress gives WP_DEBUG and
+            // FORCE_SSL_ADMIN a value of its own and a site may define any of
+            // these by hand, so on a file Vigilant never wrote, saying "not
+            // applied" of them would be false.
+            if ( defined( $name ) && ( 'true' === $value ) === (bool) constant( $name ) ) {
+                continue;
+            }
+
+            $missing[] = $name;
+        }
+
+        return array(
+            'missing' => $missing,
+            'stale'   => array_values( array_diff( array_keys( $found ), array_keys( $wanted ) ) ),
+        );
+    }
+
+    /**
+     * The constants block of Vigilant as it stands in wp-config.php
+     *
+     * Only the block is kept: the rest of the file, with its secrets, is not
+     * stored, shown or passed on.
+     *
+     * @since 3.0.6
+     *
+     * @return string Empty when there is no file, it cannot be read or it has no block.
+     */
+    private function wpconfig_block_in_file() {
+        if ( ! is_readable( ABSPATH . 'wp-config.php' ) ) {
+            return '';
+        }
+
+        $content = file_get_contents( ABSPATH . 'wp-config.php' );
+        if ( ! is_string( $content ) ) {
+            return '';
+        }
+
+        return $this->wpconfig_block_in( $content );
+    }
+
+    /**
+     * The constants block of Vigilant inside a wp-config.php
+     *
+     * Under either of the two markers the block has had: a site that comes
+     * from before the plugin changed its name, and whose file cannot be
+     * written since, still carries the old one.
+     *
+     * @since 3.0.6
+     *
+     * @param string $content wp-config.php content.
+     * @return string Empty when it has no block.
+     */
+    private function wpconfig_block_in( $content ) {
+        $markers = array(
+            Vigilante_Wpconfig_Security::MARKER_START     => Vigilante_Wpconfig_Security::MARKER_END,
+            Vigilante_Wpconfig_Security::OLD_MARKER_START => Vigilante_Wpconfig_Security::OLD_MARKER_END,
+        );
+
+        foreach ( $markers as $marker_start => $marker_end ) {
+            $start = strpos( $content, $marker_start );
+            if ( false === $start ) {
+                continue;
+            }
+
+            // A block that lost its END still defines what follows its BEGIN.
+            $end = strpos( $content, $marker_end, $start );
+
+            return false === $end ? substr( $content, $start ) : substr( $content, $start, $end - $start );
+        }
+
+        return '';
+    }
+
+    /**
+     * The constants a piece of PHP defines as true or false, by name
+     *
+     * Takes both shapes the block has had: the bare define() and the one
+     * wrapped in "if ( ! defined() )". A commented line does not count.
+     *
+     * @since 3.0.6
+     *
+     * @param string $php PHP source.
+     * @return array Constant name => 'true' or 'false'.
+     */
+    private function wpconfig_defines_in( $php ) {
+        $defines = array();
+        $pattern = '/^[ \t]*(?:if\s*\(\s*!\s*defined\s*\(\s*[\'"][A-Z_]+[\'"]\s*\)\s*\)\s*\{?\s*)?define\s*\(\s*[\'"]([A-Z_]+)[\'"]\s*,\s*(true|false)\s*\)/mi';
+
+        // The constants the block of Vigilant can carry, as listed in
+        // Vigilante_Wpconfig_Security::$managed_constants. A block that lost
+        // its END is read to the end of the file, and what the site defines
+        // there is none of Vigilant's business.
+        $managed = array( 'DISALLOW_FILE_EDIT', 'DISALLOW_FILE_MODS', 'FORCE_SSL_ADMIN', 'FORCE_SSL_LOGIN', 'WP_DEBUG', 'WP_DEBUG_LOG', 'WP_DEBUG_DISPLAY', 'SCRIPT_DEBUG', 'DISABLE_WP_CRON' );
+
+        if ( preg_match_all( $pattern, (string) $php, $matches, PREG_SET_ORDER ) ) {
+            foreach ( $matches as $match ) {
+                $name = strtoupper( $match[1] );
+                if ( in_array( $name, $managed, true ) ) {
+                    $defines[ $name ] = strtolower( $match[2] );
+                }
+            }
+        }
+
+        return $defines;
+    }
+
+    /**
+     * Note a write to wp-config.php that did not happen
+     *
+     * Until 3.0.5 the answer of apply_security_constants() and of
+     * remove_constants() was thrown away here: with a wp-config.php that could
+     * not be written the save said "Settings saved successfully" and the
+     * constants never reached the file.
+     *
+     * A file that already says what the settings ask for is not reported.
+     * Saving any section of the Dashboard switches goes through here, and
+     * some sites keep wp-config.php read-only on purpose.
+     *
+     * @since 3.0.6
+     *
+     * @param Vigilante_Wpconfig_Security $wpconfig  The writer that was used.
+     * @param mixed                       $result    What it returned.
+     * @param bool                        $module_on Whether WP Hardening is on.
+     */
+    private function note_wpconfig_write( $wpconfig, $result, $module_on ) {
+        if ( true === $result ) {
+            return;
+        }
+
+        // A site of a network that does not own the shared files has its own notice.
+        if ( is_wp_error( $result ) && 'network_not_owner' === $result->get_error_code() ) {
+            return;
+        }
+
+        $pending = $this->wpconfig_pending_constants( $wpconfig, $module_on );
+        if ( empty( $pending['missing'] ) && empty( $pending['stale'] ) ) {
+            return;
+        }
+
+        // The reason comes from the same place the notice of the tab reads it.
+        $blocker = $this->wpconfig_write_blocker();
+        $error   = is_wp_error( $blocker ) ? $blocker : $result;
+
+        $this->file_write_failures['wp-config.php'] = array(
+            'names'  => array_merge( $pending['missing'], $pending['stale'] ),
+            'code'   => is_wp_error( $error ) ? $error->get_error_code() : 'write_failed',
+            'reason' => is_wp_error( $error ) ? $error->get_error_message() : __( 'Failed to write wp-config.php', 'vigilante' ),
+        );
+    }
+
+    /**
+     * What a save could not put into wp-config.php, said apart from what it did save
+     *
+     * It goes in a notice of its own, next to the usual "Settings saved
+     * successfully" and not inside it. Two earlier wordings in one message
+     * read wrong (Fernando, 13 Oct 2026): first as two answers contradicting
+     * each other, then as if the whole tab had to go into that file. What is
+     * saved and what was not applied are two things, and it names the second.
+     *
+     * @since 3.0.6
+     *
+     * @return string Empty when everything that had to be written was written. Escaped: the page prints it as HTML.
+     */
+    private function wpconfig_not_written_notice() {
+        if ( empty( $this->file_write_failures['wp-config.php'] ) ) {
+            return '';
+        }
+
+        $failure = $this->file_write_failures['wp-config.php'];
+        $text    = $this->wpconfig_not_applied_sentence( $failure['code'], $failure['names'] );
+
+        if ( 'not_writable' === $failure['code'] ) {
+            $text .= ' ' . __( 'Make the file writable and save again.', 'vigilante' );
+        } else {
+            $text .= ' ' . rtrim( $failure['reason'], '.' ) . '.';
+        }
+
+        return esc_html( $text );
+    }
+
+    /**
+     * The recommendation of the Dashboard for settings that wp-config.php did not take
+     *
+     * It has to be understood away from the tab: the sentence of the save,
+     * "Not applied because wp-config.php is not writable: X", read there as
+     * a riddle (Fernando, 13 Oct 2026). So it says which tab the settings are
+     * in, with the name the tab has on screen and calling it a tab: in Spanish
+     * that name is "WordPress", and "these WordPress settings" said nothing.
+     *
+     * @since 3.0.6
+     *
+     * @param array $problem What wpconfig_write_problem() returned, with something pending.
+     * @return string Not escaped.
+     */
+    private function wpconfig_recommendation( $problem ) {
+        $names = implode( ', ', array_merge( $problem['missing'], $problem['stale'] ) );
+
+        if ( 'not_writable' === $problem['code'] ) {
+            return sprintf(
+                /* translators: 1: name of a settings tab, WP Hardening. 2: comma separated names of PHP constants, such as DISALLOW_FILE_EDIT */
+                __( 'wp-config.php is not writable, so these settings of the %1$s tab are not applied: %2$s.', 'vigilante' ),
+                __( 'WP Hardening', 'vigilante' ),
+                $names
+            );
+        }
+
+        return sprintf(
+            /* translators: 1: name of a settings tab, WP Hardening. 2: comma separated names of PHP constants, such as DISALLOW_FILE_EDIT */
+            __( 'Vigilant cannot change wp-config.php, so these settings of the %1$s tab are not applied: %2$s.', 'vigilante' ),
+            __( 'WP Hardening', 'vigilante' ),
+            $names
+        );
+    }
+
+    /**
+     * Note a write to .htaccess that did not happen
+     *
+     * Not for a server that does not read .htaccess, which has nothing to
+     * write, nor for somebody who cannot change the file. The writers ask
+     * whether the file is writable before they ask whose it is, so on a
+     * network the administrator of a subsite got "not_writable" back and was
+     * told to make writable a file that is not theirs to touch (the medium
+     * finding of the cross review, 13 Oct 2026).
+     *
+     * @since 3.0.6
+     *
+     * @param mixed $result What apply_rules() or remove_rules() returned.
+     */
+    private function note_htaccess_write( $result ) {
+        if ( ! is_wp_error( $result ) || $this->shared_files_locked() ) {
+            return;
+        }
+
+        $code = $result->get_error_code();
+
+        if ( in_array( $code, array( 'not_apache', 'network_not_owner' ), true ) ) {
+            return;
+        }
+
+        $this->file_write_failures['.htaccess'] = array(
+            'names'  => array(),
+            'code'   => $code,
+            'reason' => $result->get_error_message(),
+        );
+    }
+
+    /**
+     * Whether .htaccess is where Vigilant writes its rules on this server and cannot be written
+     *
+     * Asked with wp_is_writable(), like wp-config.php and for the same reason:
+     * see wpconfig_write_blocker(). With no .htaccess yet, what counts is the
+     * folder it would be created in.
+     *
+     * @since 3.0.6
+     *
+     * @return bool False on a server that does not read .htaccess, and to a user who cannot change the file.
+     */
+    private function htaccess_not_writable() {
+        if ( $this->shared_files_locked() ) {
+            return false;
+        }
+
+        require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-manager.php';
+
+        if ( ! Vigilante_Htaccess_Manager::get_instance()->is_apache() ) {
+            return false;
+        }
+
+        $htaccess = ABSPATH . '.htaccess';
+
+        return ! wp_is_writable( file_exists( $htaccess ) ? $htaccess : ABSPATH );
+    }
+
+    /**
+     * Print the notice of a .htaccess that cannot be written
+     *
+     * Always the same sentence for as long as it lasts, in the sections whose
+     * settings end up in that file. Unlike the one of wp-config.php it does
+     * not say what is pending: the two blocks are not compared with the file
+     * here.
+     *
+     * @since 3.0.6
+     */
+    private function render_htaccess_write_notice() {
+        if ( ! $this->htaccess_not_writable() ) {
+            return;
+        }
+        ?>
+        <div class="notice notice-warning inline vigilante-htaccess-not-written" style="margin:10px 0 16px;padding:8px 12px;">
+            <p style="margin:0;"><strong><?php esc_html_e( '.htaccess is not writable, so changes to the settings below are not applied until it is.', 'vigilante' ); ?></strong></p>
+        </div>
+        <?php
+    }
+
+    /**
+     * What the answer of a save carries about wp-config.php and .htaccess, besides its usual message
+     *
+     * Two things, and only when there is something to say:
+     *
+     * - 'not_written', the second notice. What could not be written to
+     *   wp-config.php, after any save. After a save of WP Hardening with the
+     *   file not writable and nothing left to write, that the file still
+     *   cannot be written: without it, ticking a box gave the notice and
+     *   unticking it gave only "Settings saved", as if the problem had gone
+     *   (Fernando, 13 Oct 2026). And a .htaccess that was not written, for
+     *   lack of permission or for any other reason its writer gives, after
+     *   saving the Firewall or the Security Headers tab or moving the switch
+     *   of one of those two modules: every module switch rewrites the blocks,
+     *   and the one of the activity log has nothing to say about them.
+     * - 'wpconfig_notice', the notice of the wp-config.php section as it stands
+     *   after this save. The tab is not reloaded after saving, and the one it
+     *   was painted with would go on naming what the previous save left behind.
+     *
+     * @since 3.0.6
+     *
+     * @param string   $section Section that was saved.
+     * @param string[] $toggled Modules whose switch was moved, when the section is 'modules'.
+     * @return array Empty when there is nothing to add. Its texts are escaped: the page prints them as HTML.
+     */
+    private function save_file_notices( $section, $toggled = array() ) {
+        $extras = array();
+        $second = array();
+
+        $not_written = $this->wpconfig_not_written_notice();
+
+        if ( 'wp_hardening' === $section ) {
+            $this->wpconfig_problem = false;
+            $problem                = $this->wpconfig_write_problem();
+
+            ob_start();
+            $this->render_wpconfig_write_notice();
+            $extras['wpconfig_notice'] = (string) ob_get_clean();
+
+            if ( '' === $not_written && null !== $problem && ! $problem['pending'] && 'not_writable' === $problem['code'] ) {
+                $not_written = esc_html__( 'wp-config.php is not writable: nothing is pending now, but the next change to its settings will not be applied.', 'vigilante' );
+            }
+        }
+
+        if ( '' !== $not_written ) {
+            $second[] = $not_written;
+        }
+
+        $about_htaccess = in_array( $section, array( 'firewall', 'security_headers' ), true )
+            || ( 'modules' === $section && array_intersect( array( 'firewall', 'security_headers' ), (array) $toggled ) );
+
+        if ( $about_htaccess && ! empty( $this->file_write_failures['.htaccess'] ) ) {
+            if ( 'not_writable' === $this->file_write_failures['.htaccess']['code'] ) {
+                $second[] = esc_html__( '.htaccess is not writable, so the server rules were not updated. Make the file writable and save again.', 'vigilante' );
+            } else {
+                $second[] = esc_html(
+                    sprintf(
+                        /* translators: %s: the reason, one sentence, such as "A Vigilant block in .htaccess is missing one of its markers, so the file was left as it is." */
+                        __( 'The server rules in .htaccess were not updated: %s', 'vigilante' ),
+                        rtrim( $this->file_write_failures['.htaccess']['reason'], '.' ) . '.'
+                    )
+                );
+            }
+        }
+
+        if ( ! empty( $second ) ) {
+            $extras['not_written'] = implode( '<br>', $second );
+        }
+
+        return $extras;
+    }
+
+    /**
+     * One sentence for what a save could not put into wp-config.php
+     *
+     * It names the constants: the checkboxes of the section carry them.
+     *
+     * @since 3.0.6
+     *
+     * @param string   $code  Why the file cannot be changed.
+     * @param string[] $names The constants that were left as they were.
+     * @return string Not escaped.
+     */
+    private function wpconfig_not_applied_sentence( $code, $names ) {
+        if ( 'not_writable' === $code ) {
+            return sprintf(
+                /* translators: %s: comma separated names of PHP constants, such as DISALLOW_FILE_EDIT */
+                __( 'Not applied because wp-config.php is not writable: %s.', 'vigilante' ),
+                implode( ', ', (array) $names )
+            );
+        }
+
+        return sprintf(
+            /* translators: %s: comma separated names of PHP constants, such as DISALLOW_FILE_EDIT */
+            __( 'Not applied because Vigilant cannot change wp-config.php: %s.', 'vigilante' ),
+            implode( ', ', (array) $names )
+        );
+    }
+
+    /**
+     * Whether wp-config.php cannot be changed, and what it is missing because of it
+     *
+     * Worked out from the file on every page that shows it, with nothing
+     * stored: it also covers the writes nobody was there to be told about
+     * (activation and the migrations after an update), and it goes away by
+     * itself once the file can be written.
+     *
+     * It is reported whether or not the file already says what the settings
+     * ask for. The first version kept quiet while it did, and the notice came
+     * and went as a checkbox was ticked and unticked: better to say it before
+     * somebody saves for nothing (Fernando, 13 Oct 2026). 'pending' tells the
+     * two apart, and only that one reaches the Dashboard.
+     *
+     * @since 3.0.6
+     *
+     * @return array|null Null when the file can be changed, to a user who
+     *                    cannot change it, and with WP Hardening off and
+     *                    nothing of it left in the file.
+     */
+    private function wpconfig_write_problem() {
+        if ( false !== $this->wpconfig_problem ) {
+            return $this->wpconfig_problem;
+        }
+
+        $this->wpconfig_problem = null;
+
+        if ( $this->shared_files_locked() ) {
+            return null;
+        }
+
+        // The Dashboard recommendations are also asked for by code that built
+        // this object without its constructor and loaded only what it needed.
+        if ( ! $this->settings instanceof Vigilante_Settings ) {
+            return null;
+        }
+
+        require_once VIGILANTE_INCLUDES_DIR . 'class-wpconfig-security.php';
+
+        $wpconfig = new Vigilante_Wpconfig_Security( $this->settings );
+        $blocker  = $this->wpconfig_write_blocker();
+
+        if ( ! is_wp_error( $blocker ) ) {
+            return null;
+        }
+
+        $module_on = $this->settings->is_module_enabled( 'wp_hardening' );
+        $pending   = $this->wpconfig_pending_constants( $wpconfig, $module_on );
+        $is_behind = ! empty( $pending['missing'] ) || ! empty( $pending['stale'] );
+
+        if ( ! $module_on && ! $is_behind ) {
+            return null;
+        }
+
+        $this->wpconfig_problem = array(
+            'code'    => $blocker->get_error_code(),
+            'reason'  => $blocker->get_error_message(),
+            'missing' => $pending['missing'],
+            'stale'   => $pending['stale'],
+            'pending' => $is_behind,
+        );
+
+        return $this->wpconfig_problem;
+    }
+
+    /**
+     * Print the notice of a wp-config.php that cannot be changed
+     *
+     * One paragraph. In red while the file is behind the settings, with what
+     * is missing; in amber while it only could not take a change.
+     *
+     * @since 3.0.6
+     */
+    private function render_wpconfig_write_notice() {
+        $problem = $this->wpconfig_write_problem();
+        if ( null === $problem ) {
+            return;
+        }
+
+        if ( 'not_writable' === $problem['code'] ) {
+            $headline = __( 'wp-config.php is not writable, so changes to the settings below are not applied until it is.', 'vigilante' );
+        } else {
+            $headline = sprintf(
+                /* translators: %s: the reason, one sentence, such as "wp-config.php is not in the WordPress folder, which is where Vigilant looks for it." */
+                __( 'Vigilant cannot change wp-config.php, so changes to the settings below are not applied: %s', 'vigilante' ),
+                rtrim( $problem['reason'], '.' ) . '.'
+            );
+        }
+
+        $details = array();
+
+        if ( ! empty( $problem['missing'] ) ) {
+            $details[] = sprintf(
+                /* translators: %s: comma separated names of PHP constants, such as DISALLOW_FILE_EDIT */
+                __( 'Not written yet: %s.', 'vigilante' ),
+                implode( ', ', $problem['missing'] )
+            );
+        }
+
+        if ( ! empty( $problem['stale'] ) ) {
+            $details[] = sprintf(
+                /* translators: %s: comma separated names of PHP constants, such as DISALLOW_FILE_EDIT */
+                __( 'Still in the file although switched off here: %s.', 'vigilante' ),
+                implode( ', ', $problem['stale'] )
+            );
+        }
+
+        if ( $problem['pending'] && 'not_writable' === $problem['code'] ) {
+            $details[] = __( 'Make the file writable and save again.', 'vigilante' );
+        }
+        ?>
+        <div class="notice <?php echo $problem['pending'] ? 'notice-error' : 'notice-warning'; ?> inline vigilante-wpconfig-not-written" style="margin:10px 0 16px;padding:8px 12px;">
+            <p style="margin:0;"><strong><?php echo esc_html( $headline ); ?></strong> <?php echo esc_html( implode( ' ', $details ) ); ?></p>
+        </div>
+        <?php
     }
 
     /**
@@ -4088,6 +4691,7 @@ class Vigilante_Admin {
                     <span class="vigilante-method-badge htaccess"><?php esc_html_e( 'HTACCESS', 'vigilante' ); ?></span>
                 </h2>
                 <p><?php esc_html_e( 'Server-level rules for Apache/LiteSpeed. These rules are processed before PHP.', 'vigilante' ); ?></p>
+                <?php $this->render_htaccess_write_notice(); ?>
 
                 <table class="form-table">
                     <tr id="field-disable-directory-browsing">
@@ -4853,6 +5457,7 @@ class Vigilante_Admin {
                     <span class="vigilante-method-badge htaccess"><?php esc_html_e( 'HTACCESS', 'vigilante' ); ?></span>
                 </h2>
                 <p><?php esc_html_e( 'HTTP headers sent with every response via .htaccess (mod_headers).', 'vigilante' ); ?></p>
+                <?php $this->render_htaccess_write_notice(); ?>
 
                 <table class="form-table">
                     <tr>
@@ -6043,6 +6648,7 @@ class Vigilante_Admin {
                     <span class="vigilante-method-badge config"><?php esc_html_e( 'WP-CONFIG', 'vigilante' ); ?></span>
                 </h2>
                 <p><?php esc_html_e( 'Security constants added directly to wp-config.php file.', 'vigilante' ); ?></p>
+                <div class="vigilante-wpconfig-notice-slot"><?php $this->render_wpconfig_write_notice(); ?></div>
 
                 <table class="form-table">
                     <tr>
@@ -8366,6 +8972,14 @@ class Vigilante_Admin {
             );
         }
 
+        // What there is to say about wp-config.php and .htaccess travels apart
+        // from the message, and the page shows it in notices of its own.
+        $toggled      = ( 'modules' === $section && isset( $data['modules'] ) && is_array( $data['modules'] ) ) ? array_map( 'sanitize_key', array_keys( $data['modules'] ) ) : array();
+        $file_notices = $this->save_file_notices( $section, $toggled );
+        if ( ! empty( $file_notices ) ) {
+            wp_send_json_success( array_merge( array( 'message' => $message ), $file_notices ) );
+        }
+
         wp_send_json_success( $message );
     }
 
@@ -9796,6 +10410,8 @@ class Vigilante_Admin {
      * @param array  $all_options All options.
      */
     private function apply_section_changes( $section, $all_options ) {
+        $this->file_write_failures = array();
+
         // Create fresh settings instance to ensure we have the latest data
         $fresh_settings = new Vigilante_Settings();
 
@@ -9813,9 +10429,9 @@ class Vigilante_Admin {
                 || ! empty( $sh['remove_fingerprinting_headers'] );
 
             if ( $needs_htaccess_block ) {
-                $htaccess->apply_rules();
+                $this->note_htaccess_write( $htaccess->apply_rules() );
             } else {
-                $htaccess->remove_rules();
+                $this->note_htaccess_write( $htaccess->remove_rules() );
             }
         }
 
@@ -9825,9 +10441,9 @@ class Vigilante_Admin {
             $headers_enabled = ! empty( $all_options['modules']['security_headers'] );
 
             if ( $headers_enabled ) {
-                $security_headers->apply_rules();
+                $this->note_htaccess_write( $security_headers->apply_rules() );
             } else {
-                $security_headers->remove_rules();
+                $this->note_htaccess_write( $security_headers->remove_rules() );
             }
         }
 
@@ -9837,9 +10453,9 @@ class Vigilante_Admin {
             $hardening_enabled = ! empty( $all_options['modules']['wp_hardening'] );
             
             if ( $hardening_enabled ) {
-                $wpconfig->apply_security_constants();
+                $this->note_wpconfig_write( $wpconfig, $wpconfig->apply_security_constants(), true );
             } else {
-                $wpconfig->remove_constants();
+                $this->note_wpconfig_write( $wpconfig, $wpconfig->remove_constants(), false );
             }
 
             // Apply WordPress options for comments/pingbacks
@@ -9926,6 +10542,8 @@ class Vigilante_Admin {
      * @param array $all_options All plugin options.
      */
     private function apply_all_file_changes( $all_options ) {
+        $this->file_write_failures = array();
+
         // Refresh settings cache first
         $this->settings->clear_cache();
 
@@ -9937,9 +10555,9 @@ class Vigilante_Admin {
         $firewall_enabled = ! empty( $all_options['modules']['firewall'] );
         
         if ( $firewall_enabled ) {
-            $htaccess->apply_rules();
+            $this->note_htaccess_write( $htaccess->apply_rules() );
         } else {
-            $htaccess->remove_rules();
+            $this->note_htaccess_write( $htaccess->remove_rules() );
         }
 
         // Apply security headers htaccess changes
@@ -9947,9 +10565,9 @@ class Vigilante_Admin {
         $headers_enabled = ! empty( $all_options['modules']['security_headers'] );
         
         if ( $headers_enabled ) {
-            $security_headers->apply_rules();
+            $this->note_htaccess_write( $security_headers->apply_rules() );
         } else {
-            $security_headers->remove_rules();
+            $this->note_htaccess_write( $security_headers->remove_rules() );
         }
 
         // Apply wp-config changes
@@ -9957,9 +10575,9 @@ class Vigilante_Admin {
         $hardening_enabled = ! empty( $all_options['modules']['wp_hardening'] );
         
         if ( $hardening_enabled ) {
-            $wpconfig->apply_security_constants();
+            $this->note_wpconfig_write( $wpconfig, $wpconfig->apply_security_constants(), true );
         } else {
-            $wpconfig->remove_constants();
+            $this->note_wpconfig_write( $wpconfig, $wpconfig->remove_constants(), false );
         }
 
         // Apply WordPress options for comments/pingbacks

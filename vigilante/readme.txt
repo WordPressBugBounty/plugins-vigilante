@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.0.5
+Stable tag: 3.0.6
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -544,6 +544,19 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 3.0.6 =
+Vigilant now tells you when it cannot write wp-config.php or .htaccess. Until now, saving said that the settings were saved while the constants or the server rules never reached the file.
+
+* Improved: the wp-config.php section of the WP Hardening tab says when that file is not writable, or is kept one folder above WordPress, where Vigilant does not write it, for as long as that lasts. In amber while everything those settings ask for is already in force, and in red, naming the constants that are missing or left over, when it is not. The notice is brought up to date after each save, without reloading the page.
+* Improved: the Server Protection section of the Firewall tab and the Security Headers tab say when .htaccess is not writable on a server that uses that file.
+* Improved: while wp-config.php cannot be changed and some of the WP Hardening settings are not in force because of it, the Dashboard recommends looking at it and names the constants that are not applied.
+* Improved: the notice about users awaiting approval no longer loads every one of them on each admin screen just to count them.
+* Improved: a site that keeps wp-config.php or .htaccess read-only on purpose will see these notices too, in those sections and after saving those tabs. They are true there as well: no change made in those tabs reaches the file until it can be written.
+* Fix: when wp-config.php could not be written, saving the WP Hardening tab or moving a module switch answered that the settings were saved, the constants never reached the file and nothing said so. Activating the plugin with the file not writable left it the same way. The save now shows a second notice next to the usual one, which stays on screen and names the constants that were not applied. Saving that tab with nothing left to write still says that the file is not writable. And when moving a module switch leaves something unwritten, the page is no longer reloaded, so the notice can be read.
+* Fix: the same happened with .htaccess. Saving the Firewall or the Security Headers tab, or switching one of those two modules on or off, with a .htaccess that is not writable now says that the server rules were not updated. It also says so, with the reason, when Vigilant leaves the file as it is for another cause, such as one of its blocks having lost a marker.
+* Fix: the description of the Maximum preset said that its Content Security Policy was set to report-only mode. The preset enforces it, and the description now says so.
+* Fix: the Test Headers button said nothing when its request failed outright. It now shows an error.
+
 = 3.0.5 =
 The Dashboard shows one grade, the one of Security Check, on a stricter scale. It counts a setting only while its module is on and leaves out what it could not measure, so some scores go down. The notice about scheduled tasks no longer says that files were modified.
 
@@ -647,8 +660,8 @@ For older changelog entries, please check the [changelog.txt](https://plugins.sv
 
 == Upgrade Notice ==
 
-= 3.0.5 =
-The Dashboard shows one grade, the one of Security Check, on a stricter scale. It counts a setting only while its module is on and leaves out what it could not measure, so some scores go down. The notice about scheduled tasks no longer says that files were modified.
+= 3.0.6 =
+Vigilant now tells you when it cannot write wp-config.php or .htaccess. Until now, saving said that the settings were saved while the constants or the server rules never reached the file.
 
 == Support ==
 

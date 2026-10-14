@@ -1522,7 +1522,7 @@ class Vigilante_Settings {
 
             'maximum' => array(
                 'name'        => __( 'Maximum Security', 'vigilante' ),
-                'description' => __( 'Strictest settings for high-security sites. CSP is set to report-only mode to prevent breaking the admin interface.', 'vigilante' ),
+                'description' => __( 'Strictest settings for high-security sites. Its Content Security Policy is enforced, not only reported, and it is strict: check that the dashboard and the site still work after applying it.', 'vigilante' ),
                 'modules' => array(
                     'firewall'         => true,
                     'security_headers' => true,

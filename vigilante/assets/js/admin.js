@@ -213,7 +213,14 @@
                     data: 'modules[' + module + ']=' + (enabled ? '1' : '0')
                 },
                 success: function(response) {
-                    if (response.success) {
+                    if (response.success && response.data && response.data.not_written) {
+                        // Saved, but a file could not be written: each thing in
+                        // its own notice, and the page stays as it is so the
+                        // one about the file can be read.
+                        $item.removeClass('vigilante-saving').addClass('vigilante-saved');
+                        Vigilante_Admin.showNotice('warning', response.data.not_written, true);
+                        Vigilante_Admin.showNotice('success', vigilanteAdmin.strings.saved, false, true);
+                    } else if (response.success) {
                         $item.removeClass('vigilante-saving').addClass('vigilante-saved');
                         // Show success then reload to update recommendations and all UI
                         Vigilante_Admin.showNotice('success', vigilanteAdmin.strings.saved);
@@ -260,7 +267,20 @@
                 success: function(response) {
                     if (response.success) {
                         var msg = response.data && response.data.message ? response.data.message : (response.data || vigilanteAdmin.strings.saved);
-                        Vigilante_Admin.showNotice('success', msg);
+                        // The notice of the wp-config.php section as it stands
+                        // after this save, painted by the server.
+                        if (response.data && typeof response.data.wpconfig_notice === 'string') {
+                            $('.vigilante-wpconfig-notice-slot').html(response.data.wpconfig_notice);
+                        }
+                        if (response.data && response.data.not_written) {
+                            // Two answers, two notices: what was saved, which
+                            // goes away as usual, and what could not be
+                            // written, which stays.
+                            Vigilante_Admin.showNotice('warning', response.data.not_written, true);
+                            Vigilante_Admin.showNotice('success', msg, false, true);
+                        } else {
+                            Vigilante_Admin.showNotice('success', msg);
+                        }
                     } else {
                         Vigilante_Admin.showNotice('error', response.data || vigilanteAdmin.strings.error);
                     }
@@ -1669,6 +1689,11 @@
                         Vigilante_Admin.showNotice('error', response.data);
                     }
                 },
+                // A request that fails outright (a 500, a dropped connection)
+                // used to put the button back and say nothing.
+                error: function() {
+                    Vigilante_Admin.showNotice('error', vigilanteAdmin.strings.error);
+                },
                 complete: function() {
                     $btn.prop('disabled', false).text(vigilanteAdmin.strings.testHeaders);
                 }
@@ -2530,9 +2555,11 @@
         /**
          * Show notice
          */
-        showNotice: function(type, message) {
-            // Remove any existing notices first.
-            $('.vigilante-notice').remove();
+        showNotice: function(type, message, sticky, keep) {
+            // Remove any existing notices first, unless this one comes with another.
+            if (!keep) {
+                $('.vigilante-notice').remove();
+            }
 
             var $notice = $('<div class="vigilante-notice vigilante-notice-' + type + '">' + message + '</div>');
             $('.vigilante-main').prepend($notice);
@@ -2541,6 +2568,11 @@
             $('html, body').animate({
                 scrollTop: $('.vigilante-admin-wrap').offset().top - 50
             }, 300);
+
+            // A notice about something that was not done stays until the next one.
+            if (sticky) {
+                return;
+            }
 
             setTimeout(function() {
                 $notice.fadeOut(function() {
