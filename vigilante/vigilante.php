@@ -3,7 +3,7 @@
  * Plugin Name: Vigilant - 100% Free Security Suite: Firewall, 2FA, Login, Headers, Scanner…
  * Plugin URI: https://servicios.ayudawp.com
  * Description: Complete security solution for WordPress. Firewall, 2FA, security headers, login protection, file integrity monitoring, activity logging and more.
- * Version: 3.0.6
+ * Version: 3.0.7
  * Author: Fernando Tellado
  * Author URI: https://ayudawp.com
  * Text Domain: vigilante
@@ -24,7 +24,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Plugin constants
  */
-define( 'VIGILANTE_VERSION', '3.0.6' );
+define( 'VIGILANTE_VERSION', '3.0.7' );
 define( 'VIGILANTE_PLUGIN_FILE', __FILE__ );
 define( 'VIGILANTE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'VIGILANTE_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -638,8 +638,6 @@ final class Vigilante_Main {
             return;
         }
 
-        $options  = get_option( Vigilante_Settings::OPTION_NAME, array() );
-        $headers  = isset( $options['security_headers'] ) ? (array) $options['security_headers'] : array();
         $failed   = false;
         $rewrote  = false;
 
@@ -681,9 +679,11 @@ final class Vigilante_Main {
             Vigilante_Htaccess_Recovery::maybe_capture( $manager->get_content(), $this->settings );
         }
 
-        $needs_protection_block = ! empty( $options['modules']['firewall'] )
-            || ! empty( $headers['hide_server_signature'] )
-            || ! empty( $headers['remove_fingerprinting_headers'] );
+        // The same answer saving a tab gets, and when it says the block is not
+        // wanted a block still in the file is taken out, as saving would: until
+        // 3.0.6 this only ever wrote, so a block nobody asked for stayed, and
+        // with it any rule it carried, such as the retired wp-cron.php one (B76).
+        $needs_protection_block = Vigilante_Settings::needs_protection_block( $this->settings );
 
         /*
          * A 'locked' result is not a failure: another request is doing this very
@@ -696,24 +696,37 @@ final class Vigilante_Main {
         $incomplete = false;
         $unreadable = false;
         $settled    = array( 'locked', 'block_incomplete', 'read_failed' );
+        // Which block lost its END line, to name it in the log (B92).
+        $broken     = '';
+        $broken_of  = static function ( $result ) {
+            $data = is_wp_error( $result ) ? $result->get_error_data() : null;
+            return ( is_array( $data ) && isset( $data['marker'] ) ) ? (string) $data['marker'] : '';
+        };
 
-        if ( $needs_protection_block ) {
-            require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-protection.php';
-            $result     = ( new Vigilante_Htaccess_Protection( $this->settings ) )->apply_rules( true );
+        require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-protection.php';
+        $protection = new Vigilante_Htaccess_Protection( $this->settings );
+
+        if ( $needs_protection_block || $protection->are_rules_active() ) {
+            $result     = $needs_protection_block ? $protection->apply_rules( true ) : $protection->remove_rules( true );
             $code       = is_wp_error( $result ) ? $result->get_error_code() : ( true === $result ? '' : 'unexpected_result' );
             $locked     = $locked || 'locked' === $code;
             $incomplete = $incomplete || 'block_incomplete' === $code;
+            $broken     = '' !== $broken ? $broken : $broken_of( $result );
             $unreadable = $unreadable || 'read_failed' === $code;
             $failed     = $failed || ( '' !== $code && ! in_array( $code, $settled, true ) );
             $rewrote    = true;
         }
 
-        if ( ! $locked && ! empty( $options['modules']['security_headers'] ) ) {
+        // Read merged with the defaults, like the Protection block above: until
+        // 3.0.6 the raw option was read here, and a stored option without the
+        // modules section left the headers block out (B93 c).
+        if ( ! $locked && $this->settings->is_module_enabled( 'security_headers' ) ) {
             require_once VIGILANTE_INCLUDES_DIR . 'class-security-headers.php';
             $result     = ( new Vigilante_Security_Headers( $this->settings ) )->apply_rules( true );
             $code       = is_wp_error( $result ) ? $result->get_error_code() : ( true === $result ? '' : 'unexpected_result' );
             $locked     = $locked || 'locked' === $code;
             $incomplete = $incomplete || 'block_incomplete' === $code;
+            $broken     = '' !== $broken ? $broken : $broken_of( $result );
             $unreadable = $unreadable || 'read_failed' === $code;
             $failed     = $failed || ( '' !== $code && ! in_array( $code, $settled, true ) );
             $rewrote    = true;
@@ -753,7 +766,9 @@ final class Vigilante_Main {
             $this->activity_log->log(
                 'system',
                 'server_rules_block_incomplete',
-                __( 'The .htaccess rules were not rewritten after the update because a Vigilant block in that file has a BEGIN line without its END, and rewriting it would have cut everything below it. Remove the broken block by hand, then save the Firewall or Headers tab.', 'vigilante' ),
+                '# BEGIN WordPress' === $broken
+                    ? __( 'The .htaccess rules were not rewritten after the update because the WordPress block of that file (# BEGIN WordPress) has no END line, and rewriting it would have cut everything below it. Add the missing END line by hand, then save the Firewall or Headers tab.', 'vigilante' )
+                    : __( 'The .htaccess rules were not rewritten after the update because a Vigilant block in that file has a BEGIN line without its END, and rewriting it would have cut everything below it. Remove the broken block by hand, then save the Firewall or Headers tab.', 'vigilante' ),
                 array( 'version' => VIGILANTE_VERSION ),
                 'warning'
             );

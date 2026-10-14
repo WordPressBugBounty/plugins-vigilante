@@ -1578,13 +1578,21 @@ class Vigilante_File_Integrity {
     private $wpconfig_original_marker = '// [VIGILANTE_ORIGINAL] ';
 
     /**
-     * Vigilante markers used in .htaccess (firewall + security headers).
+     * Vigilante markers used in .htaccess (firewall, security headers and Under Attack).
+     *
+     * Under Attack writes its cache block at the top of .htaccess while the
+     * mode is on. Until 3.0.6 it was missing here, so switching the mode on or
+     * off read as a change to .htaccess in the next scan (A6 of the list of
+     * 3 Oct 2026). Its block is left out of the hash like the others: only
+     * while its fingerprint is the one the htaccess manager recorded when it
+     * wrote it.
      *
      * @var array
      */
     private $htaccess_markers = array(
         array( '# BEGIN Vigilante Protection', '# END Vigilante Protection' ),
         array( '# BEGIN Vigilante Security Headers', '# END Vigilante Security Headers' ),
+        array( '# BEGIN Vigilante Under Attack', '# END Vigilante Under Attack' ),
     );
 
     /**
@@ -4414,6 +4422,7 @@ class Vigilante_File_Integrity {
         $classes = array(
             'Vigilante_Htaccess_Protection' => 'class-htaccess-protection.php',
             'Vigilante_Security_Headers'    => 'class-security-headers.php',
+            'Vigilante_Under_Attack'        => 'class-under-attack.php',
         );
 
         foreach ( $classes as $class => $file ) {
@@ -4427,6 +4436,7 @@ class Vigilante_File_Integrity {
         return array(
             Vigilante_Htaccess_Protection::MARKER_START => ( new Vigilante_Htaccess_Protection( $settings ) )->generate_rules(),
             Vigilante_Security_Headers::MARKER_START    => Vigilante_Security_Headers::MARKER_START . "\n" . $headers->generate_rules_content() . "\n" . Vigilante_Security_Headers::MARKER_END,
+            Vigilante_Under_Attack::HTACCESS_MARKER_START => Vigilante_Under_Attack::get_cache_bypass_block(),
         );
     }
 
@@ -5498,7 +5508,12 @@ class Vigilante_File_Integrity {
         }
 
         if ( $facts['rewrite'] && ! $facts['denies_php'] ) {
-            $item['reason'] = __( '.htaccess in uploads with rewrite rules of its own: in this folder they replace the ones of the site root, the rule that blocks PHP in uploads included', 'vigilante' );
+            // Until 3.0.6 this said that the rule against PHP in uploads was
+            // replaced with them, everywhere. Since 3.0.7 that rule has a second
+            // half that a folder's rewrite rules do not replace on Apache 2.4
+            // (see Vigilante_Htaccess_Protection), so the text says where it
+            // still holds.
+            $item['reason'] = __( '.htaccess in uploads with rewrite rules of its own: in this folder they replace the rewrite rules of the site root, and outside Apache 2.4 that includes the rule that blocks PHP in uploads', 'vigilante' );
 
             return array(
                 'category' => 'extra',

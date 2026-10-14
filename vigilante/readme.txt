@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.0.6
+Stable tag: 3.0.7
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -78,7 +78,7 @@ Block malicious requests before they reach WordPress:
 * User-Agent whitelist and blacklist with partial matching
 * Visitor IP detection control - read the real IP directly from the connection (a spoof-proof default) or from a proxy header when behind Cloudflare, a reverse proxy or a load balancer, with an admin notice if a proxy is detected but not configured
 * HTTP method restriction
-* Server-level file protection via .htaccess: block direct access to wp-config.php, .htaccess, wp-includes/ and sensitive files (.log, .sql, .bak, .ini, debug.log, readme.html, etc.), and optionally wp-cron.php external access
+* Server-level file protection via .htaccess: block direct access to wp-config.php, .htaccess, wp-includes/ and sensitive files (.log, .sql, .bak, .ini, debug.log, readme.html, etc.)
 * Block PHP execution in /uploads (one of the most common post-exploit vectors)
 * Disable directory browsing
 
@@ -544,6 +544,24 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 3.0.7 =
+Scheduled tasks run again when a cron job calls wp-cron.php by its address. Saving WP Hardening no longer breaks a wp-config.php with a define over several lines, and PHP in uploads can no longer be reached in three ways that bypassed the rule.
+
+* Improved: the Security Check row about wp-cron.php is informational and no longer scores. A request to that file only runs the scheduled tasks that are already due, so a reachable wp-cron.php is normal. When the server refuses it, the row says that a cron job calling its address gets the same answer. A report stored before the update shows that row without points until the next scan. With it, the total of Security Check is one point lower.
+* Fix: Protect wp-cron.php denied every request to wp-cron.php, including the cron job of a server that calls its address with wget, curl or the cron of a hosting panel, and the scheduled tasks stopped running. The option is retired, and Vigilant takes its rule out of .htaccess when it rewrites its rules after the update; if the file cannot be rewritten, the Security Check row about wp-cron.php says that the server refuses it. A cron job that runs wp-cron.php with PHP was never affected, and on those sites wp-cron.php can be reached again, which only lets anybody run the tasks that are already due.
+* Fix: Block Bad Bots turned away a cron job that calls wp-cron.php with wget (in .htaccess) or with curl, so on a server set up that way the scheduled tasks did not run. That list now lets requests to wp-cron.php through. Every other firewall rule still applies to them.
+* Fix: with the Firewall module switched off, the Vigilant block of .htaccess kept the firewall rules in force: bad bots, bad query strings, HTTP methods, wp-config.php, sensitive files, directory listing and PHP in uploads, wp-includes, plugins and themes. It now carries only the Server Identity rules of the Security Headers tab while they are on, and goes away when both are off. Sites with the module off get the block rewritten on update.
+* Fix: importing settings with the Firewall module off removed that .htaccess block even when Server Signature or Remove Fingerprinting Headers asked for it, and deactivating and activating Vigilant left it out in the same case. The refresh after an update now also takes out a block that nothing asks for, as saving does.
+* Fix: in a WordPress installed in a subfolder, or on a network by subdirectories, a restrictive Content Security Policy also reached the admin, because the exception for it only matched /wp-admin at the root of the domain. It now matches /wp-admin as a folder anywhere in the address, and no longer covers root addresses that merely start with /wp-admin, such as /wp-admin-tips/.
+* Fix: on PHP 8, with Under Attack on, a visitor could cause a fatal error on the challenge page by sending its redirect field as a list, and the same happened with redirect_to when a login with two-factor authentication started. Both are now read only as text.
+* Fix: when the WordPress block of .htaccess had lost its END line, the notice and the log entry said that a Vigilant block was broken. They now name the WordPress block.
+* Fix: saving the WP Hardening tab with a define() of wp-config.php written over several lines, such as WP_DEBUG, commented out only its first line and left the file with a syntax error that took the site down. Every line of it is commented now, a define() that shares its line with other code is left alone, and Vigilant never writes wp-config.php unless the result is valid PHP.
+* Fix: saving WP Hardening commented out the constants of the owner that Vigilant manages, such as DISALLOW_FILE_MODS, DISABLE_WP_CRON, FORCE_SSL_ADMIN or WP_DEBUG_LOG, even when their setting was off, so they stopped applying with nothing in their place. Only the constants that the Vigilant block defines are commented now. Where this already happened, they come back the next time that tab is saved.
+* Fix: Vigilant wrote wp-config.php up to four times in a row to apply those settings, so a failure halfway left it changed. It now prepares the whole change, writes the file once with a lock and reads it back, and if the write is cut short it puts the previous content back.
+* Fix: the rule that blocks PHP in uploads could be bypassed in three ways: a path after the file name (file.php/anything) ran the file, another letter case (file.PHP) served its source code or ran it, depending on the server, and an .htaccess with rewrite rules of its own in a folder of uploads, which image plugins write, switched the rule off below it. On Apache 2.4 it now holds in the three cases, and it also covers .php7, .php8 and .phps. The File Integrity finding about such an .htaccess now says that it only switches the rule off outside Apache 2.4.
+* Fix: each time Vigilant wrote its .htaccess rules it deleted the blocks named # BEGIN SECURITY HEADERS, # BEGIN 8G FIREWALL and # BEGIN ADDITIONAL PROTECTIONS, taking them for leftovers of an old version. No version of Vigilant wrote them: they are usually rules pasted from a guide or written by another plugin, and they now stay.
+* Fix: switching Under Attack on or off showed in File Integrity as a change to .htaccess, and its block was not checked for a missing marker before Vigilant wrote that file.
+
 = 3.0.6 =
 Vigilant now tells you when it cannot write wp-config.php or .htaccess. Until now, saving said that the settings were saved while the constants or the server rules never reached the file.
 
@@ -643,25 +661,12 @@ Fixes addresses with accents or non-Latin letters in the HTTPS redirect, the Und
 * Fix: the Dashboard reads the XML-RPC setting where it lives now. The Configuration Score never gave the three points for blocking XML-RPC, and the recommendation to disable it always showed, because both read a checkbox that stopped being saved in 2.9.7. A site that blocks XML-RPC, as the factory settings do, will see its score go up by two or three points without changing anything, and the recommendation, when it applies, now leads to WP Hardening.
 * Fix: the Security Check card on the Dashboard said it ran 13 internal checks when there are 16, and no longer gives a number.
 
-= 3.0.1 =
-Fixes the role lists of two factor, password rules and password expiry, which came back ticked after saving, and stops a saved tab from clearing lists that have no field on screen.
-
-* Improved: SECURITY.md describes the self-protection alert and the File Integrity block as they work now, and two code comments that still described the previous behaviour.
-* Fix: unticking a role in Enforce for roles, in Apply Password Rules To or in Affected Roles of password expiration is saved and stays unticked. Lists of values were merged position by position, both when saving and when reading the settings, so a list shorter than the one shipped came back with the tail of that one attached and a role could not be removed at all.
-* Fix: a literal 0 is no longer written into those lists when the first role of a group is unticked.
-* Fix: unticking every role in a group is now sent as an empty list instead of as nothing at all, so it can be told apart from a form that never carried that field.
-* Fix: saving a tab no longer empties a list that has no field on that screen, such as the allowed HTTP methods of the firewall or the list of insecure usernames. Those values survived only because reading the settings put the shipped ones back on top.
-* Fix: self-protection adopts a manifest that WordPress.org confirms for the installed version, instead of reporting it as replaced for good. A site that had installed a test copy of a version and then the published one stayed critical, and the repair could not clear it, because it reinstalls those same official files.
-* Fix: the lists that had no field on any screen are put back on update. Saving a tab emptied them in the database, and until now that was hidden by the settings falling back to the shipped values when read. A site that had saved the Firewall tab would otherwise have started answering 403 to every HTTP method. The four are the allowed HTTP methods, the insecure usernames, the roles of registration approval and the public REST endpoints, and each one goes back to its shipped value, so a list you shortened on purpose is untouched.
-* Fix: those four settings also fall back to their shipped value when the stored list is empty, wherever the empty list came from. None of them can be emptied from any screen, so an empty one is a leftover, and it used to mean block every method, allow every registration through while the switch says otherwise, or cut the public REST API.
-* Fix: adopting a manifest that WordPress.org confirms is logged for what it is, instead of as a version change that did not happen.
-
 For older changelog entries, please check the [changelog.txt](https://plugins.svn.wordpress.org/vigilante/trunk/changelog.txt) file
 
 == Upgrade Notice ==
 
-= 3.0.6 =
-Vigilant now tells you when it cannot write wp-config.php or .htaccess. Until now, saving said that the settings were saved while the constants or the server rules never reached the file.
+= 3.0.7 =
+Scheduled tasks run again when a cron job calls wp-cron.php by its address. Saving WP Hardening no longer breaks a wp-config.php with a define over several lines, and PHP in uploads can no longer be reached in three ways that bypassed the rule.
 
 == Support ==
 

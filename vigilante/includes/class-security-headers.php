@@ -350,8 +350,18 @@ class Vigilante_Security_Headers {
         if ( $is_csp_restrictive ) {
             $rules[] = '';
             $rules[] = '# Skip restrictive CSP for WordPress admin area to prevent breaking the editor';
+            /*
+             * The admin is matched as a path segment and not from the root:
+             * in an installation in a subfolder its address is
+             * /subfolder/wp-admin/, and until 3.0.6 "^/wp-admin" never matched
+             * it, so a restrictive CSP reached the block editor (B75). Reading
+             * the folder from the site address instead would tie the block to
+             * an option that can change without the block being written again
+             * (B56). The anchored form also matched /wp-admin-anything/ at the
+             * root, which this one does not.
+             */
             $rules[] = '<IfModule mod_setenvif.c>';
-            $rules[] = '    SetEnvIf Request_URI "^/wp-admin" VIGILANTE_SKIP_CSP';
+            $rules[] = '    SetEnvIf Request_URI "/wp-admin(/|$)" VIGILANTE_SKIP_CSP';
             $rules[] = '    SetEnvIf Request_URI "admin-ajax\\.php$" VIGILANTE_SKIP_CSP';
             $rules[] = '    SetEnvIf Request_URI "wp-login\\.php$" VIGILANTE_SKIP_CSP';
             $rules[] = '</IfModule>';

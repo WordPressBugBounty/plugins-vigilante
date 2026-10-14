@@ -1,10 +1,10 @@
 <?php
 /**
- * Security Analyzer — Sensitive files category (10 pts).
+ * Security Analyzer — Sensitive files category (9 pts).
  *
  * Checks: debug_log_public (2), env_file (2), git_config (1),
  * wp_config_backups (2), uploads_listing (1), phpinfo_adminer (1),
- * wp_cron_public (1).
+ * wp_cron_public (informative since 3.0.7).
  *
  * @package Vigilante
  * @since   2.1.0
@@ -263,122 +263,76 @@ class Vigilante_SA_Category_Files {
         return Vigilante_SA_Check_Result::fail( $args );
     }
 
+    /**
+     * wp-cron.php, as information
+     *
+     * It scores nothing since 3.0.7. Until 3.0.6 a reachable wp-cron.php was a
+     * warning on every untouched WordPress, and the way out it offered was
+     * "Protect wp-cron.php", which denied every request to the file, the cron
+     * job of the server included, and the scheduled tasks stopped. A request
+     * to wp-cron.php only runs the tasks that are already due, under a lock
+     * (wp-cron.php in WordPress 7.1.3, lines 84 and 92-114), so a reachable
+     * file is not worth points. What is worth saying is the other case: a
+     * server that refuses it refuses the cron job that calls its address too.
+     *
+     * @return Vigilante_SA_Check_Result
+     */
     private function check_wp_cron_public() {
         $args = array(
             'id'       => 'wp_cron_public',
             'category' => self::SLUG,
-            'max'      => 1,
+            'max'      => 0,
             'label'    => __( 'wp-cron.php public access', 'vigilante' ),
-            'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'firewall', 'field-protect-wp-cron' ),
         );
 
-        // Two separate protections, both off by default and both controlled by Vigilant.
-        // DISABLE_WP_CRON (wp-config constant) stops WordPress from auto-spawning cron on
-        // page views — does NOT block direct HTTP access to /wp-cron.php. The .htaccess
-        // rule (firewall.protect_wp_cron) is what actually blocks external cron-spam
-        // abuse. Both depend on the host having a real server-side cron job calling
-        // wp-cron.php from CLI. Read both Vigilant settings AND the runtime constant —
-        // a savvy user might define DISABLE_WP_CRON manually outside the plugin.
-        $constant_active   = defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON;
-        $disable_setting   = (int) $this->settings->get_option( 'wp_hardening', 'disable_wp_cron', 0 );
-        // Whether the rule is in force is read from .htaccess itself and not
-        // worked out from the settings. The Protection block that carries it is
-        // written and removed from four places that do not agree on when (the
-        // Firewall module alone, or also the two server identity settings of
-        // the headers tab), so the saved setting says what was asked for and
-        // only the file says what is there.
-        $rule_saved        = (bool) $this->settings->get_option( 'firewall', 'protect_wp_cron', 0 );
-        $htaccess_setting  = (int) $this->wp_cron_rule_is_written();
+        // A savvy user might define DISABLE_WP_CRON outside the plugin, so the
+        // constant in force is read, not the setting.
+        $constant_active = defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON;
 
         $url      = home_url( '/wp-cron.php?doing_wp_cron=probe' );
         $response = Vigilante_SA_Helpers::get( $url, array( 'redirection' => 0, 'timeout' => 2 ) );
         if ( is_wp_error( $response ) ) {
             // No answer proves nothing either way: a firewall that drops the
             // request looks the same from here as a server that was slow.
-            // Until 3.0.4 it passed.
             $args['detail'] = Vigilante_SA_Helpers::unreachable_detail( '/wp-cron.php' );
-            $args['data']   = array(
-                'constant_active'  => $constant_active,
-                'disable_setting'  => (bool) $disable_setting,
-                'htaccess_setting' => (bool) $htaccess_setting,
-            );
+            $args['data']   = array( 'constant_active' => $constant_active );
             return Vigilante_SA_Check_Result::skip( $args );
         }
 
-        $code = (int) wp_remote_retrieve_response_code( $response );
+        $code         = (int) wp_remote_retrieve_response_code( $response );
         $args['data'] = array(
-            'code'             => $code,
-            'constant_active'  => $constant_active,
-            'disable_setting'  => (bool) $disable_setting,
-            'htaccess_setting' => (bool) $htaccess_setting,
+            'code'            => $code,
+            'constant_active' => $constant_active,
         );
 
-        // 403/401: blocked at the server level — best case.
         if ( in_array( $code, array( 401, 403 ), true ) ) {
-            if ( $htaccess_setting && $constant_active ) {
-                $args['detail'] = __( 'Vigilant is blocking external HTTP access to wp-cron.php via .htaccess, and DISABLE_WP_CRON is set in wp-config. Make sure your host has a real server-side cron job calling wp-cron.php from CLI.', 'vigilante' );
-            } elseif ( $htaccess_setting ) {
-                $args['detail'] = __( 'Vigilant\'s .htaccess rule blocks /wp-cron.php at the server level. Consider also enabling DISABLE_WP_CRON in WP Hardening so WordPress stops trying to auto-spawn cron on page views.', 'vigilante' );
-            } else {
-                $args['detail'] = __( 'Server returned 403/401 for /wp-cron.php; direct external access is blocked at the server level.', 'vigilante' );
-            }
-            return Vigilante_SA_Check_Result::pass( $args );
+            $args['detail'] = sprintf(
+                /* translators: %d: HTTP status code */
+                __( 'wp-cron.php answers %d, so the server refuses it. A cron job that calls its address (wget, curl or the cron of a hosting panel) gets the same answer, and so does WordPress when a visit starts the scheduled tasks. They only run if the server runs wp-cron.php with PHP.', 'vigilante' ),
+                $code
+            );
+            return Vigilante_SA_Check_Result::info( $args );
         }
 
-        // 200/204/302: reachable. Differentiate by which protections are active so the
-        // detail message tells the user exactly what's left to do.
-        if ( $constant_active && $htaccess_setting ) {
-            // Settings on but probe still goes through — usually a cache/CDN bypassing
-            // .htaccess, or .htaccess not being loaded by the server (nginx, IIS).
-            $args['detail'] = __( 'Both DISABLE_WP_CRON and Vigilant\'s .htaccess block are active, but /wp-cron.php is still reachable. Either a cache/CDN is serving an old response, or your server doesn\'t honor .htaccess (nginx/IIS) — check the server config or purge the cache.', 'vigilante' );
-            return Vigilante_SA_Check_Result::warn( $args );
+        // A redirect is not what wp-cron.php answers by itself either: the
+        // request never reached the file (the cross review of 3.0.7 found it
+        // described as reachable).
+        if ( $code < 200 || $code >= 300 ) {
+            $args['detail'] = sprintf(
+                /* translators: %d: HTTP status code */
+                __( 'wp-cron.php answers %d, which is not what WordPress answers by itself. Scheduled tasks may not be running.', 'vigilante' ),
+                $code
+            );
+            return Vigilante_SA_Check_Result::info( $args );
         }
+
+        $args['detail'] = __( 'wp-cron.php can be reached, as on any WordPress. A request to it only runs the scheduled tasks that are already due, one run at a time, so it scores nothing.', 'vigilante' );
 
         if ( $constant_active ) {
-            $args['detail'] = __( 'DISABLE_WP_CRON is set in wp-config (good — your host runs real cron), but /wp-cron.php is still reachable publicly. The constant only stops WordPress from auto-spawning cron on page views; it does not block direct HTTP access. To fully harden, enable "Protect wp-cron.php" in Firewall &rarr; File Protection.', 'vigilante' );
-            return Vigilante_SA_Check_Result::warn( $args );
+            $args['detail'] .= ' ' . __( 'DISABLE_WP_CRON is set, so visits no longer start the tasks and a cron job of the server has to call wp-cron.php.', 'vigilante' );
         }
 
-        if ( $htaccess_setting ) {
-            $args['detail'] = __( 'Vigilant is configured to block /wp-cron.php at the server level, but the URL is still reachable. Check that .htaccess is being honored by your server (nginx/IIS users need an equivalent rule), then re-scan.', 'vigilante' );
-            return Vigilante_SA_Check_Result::warn( $args );
-        }
-
-        if ( $rule_saved ) {
-            $args['detail'] = __( '"Protect wp-cron.php" is saved in Vigilant, but its rule is not in .htaccess, so /wp-cron.php is still reachable. Open the Firewall tab and save it to write the rule again.', 'vigilante' );
-            return Vigilante_SA_Check_Result::warn( $args );
-        }
-
-        $args['detail'] = __( '/wp-cron.php is publicly reachable. WordPress is using the default page-view trigger, which is functional but lets attackers spam the URL to exhaust resources. If your host supports real cron, enable both "Disable WP Cron" (WP Hardening) and "Protect wp-cron.php" (Firewall) and add a server-side cron job calling wp-cron.php from CLI.', 'vigilante' );
-        return Vigilante_SA_Check_Result::warn( $args );
-    }
-
-    /**
-     * Whether the rule that blocks wp-cron.php is inside Vigilant's block in .htaccess
-     *
-     * @since 3.0.5
-     *
-     * @return bool
-     */
-    private function wp_cron_rule_is_written() {
-        if ( ! class_exists( 'Vigilante_Htaccess_Manager' ) ) {
-            require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-manager.php';
-        }
-
-        $content = Vigilante_Htaccess_Manager::get_instance()->get_content();
-
-        if ( ! is_string( $content ) ) {
-            return false;
-        }
-
-        $start = strpos( $content, '# BEGIN Vigilante Protection' );
-        $end   = strpos( $content, '# END Vigilante Protection' );
-
-        if ( false === $start || false === $end || $end < $start ) {
-            return false;
-        }
-
-        return false !== strpos( substr( $content, $start, $end - $start ), '<Files "wp-cron.php">' );
+        return Vigilante_SA_Check_Result::info( $args );
     }
 
     /**

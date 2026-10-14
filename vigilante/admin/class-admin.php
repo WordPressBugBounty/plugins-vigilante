@@ -297,7 +297,8 @@ class Vigilante_Admin {
 
         // 1.12.1: Regenerate htaccess (WooCommerce IPN exclusion in bot blocking rule)
         if ( version_compare( $db_version, '1.12.1', '<' ) ) {
-            if ( ! empty( $this->settings->get_section( 'firewall' )['block_bad_bots'] ) ) {
+            // Asks the single function too since 3.0.7 (B93 a).
+            if ( ! empty( $this->settings->get_section( 'firewall' )['block_bad_bots'] ) && Vigilante_Settings::needs_protection_block( $this->settings ) ) {
                 require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-protection.php';
                 $htaccess = new Vigilante_Htaccess_Protection( $this->settings );
                 $htaccess->apply_rules();
@@ -1650,7 +1651,6 @@ class Vigilante_Admin {
             // Firewall - Server Protection
             array( 'tab' => 'firewall', 'tab_label' => __( 'Firewall', 'vigilante' ), 'section' => __( 'Server Protection', 'vigilante' ), 'anchor' => 'vigilante-section-firewall-server', 'label' => __( 'Directory Browsing', 'vigilante' ), 'label_en' => 'Directory Browsing', 'keywords' => _x( 'directory browsing folder folders listing indexing index', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'firewall', 'tab_label' => __( 'Firewall', 'vigilante' ), 'section' => __( 'Server Protection', 'vigilante' ), 'anchor' => 'vigilante-section-firewall-server', 'label' => __( 'Protect wp-config.php', 'vigilante' ), 'label_en' => 'Protect wp-config.php', 'keywords' => _x( 'protect wp-config php protection secure lock', 'settings search keywords', 'vigilante' ) ),
-            array( 'tab' => 'firewall', 'tab_label' => __( 'Firewall', 'vigilante' ), 'section' => __( 'Server Protection', 'vigilante' ), 'anchor' => 'field-protect-wp-cron', 'label' => __( 'Protect wp-cron.php', 'vigilante' ), 'label_en' => 'Protect wp-cron.php', 'keywords' => _x( 'protect wp-cron php protection secure lock cron scheduled tasks block spam', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'firewall', 'tab_label' => __( 'Firewall', 'vigilante' ), 'section' => __( 'Server Protection', 'vigilante' ), 'anchor' => 'vigilante-section-firewall-server', 'label' => __( 'Protect wp-includes', 'vigilante' ), 'label_en' => 'Protect wp-includes', 'keywords' => _x( 'protect wp-includes protection secure lock', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'firewall', 'tab_label' => __( 'Firewall', 'vigilante' ), 'section' => __( 'Server Protection', 'vigilante' ), 'anchor' => 'vigilante-section-firewall-server', 'label' => __( 'PHP in Uploads', 'vigilante' ), 'label_en' => 'PHP in Uploads', 'keywords' => _x( 'php in uploads media upload', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'firewall', 'tab_label' => __( 'Firewall', 'vigilante' ), 'section' => __( 'Server Protection', 'vigilante' ), 'anchor' => 'vigilante-section-firewall-server', 'label' => __( 'Sensitive Files', 'vigilante' ), 'label_en' => 'Sensitive Files', 'keywords' => _x( 'sensitive files private secret file log', 'settings search keywords', 'vigilante' ) ),
@@ -4712,25 +4712,6 @@ class Vigilante_Admin {
                             </label>
                         </td>
                     </tr>
-                    <tr id="field-protect-wp-cron">
-                        <th scope="row"><?php esc_html_e( 'Protect wp-cron.php', 'vigilante' ); ?></th>
-                        <td>
-                            <label>
-                                <input type="checkbox" name="firewall[protect_wp_cron]" value="1" <?php checked( ! empty( $options['protect_wp_cron'] ) ); ?>>
-                                <?php esc_html_e( 'Block direct HTTP access to wp-cron.php (prevents cron-spam DoS abuse)', 'vigilante' ); ?>
-                            </label>
-                            <p class="description"><?php
-                                printf(
-                                    /* translators: 1: opening <strong>, 2: closing </strong> */
-                                    esc_html__( '%1$sWarning:%2$s Only enable if your host runs a real server-side cron job calling wp-cron.php (most managed WordPress hosts do; check with your provider). Otherwise scheduled tasks — publishing, updates, emails, backups — stop running. Pair with %3$sDISABLE_WP_CRON%4$s in WP Hardening for full coverage.', 'vigilante' ),
-                                    '<strong>',
-                                    '</strong>',
-                                    '<code>',
-                                    '</code>'
-                                ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- HTML tags are hardcoded.
-                            ?></p>
-                        </td>
-                    </tr>
                     <tr>
                         <th scope="row"><?php esc_html_e( 'Protect wp-includes', 'vigilante' ); ?></th>
                         <td>
@@ -6698,12 +6679,10 @@ class Vigilante_Admin {
                             </label>
                             <p class="description"><?php
                                 printf(
-                                    /* translators: 1: opening <strong>, 2: closing </strong>, 3: opening <code>, 4: closing </code> */
-                                    esc_html__( '%1$sWarning:%2$s Only enable if your host runs a real server-side cron job calling wp-cron.php. Otherwise scheduled tasks stop running. This constant only stops the page-view auto-spawn — to also block external HTTP abuse, enable %3$sProtect wp-cron.php%4$s in Firewall &rarr; File Protection.', 'vigilante' ),
+                                    /* translators: 1: opening <strong>, 2: closing </strong> */
+                                    esc_html__( '%1$sWarning:%2$s Only enable if your server runs a real cron job for wp-cron.php, calling its address (wget, curl or the cron of your hosting panel) or running it with PHP. Otherwise scheduled tasks stop running.', 'vigilante' ),
                                     '<strong>',
-                                    '</strong>',
-                                    '<code>',
-                                    '</code>'
+                                    '</strong>'
                                 ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- HTML tags are hardcoded.
                             ?></p>
                         </td>
@@ -10423,12 +10402,8 @@ class Vigilante_Admin {
         // "Remove fingerprinting headers" never reaches the .htaccess.
         if ( in_array( $section, array( 'firewall', 'security_headers', 'modules' ), true ) ) {
             $htaccess = new Vigilante_Htaccess_Protection( $fresh_settings );
-            $sh       = $fresh_settings->get_section( 'security_headers' );
-            $needs_htaccess_block = ! empty( $all_options['modules']['firewall'] )
-                || ! empty( $sh['hide_server_signature'] )
-                || ! empty( $sh['remove_fingerprinting_headers'] );
 
-            if ( $needs_htaccess_block ) {
+            if ( Vigilante_Settings::needs_protection_block( $fresh_settings ) ) {
                 $this->note_htaccess_write( $htaccess->apply_rules() );
             } else {
                 $this->note_htaccess_write( $htaccess->remove_rules() );
@@ -10550,11 +10525,12 @@ class Vigilante_Admin {
         // Create fresh settings instance
         $fresh_settings = new Vigilante_Settings();
 
-        // Apply firewall htaccess changes
+        // Apply firewall htaccess changes. Until 3.0.6 this asked only for the
+        // firewall module, so importing settings with it off removed a block
+        // the server identity settings still asked for (B76).
         $htaccess = new Vigilante_Htaccess_Protection( $fresh_settings );
-        $firewall_enabled = ! empty( $all_options['modules']['firewall'] );
-        
-        if ( $firewall_enabled ) {
+
+        if ( Vigilante_Settings::needs_protection_block( $fresh_settings ) ) {
             $this->note_htaccess_write( $htaccess->apply_rules() );
         } else {
             $this->note_htaccess_write( $htaccess->remove_rules() );

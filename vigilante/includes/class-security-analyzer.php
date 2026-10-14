@@ -96,7 +96,8 @@ class Vigilante_Security_Analyzer {
             'files'       => array(
                 'slug'  => 'files',
                 'label' => __( 'Sensitive Files', 'vigilante' ),
-                'max'   => 10,
+                // 3.0.7: 10 -> 9 (wp_cron_public became informative).
+                'max'   => 9,
             ),
             'internal'    => array(
                 'slug'  => 'internal',
@@ -528,10 +529,51 @@ class Vigilante_Security_Analyzer {
         // and the weekly comparison would set a score against one worked out
         // differently.
         if ( isset( $raw['categories'] ) && is_array( $raw['categories'] ) ) {
+            $raw['categories'] = self::retire_stored_rows( $raw['categories'] );
             $raw = array_merge( $raw, self::summarize_categories( self::with_every_category( $raw['categories'] ) ) );
         }
 
         return $raw;
+    }
+
+    /**
+     * Rows stored by an earlier version for a check that no longer scores
+     *
+     * The wp-cron.php row scored until 3.0.6, and its text and its Fix link
+     * sent the reader to "Protect wp-cron.php", a setting that no longer
+     * exists. A report stored before the update is read back until the next
+     * scan, so that row is shown as what it is now: information, with no
+     * points, no link and a text that says how to refresh it.
+     *
+     * @since 3.0.7
+     *
+     * @param array $categories Stored categories.
+     * @return array
+     */
+    private static function retire_stored_rows( array $categories ) {
+        foreach ( $categories as $slug => $cat ) {
+            if ( ! is_array( $cat ) || empty( $cat['checks'] ) || ! is_array( $cat['checks'] ) ) {
+                continue;
+            }
+
+            foreach ( $cat['checks'] as $i => $check ) {
+                if ( ! is_array( $check ) || ! isset( $check['id'], $check['state'] ) || 'wp_cron_public' !== $check['id'] ) {
+                    continue;
+                }
+
+                if ( in_array( $check['state'], array( Vigilante_SA_Check_Result::STATE_INFO, Vigilante_SA_Check_Result::STATE_SKIP ), true ) ) {
+                    continue;
+                }
+
+                $categories[ $slug ]['checks'][ $i ]['state']    = Vigilante_SA_Check_Result::STATE_INFO;
+                $categories[ $slug ]['checks'][ $i ]['score']    = 0;
+                $categories[ $slug ]['checks'][ $i ]['max']      = 0;
+                $categories[ $slug ]['checks'][ $i ]['fix_link'] = '';
+                $categories[ $slug ]['checks'][ $i ]['detail']   = __( 'This row no longer scores. Run Security Check again to see what wp-cron.php answers now.', 'vigilante' );
+            }
+        }
+
+        return $categories;
     }
 
     /**

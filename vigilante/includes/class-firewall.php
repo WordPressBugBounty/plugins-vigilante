@@ -149,8 +149,25 @@ class Vigilante_Firewall {
         // The rules a whitelisted User-Agent is exempt from, and only these.
         $ua_rules = array( 'block_bad_bots', 'block_empty_user_agent' );
 
+        /*
+         * A request to wp-cron.php skips the bad bots list. A real cron job
+         * calls it with wget or curl, both on that list, and until 3.0.6 it got
+         * a 403 before any scheduled task ran. The User-Agent is chosen by
+         * whoever calls, and so is the address, but the exemption gives nothing
+         * away: the file serves no content, anybody already reaches it with the
+         * User-Agent of a browser, and every other rule still applies.
+         * wp_doing_cron() answers from DOING_CRON, which wp-cron.php defines
+         * before loading WordPress and no request can set from outside. The
+         * .htaccess half does the same.
+         */
+        $cron_request = wp_doing_cron();
+
         foreach ( $checks as $option => $method ) {
             if ( $ua_whitelisted && in_array( $option, $ua_rules, true ) ) {
+                continue;
+            }
+
+            if ( $cron_request && 'block_bad_bots' === $option ) {
                 continue;
             }
 

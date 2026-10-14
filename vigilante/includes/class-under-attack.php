@@ -1047,8 +1047,11 @@ class Vigilante_Under_Attack {
         $response  = sanitize_text_field( wp_unslash( $_POST['vigilante_ua_response'] ) );
         // phpcs:ignore WordPress.Security.NonceVerification.Missing
         $nonce_val = sanitize_text_field( wp_unslash( $_POST['vigilante_ua_nonce'] ?? '' ) );
+        // Sent as a list, esc_url_raw() throws a TypeError in PHP 8, and this
+        // runs for anybody while the mode is on: until 3.0.6 that was a fatal
+        // error on the challenge page (B63).
         // phpcs:ignore WordPress.Security.NonceVerification.Missing
-        $redirect  = esc_url_raw( wp_unslash( $_POST['vigilante_ua_redirect'] ?? '' ) );
+        $redirect  = ( isset( $_POST['vigilante_ua_redirect'] ) && is_string( $_POST['vigilante_ua_redirect'] ) ) ? esc_url_raw( wp_unslash( $_POST['vigilante_ua_redirect'] ) ) : '';
 
         // The token is checked, never stored or deleted, so a wrong answer
         // changes nothing for anybody else. See issue_challenge_token().

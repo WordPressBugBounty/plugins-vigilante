@@ -305,8 +305,10 @@ trait Vigilante_Two_Factor_Session {
         // with its own POST, so redirect_to has to travel in the session or it
         // is lost and every login lands on the dashboard (2.11.12). Kept from a
         // previous pending session when this request does not carry one.
+        // A list in redirect_to made esc_url_raw() throw in PHP 8 and cut the
+        // login with a fatal error until 3.0.6 (B63).
         // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Not a decision: stored as-is and validated against the site by wp_validate_redirect() before use, in pending_login_redirect().
-        $redirect_to = isset( $_REQUEST['redirect_to'] ) ? esc_url_raw( wp_unslash( $_REQUEST['redirect_to'] ) ) : '';
+        $redirect_to = ( isset( $_REQUEST['redirect_to'] ) && is_string( $_REQUEST['redirect_to'] ) ) ? esc_url_raw( wp_unslash( $_REQUEST['redirect_to'] ) ) : '';
 
         if ( '' === $redirect_to && is_array( $data ) && ! empty( $data['redirect_to'] ) ) {
             $redirect_to = (string) $data['redirect_to'];

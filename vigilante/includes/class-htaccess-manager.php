@@ -69,6 +69,9 @@ class Vigilante_Htaccess_Manager {
     private $known_blocks = array(
         '# BEGIN Vigilante Protection'        => '# END Vigilante Protection',
         '# BEGIN Vigilante Security Headers'  => '# END Vigilante Security Headers',
+        // Until 3.0.6 the block of Under Attack was missing here, so a write
+        // did not check that it was whole (A6 of the list of 3 Oct 2026).
+        '# BEGIN Vigilante Under Attack'      => '# END Vigilante Under Attack',
         '# BEGIN WordPress'             => '# END WordPress',
     );
 
@@ -156,12 +159,14 @@ class Vigilante_Htaccess_Manager {
              * here keeps that refusal from reading as a write failure worth
              * retrying every hour.
              */
-            $whole = $this->blocks_are_whole( $original, $marker_start, $marker_end );
+            $broken = $this->blocks_are_whole( $original, $marker_start, $marker_end ) ? '' : $marker_start;
             foreach ( $this->known_blocks as $known_start => $known_end ) {
-                $whole = $whole && $this->blocks_are_whole( $original, $known_start, $known_end );
+                if ( '' === $broken && ! $this->blocks_are_whole( $original, $known_start, $known_end ) ) {
+                    $broken = $known_start;
+                }
             }
-            if ( ! $whole ) {
-                return new WP_Error( 'block_incomplete', __( 'A Vigilant block in .htaccess is missing one of its markers, so the file was left as it is.', 'vigilante' ) );
+            if ( '' !== $broken ) {
+                return $this->incomplete_block_error( $broken );
             }
 
             // Create backup before modification
@@ -311,7 +316,7 @@ class Vigilante_Htaccess_Manager {
 
             // A block that has lost a marker would take the rest of the file with it.
             if ( ! $this->blocks_are_whole( $content, $marker_start, $marker_end ) ) {
-                return new WP_Error( 'block_incomplete', __( 'A Vigilant block in .htaccess is missing one of its markers, so the file was left as it is.', 'vigilante' ) );
+                return $this->incomplete_block_error( $marker_start );
             }
 
             // Create backup before modification
@@ -396,6 +401,29 @@ class Vigilante_Htaccess_Manager {
         }
 
         return ! $inside;
+    }
+
+    /**
+     * The refusal for a block that has lost its END line, naming the block
+     *
+     * Until 3.0.6 it always blamed "a Vigilant block", also when the broken one
+     * was the block WordPress writes, # BEGIN WordPress, which add_block() checks
+     * too (B92). The start marker travels in the error data, so the refresh
+     * after an update can name it in the log.
+     *
+     * @since 3.0.7
+     *
+     * @param string $marker_start Start marker of the broken block.
+     * @return WP_Error
+     */
+    private function incomplete_block_error( $marker_start ) {
+        if ( '# BEGIN WordPress' === $marker_start ) {
+            $message = __( 'The WordPress block in .htaccess (# BEGIN WordPress) is missing its END line, so the file was left as it is.', 'vigilante' );
+        } else {
+            $message = __( 'A Vigilant block in .htaccess is missing one of its markers, so the file was left as it is.', 'vigilante' );
+        }
+
+        return new WP_Error( 'block_incomplete', $message, array( 'marker' => $marker_start ) );
     }
 
     /**

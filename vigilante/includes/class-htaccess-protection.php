@@ -44,11 +44,15 @@ class Vigilante_Htaccess_Protection {
 
     /**
      * Old plugin markers to clean
+     *
+     * Only the marker of the plugin's former name. Until 3.0.6 the list also
+     * had # BEGIN SECURITY HEADERS, # BEGIN 8G FIREWALL and # BEGIN ADDITIONAL
+     * PROTECTIONS, which no version of Vigilant ever wrote (none since 1.0.0
+     * has them anywhere else) and which are the usual names of blocks that
+     * people paste from guides or other plugins write: every save and every
+     * update deleted them (A7 of the list of 3 Oct 2026).
      */
     private $old_markers = array(
-        array( '# BEGIN SECURITY HEADERS', '# END SECURITY HEADERS' ),
-        array( '# BEGIN 8G FIREWALL', '# END 8G FIREWALL' ),
-        array( '# BEGIN ADDITIONAL PROTECTIONS', '# END ADDITIONAL PROTECTIONS' ),
         array( '# BEGIN AyudaWP Security', '# END AyudaWP Security' ),
     );
 
@@ -97,7 +101,7 @@ class Vigilante_Htaccess_Protection {
         }
 
         // Clean old plugin rules first
-        $this->remove_old_rules();
+        $this->remove_old_rules( $automatic );
 
         $rules = $this->generate_rules_content();
 
@@ -116,14 +120,17 @@ class Vigilante_Htaccess_Protection {
     /**
      * Remove .htaccess rules
      *
+     * @param bool $automatic True when Vigilant removes the block by itself,
+     *                        as the refresh after an update does since 3.0.7.
+     *                        See Vigilante_Htaccess_Manager::add_block().
      * @return bool|WP_Error
      */
-    public function remove_rules() {
+    public function remove_rules( $automatic = false ) {
         require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-manager.php';
         
         $manager = Vigilante_Htaccess_Manager::get_instance();
 
-        $result = $manager->remove_block( self::MARKER_START, self::MARKER_END );
+        $result = $manager->remove_block( self::MARKER_START, self::MARKER_END, $automatic );
 
         if ( true === $result ) {
             /** This action is documented in class-wpconfig-security.php */
@@ -136,15 +143,19 @@ class Vigilante_Htaccess_Protection {
     /**
      * Remove old plugin rules
      *
+     * @param bool $automatic Same as apply_rules(). Until 3.0.6 the cleanup was
+     *                        always asked as a person's write, so on a network
+     *                        the refresh after an update, which any visitor
+     *                        starts, could not do it (B93 e).
      * @return bool
      */
-    public function remove_old_rules() {
+    public function remove_old_rules( $automatic = false ) {
         require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-manager.php';
         
         $manager = Vigilante_Htaccess_Manager::get_instance();
 
         foreach ( $this->old_markers as $markers ) {
-            $manager->remove_block( $markers[0], $markers[1] );
+            $manager->remove_block( $markers[0], $markers[1], $automatic );
         }
 
         return true;
@@ -192,7 +203,6 @@ class Vigilante_Htaccess_Protection {
      * - "Directory Browsing"      -> disable_directory_browsing  -> Options -Indexes
      * - "Server Signature"        -> hide_server_signature       -> ServerSignature Off
      * - "Protect wp-config.php"   -> protect_wp_config           -> Files wp-config.php
-     * - "Protect wp-cron.php"     -> protect_wp_cron             -> Files wp-cron.php (opt-in)
      * - "Protect wp-includes"     -> protect_wp_includes         -> RewriteRule wp-includes
      * - "PHP in Uploads"          -> protect_uploads_php         -> RewriteRule uploads/*.php
      * - "Sensitive Files"         -> protect_sensitive_files     -> FilesMatch extensions
@@ -212,6 +222,16 @@ class Vigilante_Htaccess_Protection {
         $rules[] = '# https://servicios.ayudawp.com';
         $rules[] = '';
 
+        /*
+         * The rules of the firewall section go in only while the Firewall
+         * module is on. The block also exists for the two server identity
+         * settings of the Headers tab, and until 3.0.6 it carried every
+         * firewall rule switched on in the settings whatever the module said:
+         * with the module off, the bots, query strings, methods, wp-config.php,
+         * wp-includes and directory listing rules stayed in force (B76).
+         */
+        $firewall = $this->settings->is_module_enabled( 'firewall' );
+
         // =====================================================================
         // SECTION: Basic Server Configuration
         // =====================================================================
@@ -226,7 +246,7 @@ class Vigilante_Htaccess_Protection {
 
         // Option: disable_directory_browsing
         // UI: "Directory Browsing" checkbox
-        if ( ! empty( $this->options['disable_directory_browsing'] ) ) {
+        if ( $firewall && ! empty( $this->options['disable_directory_browsing'] ) ) {
             $rules[] = '# Disable directory listing';
             $rules[] = 'Options -Indexes';
             $rules[] = '';
@@ -237,17 +257,27 @@ class Vigilante_Htaccess_Protection {
         // =====================================================================
 
         // Negated exception conditions shared by every blocking rule below.
-        $whitelist_exceptions = $this->generate_whitelist_exceptions();
+        $whitelist_exceptions = $firewall ? $this->generate_whitelist_exceptions() : array();
 
         // Option: block_bad_bots
         // UI: "Block Bad Bots" checkbox
-        if ( ! empty( $this->options['block_bad_bots'] ) ) {
+        if ( $firewall && ! empty( $this->options['block_bad_bots'] ) ) {
             $rules[] = '# Block malicious bots and crawlers';
             $rules[] = '# Exception: WooCommerce IPN callbacks (payment gateways use various User-Agents)';
             $rules[] = '<IfModule mod_rewrite.c>';
             $rules[] = '    RewriteEngine On';
             $rules   = array_merge( $rules, $whitelist_exceptions );
             $rules[] = '    RewriteCond %{QUERY_STRING} !wc-api= [NC]';
+            /*
+             * wp-cron.php is let through whatever the User-Agent. A real cron
+             * job calls it with wget or curl, which are on this list, and
+             * until 3.0.6 it got a 403 and no scheduled task ran. Nothing is
+             * opened by it: the file serves no content and anybody already
+             * reaches it with the User-Agent of a browser. The PHP layer does
+             * the same for requests that WordPress answers as cron
+             * (Vigilante_Firewall::run_firewall()).
+             */
+            $rules[] = '    RewriteCond %{REQUEST_URI} !/wp-cron\\.php$ [NC]';
             // Tokens must be specific bot names. The pattern matches as a bare
             // substring anywhere in the UA ([NC], no word anchors), so a short
             // generic token 403s legitimate clients: "rma" used to match inside
@@ -261,7 +291,7 @@ class Vigilante_Htaccess_Protection {
 
         // Option: block_bad_query_strings
         // UI: "Block Bad Query Strings" checkbox
-        if ( ! empty( $this->options['block_bad_query_strings'] ) ) {
+        if ( $firewall && ! empty( $this->options['block_bad_query_strings'] ) ) {
             $rules[] = '# Block malicious query strings';
             $rules[] = '<IfModule mod_rewrite.c>';
             $rules[] = '    RewriteEngine On';
@@ -294,7 +324,7 @@ class Vigilante_Htaccess_Protection {
         // Option: limit_http_methods
         // UI: "Limit HTTP Methods" checkbox
         // Note: REST API excluded - needs PUT, PATCH, DELETE for plugins like SiteGround Optimizer
-        if ( ! empty( $this->options['limit_http_methods'] ) ) {
+        if ( $firewall && ! empty( $this->options['limit_http_methods'] ) ) {
             $rules[] = '# Block HTTP methods WordPress does not use (TRACE, TRACK, CONNECT, DEBUG, MOVE)';
             $rules[] = '# The REST API is left out of this rule';
             $rules[] = '<IfModule mod_rewrite.c>';
@@ -314,7 +344,7 @@ class Vigilante_Htaccess_Protection {
         // Option: protect_wp_config
         // UI: "Protect wp-config.php" checkbox
         // This is SEPARATE from protect_sensitive_files
-        if ( ! empty( $this->options['protect_wp_config'] ) ) {
+        if ( $firewall && ! empty( $this->options['protect_wp_config'] ) ) {
             $rules[] = '# Block direct access to wp-config.php';
             $rules[] = '<Files "wp-config.php">';
             $rules[] = '    <IfModule mod_authz_core.c>';
@@ -328,29 +358,9 @@ class Vigilante_Htaccess_Protection {
             $rules[] = '';
         }
 
-        // Option: protect_wp_cron
-        // UI: "Protect wp-cron.php" checkbox (off by default — opt-in only)
-        // Blocks direct HTTP access to wp-cron.php to prevent cron-spam DoS abuse.
-        // ONLY safe when the host has a real server-side cron job calling wp-cron.php;
-        // otherwise scheduled WP tasks stop running. Pairs with the wp-config
-        // DISABLE_WP_CRON constant in WP Hardening for full coverage.
-        if ( ! empty( $this->options['protect_wp_cron'] ) ) {
-            $rules[] = '# Block direct HTTP access to wp-cron.php (host-side cron required)';
-            $rules[] = '<Files "wp-cron.php">';
-            $rules[] = '    <IfModule mod_authz_core.c>';
-            $rules[] = '        Require all denied';
-            $rules[] = '    </IfModule>';
-            $rules[] = '    <IfModule !mod_authz_core.c>';
-            $rules[] = '        Order Allow,Deny';
-            $rules[] = '        Deny from all';
-            $rules[] = '    </IfModule>';
-            $rules[] = '</Files>';
-            $rules[] = '';
-        }
-
         // Option: protect_sensitive_files
         // UI: "Sensitive Files" checkbox - blocks .sql, .bak, .log, .ini, etc.
-        if ( ! empty( $this->options['protect_sensitive_files'] ) ) {
+        if ( $firewall && ! empty( $this->options['protect_sensitive_files'] ) ) {
             $rules[] = '# Block access to sensitive file types (.sql, .bak, .log, .ini, etc.)';
             $rules[] = '<FilesMatch "\.(sql|bak|old|tmp|swp|save|backup|log|ini|htpasswd)$">';
             $rules[] = '    <IfModule mod_authz_core.c>';
@@ -379,18 +389,44 @@ class Vigilante_Htaccess_Protection {
 
         // Option: protect_uploads_php
         // UI: "PHP in Uploads" checkbox
-        if ( ! empty( $this->options['protect_uploads_php'] ) ) {
+        //
+        // Two rules, because the rewrite rule alone was bypassed in three ways,
+        // measured in Testing (C9 of the list of 3 Oct 2026): it only matched a
+        // name ending in the extension, so x.php/anything ran the file through
+        // PATH_INFO; it was case sensitive, so x.PHP was served as source code
+        // where the file system ignores case; and a folder does not inherit the
+        // rewrite rules of its parent when it has rewrite rules of its own, so
+        // an .htaccess in uploads with RewriteEngine On, which image plugins
+        // write, switched the protection off below it. The rewrite rule now
+        // ignores case and what follows the extension, and an access rule in
+        // an <If> section denies the same addresses on Apache 2.4. Apache
+        // applies <If> sections after the .htaccess of every folder, so the
+        // rule held, measured in Testing, against a subfolder .htaccess with
+        // RewriteEngine On, with RewriteOptions Inherit, and with RewriteEngine
+        // On plus Require all granted. The access rule is kept away from
+        // LiteSpeed with <IfModule !LiteSpeed>: whether it reads <If> was not
+        // measured, and a server that applied the Require without its condition
+        // would deny the whole site (the third cross review of 3.0.7). There
+        // the rewrite rule is the one that applies.
+        if ( $firewall && ! empty( $this->options['protect_uploads_php'] ) ) {
             $rules[] = '# Block PHP execution in uploads directory';
             $rules[] = '<IfModule mod_rewrite.c>';
             $rules[] = '    RewriteEngine On';
-            $rules[] = '    RewriteRule ^wp-content/uploads/.*\.ph(p[345]?|t|tml|ar)$ - [F,L]';
+            $rules[] = '    RewriteRule ^wp-content/uploads/.*\.ph(p[0-9]*|t|tml|ar|ps)(/|$) - [F,L,NC]';
+            $rules[] = '</IfModule>';
+            $rules[] = '<IfModule mod_authz_core.c>';
+            $rules[] = '<IfModule !LiteSpeed>';
+            $rules[] = '    <If "%{REQUEST_URI} =~ m#/wp-content/uploads/.*\.ph(p[0-9]*|t|tml|ar|ps)(/|$)#i">';
+            $rules[] = '        Require all denied';
+            $rules[] = '    </If>';
+            $rules[] = '</IfModule>';
             $rules[] = '</IfModule>';
             $rules[] = '';
         }
 
         // Option: protect_wp_includes
         // UI: "Protect wp-includes" checkbox
-        if ( ! empty( $this->options['protect_wp_includes'] ) ) {
+        if ( $firewall && ! empty( $this->options['protect_wp_includes'] ) ) {
             $rules[] = '# Block direct access to WordPress includes directory';
             $rules[] = '<IfModule mod_rewrite.c>';
             $rules[] = '    RewriteEngine On';
@@ -405,7 +441,7 @@ class Vigilante_Htaccess_Protection {
         }
 
         // Option: block_php_in_plugins (if enabled in settings, default false)
-        if ( ! empty( $this->options['block_php_in_plugins'] ) ) {
+        if ( $firewall && ! empty( $this->options['block_php_in_plugins'] ) ) {
             $rules[] = '# Block direct PHP access in plugins';
             $rules[] = '<IfModule mod_rewrite.c>';
             $rules[] = '    RewriteEngine On';
@@ -415,7 +451,7 @@ class Vigilante_Htaccess_Protection {
         }
 
         // Option: block_php_in_themes (if enabled in settings, default false)
-        if ( ! empty( $this->options['block_php_in_themes'] ) ) {
+        if ( $firewall && ! empty( $this->options['block_php_in_themes'] ) ) {
             $rules[] = '# Block direct PHP access in themes (except main templates)';
             $rules[] = '<IfModule mod_rewrite.c>';
             $rules[] = '    RewriteEngine On';

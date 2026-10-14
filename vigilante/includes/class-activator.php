@@ -73,8 +73,11 @@ class Vigilante_Activator {
             }
         }
 
-        // Apply htaccess protection (part of firewall module)
-        if ( $settings->is_module_enabled( 'firewall' ) ) {
+        // Apply the htaccess Protection block. Until 3.0.6 this asked only for
+        // the firewall module, so with it off and a server identity setting
+        // on, deactivating (which always removes the block) and activating
+        // again left the block out (B76).
+        if ( Vigilante_Settings::needs_protection_block( $settings ) ) {
             self::apply_htaccess_protection( $settings );
         }
 

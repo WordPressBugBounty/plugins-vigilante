@@ -292,13 +292,8 @@ trait Vigilante_Admin_Ajax {
         // this handler writes the option directly, so it regenerates here.
         if ( 'whitelist' === $list_type ) {
             $fresh_settings = new Vigilante_Settings();
-            $sh             = $fresh_settings->get_section( 'security_headers' );
 
-            $needs_htaccess_block = ! empty( $all_options['modules']['firewall'] )
-                || ! empty( $sh['hide_server_signature'] )
-                || ! empty( $sh['remove_fingerprinting_headers'] );
-
-            if ( $needs_htaccess_block ) {
+            if ( Vigilante_Settings::needs_protection_block( $fresh_settings ) ) {
                 require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-protection.php';
                 $htaccess = new Vigilante_Htaccess_Protection( $fresh_settings );
                 $htaccess->apply_rules();

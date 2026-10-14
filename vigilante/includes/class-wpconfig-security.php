@@ -92,7 +92,22 @@ class Vigilante_Wpconfig_Security {
     }
 
     /**
+     * Option that holds the lock of the writers of wp-config.php
+     *
+     * @since 3.0.7
+     */
+    const LOCK_OPTION  = 'vigilante_wpconfig_write_lock';
+    const LOCK_TIMEOUT = 30;
+
+    /**
      * Apply security constants to wp-config.php
+     *
+     * Every step works on the content in memory and the file is written once,
+     * at the end, after checking that the result is still valid PHP, and read
+     * back afterwards. Until 3.0.6 it was up to four writes in a row (old block
+     * out, originals uncommented, originals commented, block in), each with
+     * file_put_contents() and none read back, so a failure or a second request
+     * in the middle left the file halfway (A3 of the list of 3 Oct 2026).
      *
      * @return bool|WP_Error
      */
@@ -107,28 +122,38 @@ class Vigilante_Wpconfig_Security {
             return new WP_Error( 'not_writable', __( 'wp-config.php is not writable', 'vigilante' ) );
         }
 
-        // Safety check 2: the file must look whole BEFORE any modification
-        $check_result = $this->check_before_write();
-        if ( is_wp_error( $check_result ) ) {
-            return $check_result;
+        // One writer at a time: the htaccess manager takes the same kind of lock.
+        if ( ! Vigilante_Settings::acquire_option_lock( self::LOCK_OPTION, self::LOCK_TIMEOUT ) ) {
+            return new WP_Error( 'locked', __( 'Another process is writing wp-config.php right now', 'vigilante' ) );
         }
 
-        // First clean up old plugin constants
-        $this->remove_old_constants();
+        try {
+            $original = $this->read_file_directly( $this->wpconfig_path );
 
-        // Restore any previously commented constants (clean slate for upgrades)
-        // This ensures constants no longer managed by current version get uncommented
-        $this->uncomment_original_constants();
+            // Safety check 2: the file must look whole BEFORE any modification
+            $check_result = $this->check_content( $original );
+            if ( is_wp_error( $check_result ) ) {
+                return $check_result;
+            }
 
-        // Comment out existing managed constants
-        $comment_result = $this->comment_existing_constants();
-        if ( is_wp_error( $comment_result ) ) {
-            return $comment_result;
+            $constants = $this->generate_constants();
+
+            // Old plugin block out, then the originals commented by an earlier
+            // write back in (clean slate), then commented again only those the
+            // new block defines, then the block in.
+            $content = $this->strip_old_block( $original );
+            $content = $this->uncomment_original_constants( $content );
+            $content = $this->comment_existing_constants( $content, self::constants_defined_in( $constants ) );
+            $content = $this->place_block( $content, $constants );
+
+            if ( is_wp_error( $content ) ) {
+                return $content;
+            }
+
+            $result = $this->write_checked( $original, $content );
+        } finally {
+            Vigilante_Settings::release_option_lock( self::LOCK_OPTION );
         }
-
-        // Generate and write our constants block
-        $constants = $this->generate_constants();
-        $result = $this->write_constants( $constants );
 
         // Regenerate critical file baseline so the integrity scan does not
         // flag our own modifications as unauthorized changes.
@@ -150,22 +175,21 @@ class Vigilante_Wpconfig_Security {
     }
 
     /**
-     * Check wp-config.php before modifying it
+     * Check wp-config.php as read, before modifying it
      *
      * Until 2.11.6 this also stored the whole file in vigilante_wpconfig_backup,
      * and with it the database password and the authentication keys and salts.
      * Nothing ever read that copy back to restore anything: the checks are what
      * protected the file, and the copy only put its secrets in the options table.
      *
+     * @param string|false $content The file as read, or false.
      * @return bool|WP_Error
      */
-    private function check_before_write() {
+    private function check_content( $content ) {
         if ( ! file_exists( $this->wpconfig_path ) ) {
             return new WP_Error( 'no_config', __( 'wp-config.php does not exist', 'vigilante' ) );
         }
 
-        $content = $this->read_file_directly( $this->wpconfig_path );
-        
         if ( false === $content || strlen( $content ) < self::MIN_CONFIG_SIZE ) {
             return new WP_Error( 'invalid_config', __( 'wp-config.php appears invalid or too small', 'vigilante' ) );
         }
@@ -177,6 +201,45 @@ class Vigilante_Wpconfig_Security {
 
         if ( ! self::constants_blocks_are_whole( $content ) ) {
             return new WP_Error( 'block_incomplete', __( 'A Vigilant block in wp-config.php is missing one of its markers, so the file was left as it is.', 'vigilante' ) );
+        }
+
+        // What cannot be read as PHP now cannot be checked after the change.
+        if ( ! self::parses( $content ) ) {
+            return new WP_Error( 'parse_failed', __( 'wp-config.php could not be read as PHP code, so it was left as it is.', 'vigilante' ) );
+        }
+
+        return true;
+    }
+
+    /**
+     * Whether a piece of PHP code parses
+     *
+     * The last check before writing wp-config.php: a file that does not parse
+     * takes the whole site down. Until 3.0.6 nothing asked, and a define()
+     * split over several lines was left with only its first line commented,
+     * which is a syntax error (A2 of the list of 3 Oct 2026).
+     *
+     * @since 3.0.7
+     *
+     * @param string $content PHP file content.
+     * @return bool
+     */
+    private static function parses( $content ) {
+        // Without the tokenizer extension there is nothing to ask, and
+        // comment_existing_constants() comments nothing either, which is what
+        // could break the file. Until the fourth cross review of 3.0.7 this
+        // called token_get_all() unguarded and every write ended in a fatal
+        // error there (the File Integrity scan already asked).
+        if ( ! function_exists( 'token_get_all' ) ) {
+            return true;
+        }
+
+        try {
+            // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a deprecation raised while parsing (an (integer) cast on PHP 8.5) must not be printed; only whether it parses matters.
+            @token_get_all( (string) $content, TOKEN_PARSE );
+        } catch ( CompileError $e ) {
+            // ParseError is a CompileError since PHP 7.3.
+            return false;
         }
 
         return true;
@@ -267,127 +330,244 @@ class Vigilante_Wpconfig_Security {
     }
 
     /**
-     * Comment out existing managed constants in wp-config.php
+     * The names of the constants a generated block defines
      *
-     * @return bool|WP_Error
+     * @since 3.0.7
+     *
+     * @param string $block Block from generate_constants().
+     * @return string[]
      */
-    private function comment_existing_constants() {
-        $content = $this->read_file_directly( $this->wpconfig_path );
-        
-        if ( false === $content || ! $this->validate_wpconfig_content( $content ) ) {
-            return new WP_Error( 'read_failed', __( 'Could not read wp-config.php', 'vigilante' ) );
-        }
+    private static function constants_defined_in( $block ) {
+        preg_match_all( "/define\(\s*'([A-Z_]+)'/", (string) $block, $found );
 
-        $modified = false;
-
-        foreach ( $this->managed_constants as $constant ) {
-            // Pattern to match define statements for this constant
-            // Matches: define( 'CONSTANT', value ); or define('CONSTANT', value);
-            // Does NOT match already commented lines (commented lines have // prefix before define)
-            $pattern = '/^(\s*)(define\s*\(\s*[\'"]' . preg_quote( $constant, '/' ) . '[\'"]\s*,\s*[^)]+\)\s*;)/m';
-            
-            // Loop to comment ALL occurrences, not just the first
-            // wp-config.php files may have duplicate defines (e.g. multiple WP_DEBUG)
-            $safety = 0;
-            while ( preg_match( $pattern, $content, $matches ) && $safety < 20 ) {
-                $safety++;
-                $full_line = $matches[0];
-
-                // Already commented by us — no more uncommented matches possible
-                if ( strpos( $full_line, self::ORIGINAL_MARKER ) !== false ) {
-                    break;
-                }
-                
-                // Check if this line is inside our Vigilante block (skip it)
-                $marker_pos = strpos( $content, self::MARKER_START );
-                if ( $marker_pos !== false ) {
-                    $line_pos = strpos( $content, $full_line );
-                    $end_marker_pos = strpos( $content, self::MARKER_END );
-                    if ( $line_pos > $marker_pos && $line_pos < $end_marker_pos ) {
-                        break; // Inside our block, stop processing this constant
-                    }
-                }
-
-                // Comment out this occurrence
-                $replacement = $matches[1] . self::ORIGINAL_MARKER . $matches[2];
-                $content = preg_replace( $pattern, $replacement, $content, 1 );
-                $modified = true;
-            }
-        }
-
-        if ( $modified ) {
-            // Validate BEFORE writing
-            if ( ! $this->validate_wpconfig_content( $content ) ) {
-                return new WP_Error( 'invalid_after_comment', __( 'wp-config.php would be invalid after commenting constants', 'vigilante' ) );
-            }
-            
-            if ( ! $this->write_file_directly( $this->wpconfig_path, $content ) ) {
-                return new WP_Error( 'write_failed', __( 'Could not write to wp-config.php', 'vigilante' ) );
-            }
-        }
-
-        return true;
+        return array_values( array_unique( $found[1] ) );
     }
 
     /**
-     * Uncomment original constants that were commented by us
+     * Comment out the define() of the given managed constants
      *
-     * @return bool
+     * Only the constants the new block defines. Until 3.0.6 every managed
+     * constant the file defined was commented out, also when its setting was
+     * off and the block did not define it, so a DISALLOW_FILE_MODS, a
+     * DISABLE_WP_CRON or a FORCE_SSL_ADMIN of the owner disappeared without
+     * anything taking its place (A1 of the list of 3 Oct 2026).
+     *
+     * The statements are found with the PHP tokenizer and not with a regular
+     * expression, and every line of a statement gets the marker: the
+     * expression stopped at the first closing parenthesis and the marker went
+     * on the first line only, so a define() split over several lines was left
+     * with its other lines loose, a syntax error that took the site down (A2).
+     * A statement is only touched when it starts its line and nothing but a
+     * line comment follows it on its last one: commenting a line out also
+     * comments out whatever else is on it.
+     *
+     * @param string   $content File content.
+     * @param string[] $names   Constants to comment out.
+     * @return string
      */
-    private function uncomment_original_constants() {
-        $content = $this->read_file_directly( $this->wpconfig_path );
-        
-        if ( false === $content ) {
-            return false;
+    private function comment_existing_constants( $content, $names ) {
+        $names = array_intersect( $this->managed_constants, (array) $names );
+
+        if ( empty( $names ) || ! function_exists( 'token_get_all' ) ) {
+            return $content;
         }
 
-        // Find and uncomment lines marked with our original marker
-        $pattern = '/^(\s*)' . preg_quote( self::ORIGINAL_MARKER, '/' ) . '(.+)$/m';
-        
-        if ( preg_match( $pattern, $content ) ) {
-            $content = preg_replace( $pattern, '$1$2', $content );
-            
-            // Validate BEFORE writing
-            if ( ! $this->validate_wpconfig_content( $content ) ) {
-                return false;
+        // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the content was checked to parse; a warning must not reach the page.
+        $tokens = @token_get_all( $content );
+
+        if ( empty( $tokens ) ) {
+            return $content;
+        }
+
+        // A define() inside our own block is never touched.
+        $block_from = strpos( $content, self::MARKER_START );
+        $block_to   = false === $block_from ? false : strpos( $content, self::MARKER_END, $block_from );
+
+        $skip  = array( T_WHITESPACE, T_COMMENT, T_DOC_COMMENT );
+        $marks = array();
+        $count = count( $tokens );
+        $where = array();
+        $at    = 0;
+
+        foreach ( $tokens as $i => $token ) {
+            $where[ $i ] = $at;
+            $at         += strlen( is_array( $token ) ? $token[1] : $token );
+        }
+
+        $next = function ( $i ) use ( $tokens, $count, $skip ) {
+            for ( $i++; $i < $count; $i++ ) {
+                if ( ! is_array( $tokens[ $i ] ) || ! in_array( $tokens[ $i ][0], $skip, true ) ) {
+                    return $i;
+                }
             }
-            
-            return $this->write_file_directly( $this->wpconfig_path, $content );
+            return $count;
+        };
+
+        $prev = function ( $i ) use ( $tokens, $skip ) {
+            for ( $i--; $i >= 0; $i-- ) {
+                if ( ! is_array( $tokens[ $i ] ) || ! in_array( $tokens[ $i ][0], $skip, true ) ) {
+                    return $tokens[ $i ];
+                }
+            }
+            return null;
+        };
+
+        foreach ( $tokens as $i => $token ) {
+            if ( ! is_array( $token ) || T_STRING !== $token[0] || 0 !== strcasecmp( $token[1], 'define' ) ) {
+                continue;
+            }
+
+            // Only a define() that is a statement of its own: after the end of
+            // another statement, a brace, a colon or the opening tag. One that is
+            // the body of an if, else or while without braces would hand its
+            // place to whatever statement follows once commented out. And a
+            // method or a function of that name is not the define() of PHP.
+            $before = $prev( $i );
+            if ( ! ( null === $before
+                || in_array( $before, array( ';', '{', '}', ':' ), true )
+                || ( is_array( $before ) && in_array( $before[0], array( T_OPEN_TAG, T_CLOSE_TAG, T_INLINE_HTML ), true ) ) ) ) {
+                continue;
+            }
+
+            $start = $where[ $i ];
+
+            if ( false !== $block_from && false !== $block_to && $start > $block_from && $start < $block_to ) {
+                continue;
+            }
+
+            // Only whitespace between the start of the line and define.
+            $line_start = strrpos( substr( $content, 0, $start ), "\n" );
+            $line_start = false === $line_start ? 0 : $line_start + 1;
+
+            if ( '' !== trim( substr( $content, $line_start, $start - $line_start ) ) ) {
+                continue;
+            }
+
+            $j = $next( $i );
+            if ( $j >= $count || '(' !== $tokens[ $j ] ) {
+                continue;
+            }
+
+            $k = $next( $j );
+            if ( $k >= $count || ! is_array( $tokens[ $k ] ) || T_CONSTANT_ENCAPSED_STRING !== $tokens[ $k ][0] ) {
+                continue;
+            }
+
+            if ( ! in_array( substr( $tokens[ $k ][1], 1, -1 ), $names, true ) ) {
+                continue;
+            }
+
+            // The parenthesis that closes define(, wherever it is.
+            $depth = 0;
+            $close = $count;
+            for ( $m = $j; $m < $count; $m++ ) {
+                if ( '(' === $tokens[ $m ] ) {
+                    $depth++;
+                } elseif ( ')' === $tokens[ $m ] ) {
+                    $depth--;
+                    if ( 0 === $depth ) {
+                        $close = $m;
+                        break;
+                    }
+                }
+            }
+
+            $semi = $close < $count ? $next( $close ) : $count;
+            if ( $semi >= $count || ';' !== $tokens[ $semi ] ) {
+                continue;
+            }
+
+            // Nothing after the semicolon on its line but a line comment.
+            $after    = $where[ $semi ] + 1;
+            $line_end = strpos( $content, "\n", $after );
+            $rest     = trim( false === $line_end ? substr( $content, $after ) : substr( $content, $after, $line_end - $after ) );
+
+            // A block comment that closes on the same line counts as a comment.
+            $comment = 0 === strpos( $rest, '//' )
+                || ( 0 === strpos( $rest, '#' ) && 0 !== strpos( $rest, '#[' ) )
+                || ( 0 === strpos( $rest, '/*' ) && '*/' === substr( $rest, -2 ) && false === strpos( substr( $rest, 2, -2 ), '*/' ) );
+
+            if ( '' !== $rest && ( ! $comment || false !== strpos( $rest, '?>' ) ) ) {
+                continue;
+            }
+
+            // Inside a line comment the closing tag of PHP still ends PHP mode:
+            // one anywhere in the statement, even within a string, would turn
+            // what follows into output once the lines are commented out.
+            if ( false !== strpos( substr( $content, $start, $after - $start ), '?>' ) ) {
+                continue;
+            }
+
+            $first = substr_count( $content, "\n", 0, $start );
+            $last  = substr_count( $content, "\n", 0, $after );
+            for ( $line = $first; $line <= $last; $line++ ) {
+                $marks[ $line ] = true;
+            }
         }
 
-        return true;
+        if ( empty( $marks ) ) {
+            return $content;
+        }
+
+        $lines = explode( "\n", $content );
+
+        foreach ( array_keys( $marks ) as $line ) {
+            if ( ! isset( $lines[ $line ] ) || '' === trim( $lines[ $line ] ) ) {
+                continue;
+            }
+
+            preg_match( '/^(\s*)(.*)$/s', $lines[ $line ], $parts );
+            $lines[ $line ] = $parts[1] . self::ORIGINAL_MARKER . $parts[2];
+        }
+
+        return implode( "\n", $lines );
+    }
+
+    /**
+     * Uncomment the original constants commented by us
+     *
+     * @param string $content File content.
+     * @return string
+     */
+    private function uncomment_original_constants( $content ) {
+        $pattern = '/^(\s*)' . preg_quote( self::ORIGINAL_MARKER, '/' ) . '(.+)$/m';
+
+        return (string) preg_replace( $pattern, '$1$2', $content );
+    }
+
+    /**
+     * Take out the block of the plugin's former name
+     *
+     * @param string $content File content.
+     * @return string
+     */
+    private function strip_old_block( $content ) {
+        $pattern = '/' . preg_quote( self::OLD_MARKER_START, '/' ) . '.*?' . preg_quote( self::OLD_MARKER_END, '/' ) . '\s*/s';
+
+        return (string) preg_replace( $pattern, '', $content );
     }
 
     /**
      * Remove old Easy Vigilante constants from wp-config.php
      *
-     * @return bool
+     * @return bool|WP_Error
      */
     public function remove_old_constants() {
-        $content = $this->read_file_directly( $this->wpconfig_path );
-        
-        if ( false === $content || ! $this->validate_wpconfig_content( $content ) ) {
-            return false;
+        if ( ! Vigilante_Settings::acquire_option_lock( self::LOCK_OPTION, self::LOCK_TIMEOUT ) ) {
+            return new WP_Error( 'locked', __( 'Another process is writing wp-config.php right now', 'vigilante' ) );
         }
 
-        $modified = false;
-        
-        // Remove old AyudaWP Security Constants block
-        $pattern = '/' . preg_quote( self::OLD_MARKER_START, '/' ) . '.*?' . preg_quote( self::OLD_MARKER_END, '/' ) . '\s*/s';
-        if ( preg_match( $pattern, $content ) ) {
-            $content = preg_replace( $pattern, '', $content );
-            $modified = true;
-        }
+        try {
+            $original = $this->read_file_directly( $this->wpconfig_path );
 
-        if ( $modified ) {
-            // Validate BEFORE writing
-            if ( ! $this->validate_wpconfig_content( $content ) ) {
+            if ( false === $original || ! $this->validate_wpconfig_content( $original ) ) {
                 return false;
             }
-            return $this->write_file_directly( $this->wpconfig_path, $content );
-        }
 
-        return true;
+            return $this->write_checked( $original, $this->strip_old_block( $original ) );
+        } finally {
+            Vigilante_Settings::release_option_lock( self::LOCK_OPTION );
+        }
     }
 
     /**
@@ -404,6 +584,9 @@ class Vigilante_Wpconfig_Security {
     /**
      * Remove our security constants from wp-config.php and restore originals
      *
+     * One write, like apply_security_constants(): until 3.0.6 the block went
+     * out in one write and the originals came back in another (A3).
+     *
      * @return bool|WP_Error
      */
     public function remove_constants() {
@@ -417,51 +600,50 @@ class Vigilante_Wpconfig_Security {
             return true;
         }
 
-        $content = $this->read_file_directly( $this->wpconfig_path );
-        
-        if ( false === $content ) {
-            return false;
+        if ( ! Vigilante_Settings::acquire_option_lock( self::LOCK_OPTION, self::LOCK_TIMEOUT ) ) {
+            return new WP_Error( 'locked', __( 'Another process is writing wp-config.php right now', 'vigilante' ) );
         }
 
-        // A block that lost a marker cannot come out without cutting or
-        // duplicating what surrounds it, so the file is left as it is.
-        if ( ! self::constants_blocks_are_whole( $content ) ) {
-            return new WP_Error( 'block_incomplete', __( 'A Vigilant block in wp-config.php is missing one of its markers, so the file was left as it is.', 'vigilante' ) );
+        try {
+            $original = $this->read_file_directly( $this->wpconfig_path );
+
+            if ( false === $original ) {
+                return false;
+            }
+
+            // A block that lost a marker cannot come out without cutting or
+            // duplicating what surrounds it, so the file is left as it is.
+            if ( ! self::constants_blocks_are_whole( $original ) ) {
+                return new WP_Error( 'block_incomplete', __( 'A Vigilant block in wp-config.php is missing one of its markers, so the file was left as it is.', 'vigilante' ) );
+            }
+
+            $content = $original;
+
+            if ( false !== strpos( $original, self::MARKER_START ) ) {
+                // Validate before modification
+                if ( ! $this->validate_wpconfig_content( $original ) ) {
+                    return false;
+                }
+
+                // Remove our section
+                $pattern = '/' . preg_quote( self::MARKER_START, '/' ) . '.*?' . preg_quote( self::MARKER_END, '/' ) . '\s*/s';
+                $content = (string) preg_replace( $pattern, '', $original );
+
+                // Clean up multiple empty lines
+                $content = (string) preg_replace( '/\n{3,}/', "\n\n", $content );
+            }
+
+            // Now uncomment the original constants
+            $result = $this->write_checked( $original, $this->uncomment_original_constants( $content ) );
+        } finally {
+            Vigilante_Settings::release_option_lock( self::LOCK_OPTION );
         }
 
-        // If our markers don't exist, just try to uncomment originals
-        if ( strpos( $content, self::MARKER_START ) === false ) {
+        if ( true === $result ) {
             $this->forget_owned_block();
-            return $this->uncomment_original_constants();
         }
 
-        // Validate before modification
-        if ( ! $this->validate_wpconfig_content( $content ) ) {
-            return false;
-        }
-        
-        // Remove our section
-        $pattern = '/' . preg_quote( self::MARKER_START, '/' ) . '.*?' . preg_quote( self::MARKER_END, '/' ) . '\s*/s';
-        $new_content = preg_replace( $pattern, '', $content );
-
-        // CRITICAL: Validate result BEFORE writing
-        if ( ! $this->validate_wpconfig_content( $new_content ) ) {
-            // Something went wrong, don't write
-            return false;
-        }
-
-        // Clean up multiple empty lines
-        $new_content = preg_replace( '/\n{3,}/', "\n\n", $new_content );
-
-        // Write the file without our block
-        if ( ! $this->write_file_directly( $this->wpconfig_path, $new_content ) ) {
-            return false;
-        }
-
-        $this->forget_owned_block();
-
-        // Now uncomment the original constants
-        return $this->uncomment_original_constants();
+        return $result;
     }
 
     /**
@@ -521,11 +703,10 @@ class Vigilante_Wpconfig_Security {
             $constants[] = '';
         }
 
-        // Disable WordPress's built-in pseudo-cron (page-view trigger). Pairs with the
-        // .htaccess block from firewall.protect_wp_cron — this constant alone does NOT
-        // block external HTTP access to wp-cron.php, only the auto-spawn from front-end
-        // page views. Both pieces are needed for full coverage; both require a real
-        // server-side cron job calling wp-cron.php from CLI.
+        // Disable WordPress's built-in pseudo-cron (page-view trigger). It only stops
+        // the visits from starting the scheduled tasks, so the server needs a real
+        // cron job for wp-cron.php, by its address or with PHP. Until 3.0.6 this
+        // comment paired it with firewall.protect_wp_cron, retired in 3.0.7.
         if ( ! empty( $this->options['disable_wp_cron'] ) ) {
             $constants[] = "// Disable WordPress pseudo-cron (use real server-side cron instead)";
             $constants[] = "if ( ! defined( 'DISABLE_WP_CRON' ) ) { define( 'DISABLE_WP_CRON', true ); }";
@@ -539,40 +720,26 @@ class Vigilante_Wpconfig_Security {
     }
 
     /**
-     * Write constants to wp-config.php with multiple safety checks
+     * The content with the constants block in its place
      *
-     * @param string $constants Constants block to write.
-     * @return bool|WP_Error
+     * Works on the content in memory; write_checked() writes it.
+     *
+     * @param string $content   File content.
+     * @param string $constants Block from generate_constants().
+     * @return string|WP_Error
      */
-    private function write_constants( $constants ) {
-        // SAFETY CHECK 1: Read file directly (not via WP_Filesystem which can fail)
-        $content = $this->read_file_directly( $this->wpconfig_path );
-
-        // SAFETY CHECK 2: Verify we got valid content
-        if ( false === $content || strlen( $content ) < self::MIN_CONFIG_SIZE ) {
-            return new WP_Error( 'read_failed', __( 'Could not read wp-config.php or file is too small', 'vigilante' ) );
-        }
-
-        // SAFETY CHECK 3: Validate it's a real wp-config.php
-        if ( ! $this->validate_wpconfig_content( $content ) ) {
-            return new WP_Error( 'invalid_config', __( 'wp-config.php does not appear to be valid', 'vigilante' ) );
-        }
-
-        // Store original for comparison
-        $original_content = $content;
-
+    private function place_block( $content, $constants ) {
         // Remove existing Vigilante constants block
         $pattern = '/' . preg_quote( self::MARKER_START, '/' ) . '.*?' . preg_quote( self::MARKER_END, '/' ) . '\s*/s';
-        $content = preg_replace( $pattern, '', $content );
+        $content = (string) preg_replace( $pattern, '', $content );
 
         // Remove old plugin constants block
-        $old_pattern = '/' . preg_quote( self::OLD_MARKER_START, '/' ) . '.*?' . preg_quote( self::OLD_MARKER_END, '/' ) . '\s*/s';
-        $content = preg_replace( $old_pattern, '', $content );
+        $content = $this->strip_old_block( $content );
 
         // Clean up multiple empty lines
-        $content = preg_replace( '/\n{3,}/', "\n\n", $content );
+        $content = (string) preg_replace( '/\n{3,}/', "\n\n", $content );
 
-        // SAFETY CHECK 4: Content should still be valid after removal
+        // Content should still be valid after removal
         if ( ! $this->validate_wpconfig_content( $content ) ) {
             return new WP_Error( 'invalid_after_clean', __( 'wp-config.php became invalid after cleanup', 'vigilante' ) );
         }
@@ -650,22 +817,89 @@ class Vigilante_Wpconfig_Security {
             return new WP_Error( 'insert_failed', __( 'Could not find a safe place to insert constants', 'vigilante' ) );
         }
 
-        // SAFETY CHECK 5: Final content must still be valid
-        if ( ! $this->validate_wpconfig_content( $content ) ) {
-            return new WP_Error( 'invalid_final', __( 'Final wp-config.php would be invalid, aborting', 'vigilante' ) );
-        }
+        return $content;
+    }
 
-        // SAFETY CHECK 6: Final content should be at least as big as original (minus our old block)
-        if ( strlen( $content ) < strlen( $original_content ) * 0.5 ) {
-            return new WP_Error( 'size_check_failed', __( 'Final wp-config.php would be too small, aborting', 'vigilante' ) );
-        }
-
-        // All checks passed, write the file
-        if ( $this->write_file_directly( $this->wpconfig_path, $content ) ) {
+    /**
+     * Write wp-config.php once, after checking the result, and read it back
+     *
+     * The result must still look like a wp-config.php, keep its blocks whole,
+     * not shrink to less than half and parse as PHP: a wp-config.php that does
+     * not parse takes the site down. It is written with an exclusive lock and
+     * read back. When what reads back is not what was written and does not
+     * parse, the previous content is put back.
+     *
+     * @since 3.0.7
+     *
+     * @param string $original The file as it was read.
+     * @param string $content  What to write.
+     * @return bool|WP_Error
+     */
+    private function write_checked( $original, $content ) {
+        if ( $content === $original ) {
             return true;
         }
 
-        return new WP_Error( 'write_failed', __( 'Failed to write wp-config.php', 'vigilante' ) );
+        if ( ! $this->validate_wpconfig_content( $content ) || ! self::constants_blocks_are_whole( $content ) ) {
+            return new WP_Error( 'invalid_final', __( 'Final wp-config.php would be invalid, aborting', 'vigilante' ) );
+        }
+
+        // Measured against the file without the blocks of Vigilant: removing
+        // the constants block from a small wp-config.php legitimately takes it
+        // below half (the second cross review of 3.0.7 measured 1139 bytes plus
+        // a block of 1413).
+        $pattern = '/' . preg_quote( self::MARKER_START, '/' ) . '.*?' . preg_quote( self::MARKER_END, '/' ) . '\s*/s';
+        $base    = $this->strip_old_block( (string) preg_replace( $pattern, '', $original ) );
+        if ( strlen( $content ) < strlen( $base ) * 0.5 ) {
+            return new WP_Error( 'size_check_failed', __( 'Final wp-config.php would be too small, aborting', 'vigilante' ) );
+        }
+
+        if ( ! self::parses( $content ) ) {
+            return new WP_Error( 'parse_failed', __( 'The change would have left wp-config.php with a PHP syntax error, so the file was left as it is.', 'vigilante' ) );
+        }
+
+        // What is overwritten is what was read at the start: a change made since,
+        // by hand or by another plugin, is not lost (the third and fourth cross
+        // reviews of 3.0.7). The writers of Vigilant already wait for each other.
+        clearstatcache( true, $this->wpconfig_path );
+        if ( $this->read_file_directly( $this->wpconfig_path ) !== $original ) {
+            return new WP_Error( 'changed_meanwhile', __( 'wp-config.php changed while Vigilant was preparing its change, so it was left as it is. Save the tab again.', 'vigilante' ) );
+        }
+
+        $wrote = $this->write_file_directly( $this->wpconfig_path, $content, $original );
+
+        clearstatcache( true, $this->wpconfig_path );
+        $written = $this->read_file_directly( $this->wpconfig_path );
+
+        if ( $wrote && $written === $content ) {
+            return true;
+        }
+
+        // The write failed or was cut short (a full disk, a quota), or something
+        // else wrote the file in between. What is on disk now stays only when it
+        // is the file as it was, or somebody's whole wp-config.php: a piece of
+        // what was being written goes, also when it parses, because a cut that
+        // falls between two statements parses and lacks wp-settings.php (the
+        // second cross review of 3.0.7 reproduced it with a file size limit).
+        $is_piece = false === $written
+            || ( '' !== $written && strlen( $written ) < strlen( $content ) && 0 === strpos( $content, $written ) )
+            || ! $this->validate_wpconfig_content( $written )
+            || ! self::parses( $written );
+
+        if ( $written !== $original && $is_piece ) {
+            $restored = $this->write_file_directly( $this->wpconfig_path, $original, $written );
+            clearstatcache( true, $this->wpconfig_path );
+
+            if ( ! $restored || $this->read_file_directly( $this->wpconfig_path ) !== $original ) {
+                return new WP_Error( 'restore_failed', __( 'wp-config.php was not written completely and its previous content could not be put back. Check the free disk space and restore the file from a backup.', 'vigilante' ) );
+            }
+        }
+
+        if ( ! $wrote ) {
+            return new WP_Error( 'write_failed', __( 'Failed to write wp-config.php', 'vigilante' ) );
+        }
+
+        return new WP_Error( 'verify_failed', __( 'wp-config.php did not read back as written, so it was checked and left in a working state', 'vigilante' ) );
     }
 
     /**
@@ -675,8 +909,28 @@ class Vigilante_Wpconfig_Security {
      * @param string $content Content to write.
      * @return bool
      */
-    private function write_file_directly( $path, $content ) {
-        return false !== file_put_contents( $path, $content ); // phpcs:ignore
+    private function write_file_directly( $path, $content, $before = null ) {
+        // An exclusive lock, so a writer that also locks never reads it half
+        // written. A file system without locks (some network mounts) refuses the
+        // call before writing anything, and then it is written as until 3.0.6:
+        // the writers of Vigilant already wait for each other on their own lock.
+        // Only then: after a write that was cut short (a full disk) the file has
+        // changed, and writing again would only cut it again. The warnings are
+        // silenced because a refused write is reported by the caller, and one
+        // printed in the middle of an AJAX answer breaks it.
+        // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents,WordPress.PHP.NoSilencedErrors.Discouraged -- wp-config.php is written directly on purpose (see read_file_directly()); a refused write is reported by the caller.
+        $bytes = @file_put_contents( $path, $content, LOCK_EX );
+
+        if ( false === $bytes && null !== $before ) {
+            clearstatcache( true, $path );
+
+            if ( $this->read_file_directly( $path ) === $before ) {
+                // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents,WordPress.PHP.NoSilencedErrors.Discouraged -- same as above, without the lock the file system refused.
+                $bytes = @file_put_contents( $path, $content );
+            }
+        }
+
+        return strlen( $content ) === $bytes;
     }
 
     /**

@@ -110,9 +110,11 @@ class Vigilante_Settings {
                 'protect_wp_includes'        => true,
                 'protect_uploads_php'        => true,
                 'protect_sensitive_files'    => true,
-                // Off by default — only safe when host has a real server-side cron job
-                // calling wp-cron.php; otherwise scheduled tasks stop running silently.
-                'protect_wp_cron'            => false,
+                // There was a protect_wp_cron here until 3.0.6. It denied every
+                // HTTP request to wp-cron.php, including the cron job of a server
+                // that calls its address, and scheduled tasks stopped. It was
+                // retired in 3.0.7 and its rule is no longer written; a value
+                // still stored is not read by anything.
                 'block_php_in_plugins'       => false,
                 'block_php_in_themes'        => false,
                 'limit_http_methods'         => true,
@@ -398,9 +400,9 @@ class Vigilante_Settings {
                 // both of which already ship off.
                 'force_ssl_admin'       => false,
                 'wp_debug'              => true,
-                // Off by default — only safe when host has a real server-side cron job;
-                // pairs with firewall.protect_wp_cron to block both internal triggering
-                // (this constant) and external HTTP abuse (the .htaccess rule).
+                // Off by default: only safe when the server runs a real cron job
+                // for wp-cron.php, by its address or with PHP. Otherwise nothing
+                // starts the scheduled tasks.
                 'disable_wp_cron'       => false,
                 
                 // Comment security
@@ -647,6 +649,34 @@ class Vigilante_Settings {
     }
 
     /**
+     * Whether the Protection block belongs in .htaccess
+     *
+     * The block carries the rules of the Firewall module and the two server
+     * identity settings of the Headers tab, so it is wanted while any of the
+     * three is on. Until 3.0.6 five places answered this on their own and did
+     * not agree: the refresh after an update, saving a tab and the whitelist
+     * button asked all three, while importing, applying a preset or restoring
+     * the defaults, and the activation, asked only for the firewall, and so
+     * removed or left out a block the identity settings asked for (B76). They
+     * all ask here now.
+     *
+     * It reads the settings merged with their defaults, which is what the
+     * screen shows and what Vigilante_Htaccess_Protection writes from.
+     *
+     * @since 3.0.7
+     *
+     * @param Vigilante_Settings $settings Settings to answer for.
+     * @return bool
+     */
+    public static function needs_protection_block( $settings ) {
+        $headers = $settings->get_section( 'security_headers' );
+
+        return $settings->is_module_enabled( 'firewall' )
+            || ! empty( $headers['hide_server_signature'] )
+            || ! empty( $headers['remove_fingerprinting_headers'] );
+    }
+
+    /**
      * Save options
      *
      * @param array $options Options to save.
@@ -867,7 +897,7 @@ class Vigilante_Settings {
         return array(
             'security_headers' => true,
             'wp_hardening'     => array( 'disallow_file_edit', 'disallow_file_mods', 'force_ssl_admin', 'force_ssl_login', 'wp_debug', 'disable_wp_cron' ),
-            'firewall'         => array( 'disable_directory_browsing', 'protect_wp_config', 'protect_wp_includes', 'protect_uploads_php', 'protect_sensitive_files', 'protect_wp_cron', 'limit_http_methods', 'block_php_in_plugins', 'block_php_in_themes' ),
+            'firewall'         => array( 'disable_directory_browsing', 'protect_wp_config', 'protect_wp_includes', 'protect_uploads_php', 'protect_sensitive_files', 'limit_http_methods', 'block_php_in_plugins', 'block_php_in_themes' ),
             'advanced'         => array( 'remove_readme', 'remove_license' ),
         );
     }
