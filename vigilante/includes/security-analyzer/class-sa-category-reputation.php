@@ -177,50 +177,52 @@ class Vigilante_SA_Category_Reputation {
 
         $hostname = $reversed . '.' . $meta['zone'];
 
-        // Use gethostbynamel() to avoid long single-host timeouts and get all A records back.
-        // A listing answers with a 127.0.0.x code; a clean address answers nothing.
-        $records = @gethostbynamel( $hostname ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+        // A listing answers with a 127.0.0.x code; a clean address answers
+        // nothing, and so does a list that is not answering this server. Only
+        // a list that answers its own test entry as listed has said "not
+        // listed": until 3.0.8 the silence was read as clean (B95; measured on
+        // 14 Oct 2026 from a SiteGround server, where Spamhaus answers nothing
+        // at all). The test entry is asked only when the answer is empty, so a
+        // list that answers costs no extra lookup.
+        $answer = self::lookup( $hostname );
+        $test   = empty( $answer ) ? self::lookup( '2.0.0.127.' . $meta['zone'] ) : null;
+        $read   = self::read_answer( $answer, $test );
 
-        if ( false === $records || empty( $records ) ) {
-            $args['detail'] = sprintf(
-                /* translators: %s: blacklist name */
-                __( 'Not listed on %s.', 'vigilante' ),
-                $meta['label']
-            );
-            return Vigilante_SA_Check_Result::info( $args );
-        }
+        switch ( $read['state'] ) {
+            case 'clean':
+                $args['detail'] = sprintf(
+                    /* translators: %s: blacklist name */
+                    __( 'Not listed on %s.', 'vigilante' ),
+                    $meta['label']
+                );
+                return Vigilante_SA_Check_Result::info( $args );
 
-        $codes = array_values( array_filter( (array) $records, 'is_string' ) );
+            case 'refused':
+                $args['detail'] = sprintf(
+                    /* translators: 1: blacklist name, 2: response codes (127.255.255.x) */
+                    __( '%1$s did not answer the query (response: %2$s). That code means the blacklist refused the lookup, usually because the server asks through a public DNS resolver, not that the address is listed. Nothing to fix on the site.', 'vigilante' ),
+                    $meta['label'],
+                    implode( ', ', $read['codes'] )
+                );
+                $args['data'] = array( 'refused' => $read['codes'] );
+                return Vigilante_SA_Check_Result::skip( $args );
 
-        /*
-         * An answer is not the same as a listing. The DNSBLs reserve 127.255.255.x
-         * to say "I am not answering you": Spamhaus returns 127.255.255.252 for a
-         * typo in the query, .254 for a query coming from an open or public
-         * resolver (Google DNS, Cloudflare and the like, which is what most shared
-         * hosting uses) and .255 for too many queries. Reading those as a listing
-         * told sites they were on Spamhaus when they were not, and there was no way
-         * for the owner to act on it because there was nothing to delist.
-         */
-        $refused = array();
-        $listed  = array();
+            case 'silent':
+                $args['detail'] = sprintf(
+                    /* translators: %s: blacklist name */
+                    __( '%s is not answering this server: it does not even answer the test entry it keeps listed on purpose, so whether this address is listed is unknown. Nothing to fix on the site. Not scored.', 'vigilante' ),
+                    $meta['label']
+                );
+                return Vigilante_SA_Check_Result::skip( $args );
 
-        foreach ( $codes as $code ) {
-            if ( 0 === strpos( $code, '127.255.255.' ) ) {
-                $refused[] = $code;
-            } else {
-                $listed[] = $code;
-            }
-        }
-
-        if ( empty( $listed ) ) {
-            $args['detail'] = sprintf(
-                /* translators: 1: blacklist name, 2: response codes (127.255.255.x) */
-                __( '%1$s did not answer the query (response: %2$s). That code means the blacklist refused the lookup, usually because the server asks through a public DNS resolver, not that the address is listed. Nothing to fix on the site.', 'vigilante' ),
-                $meta['label'],
-                implode( ', ', $refused )
-            );
-            $args['data'] = array( 'refused' => $refused );
-            return Vigilante_SA_Check_Result::skip( $args );
+            case 'odd':
+                $args['detail'] = sprintf(
+                    /* translators: 1: blacklist name, 2: IP addresses returned by the DNS */
+                    __( 'The DNS of this server answered the query for %1$s with %2$s, which is not a blacklist code: some DNS providers answer every name that does not exist with an address of their own. Whether this address is listed is unknown. Not scored.', 'vigilante' ),
+                    $meta['label'],
+                    implode( ', ', $read['codes'] )
+                );
+                return Vigilante_SA_Check_Result::skip( $args );
         }
 
         // Genuinely listed. Informational in terms of scoring (max=0), but flagged
@@ -229,10 +231,84 @@ class Vigilante_SA_Category_Reputation {
             /* translators: 1: blacklist name, 2: response codes (127.0.0.x) */
             __( 'Listed on %1$s (response: %2$s). Shared hosting? Check if the listing belongs to your IP range and request delisting from the blacklist operator.', 'vigilante' ),
             $meta['label'],
-            implode( ', ', $listed )
+            implode( ', ', $read['codes'] )
         );
-        $args['data'] = array( 'response' => $listed );
+        $args['data'] = array( 'response' => $read['codes'] );
         return Vigilante_SA_Check_Result::warn( $args );
+    }
+
+    /**
+     * IPv4 addresses a DNS name resolves to
+     *
+     * gethostbynamel() is used to avoid long single-host timeouts and to get
+     * every A record back.
+     *
+     * @since 3.0.8
+     *
+     * @param string $hostname Name to resolve.
+     * @return string[] Empty when nothing came back.
+     */
+    private static function lookup( $hostname ) {
+        $records = @gethostbynamel( $hostname ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+        return is_array( $records ) ? array_values( array_filter( $records, 'is_string' ) ) : array();
+    }
+
+    /**
+     * What a blacklist said, from its answer for the address and, when that
+     * was empty, its answer for its own test entry
+     *
+     * No network here, so the reading can be checked with made-up answers.
+     * An answer is not the same as a listing. The DNSBLs reserve 127.255.255.x
+     * to say "I am not answering you": Spamhaus returns 127.255.255.252 for a
+     * typo in the query, .254 for a query coming from an open or public
+     * resolver (Google DNS, Cloudflare and the like, which is what most shared
+     * hosting uses) and .255 for too many queries. Reading those as a listing
+     * told sites they were on Spamhaus when they were not. And an address
+     * outside 127.0.0.0/8 is not a blacklist answer at all: until 3.0.8 it was
+     * read as a listing too.
+     *
+     * @since 3.0.8
+     *
+     * @param string[]      $answer Addresses returned for the site address.
+     * @param string[]|null $test   Addresses returned for the test entry, or null when it was not asked.
+     * @return array{state: string, codes: string[]} State listed, clean, refused, silent or odd.
+     */
+    public static function read_answer( array $answer, $test = null ) {
+        $listed  = array();
+        $refused = array();
+        $odd     = array();
+
+        foreach ( $answer as $code ) {
+            $code = (string) $code;
+            if ( ! filter_var( $code, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4 ) || 0 !== strpos( $code, '127.' ) ) {
+                $odd[] = $code;
+            } elseif ( 0 === strpos( $code, '127.255.255.' ) ) {
+                $refused[] = $code;
+            } else {
+                $listed[] = $code;
+            }
+        }
+
+        if ( ! empty( $odd ) ) {
+            return array( 'state' => 'odd', 'codes' => $odd );
+        }
+        if ( ! empty( $listed ) ) {
+            return array( 'state' => 'listed', 'codes' => $listed );
+        }
+        if ( ! empty( $refused ) ) {
+            return array( 'state' => 'refused', 'codes' => $refused );
+        }
+
+        // Nothing for the address: clean only if the list answers its test
+        // entry as listed.
+        if ( is_array( $test ) && 'listed' === self::read_answer( $test )['state'] ) {
+            return array( 'state' => 'clean', 'codes' => array() );
+        }
+        if ( is_array( $test ) && 'refused' === self::read_answer( $test )['state'] ) {
+            return array( 'state' => 'refused', 'codes' => self::read_answer( $test )['codes'] );
+        }
+
+        return array( 'state' => 'silent', 'codes' => array() );
     }
 
     /**

@@ -72,7 +72,9 @@ class Vigilante_Self_Integrity_Guidance {
                 // 30 days (see Vigilante_Self_Integrity::watchdog_severity()).
                 return ( 'critical' === $severity ) ? 'cron_repeated' : 'cron_repeated_soft';
             case 'self_disabled':
-                return 'disabled';
+                // With no file to name the steps cannot say "the files listed
+                // above" (see Vigilante_Self_Integrity::disabled_by()).
+                return ( 'unnamed' === $variant ) ? 'disabled_unnamed' : 'disabled';
             case 'self_hooks_removed':
                 return 'hooks_removed';
             case 'self_stale':
@@ -159,7 +161,11 @@ class Vigilante_Self_Integrity_Guidance {
             'self_integrity_captured'   => 'captured',
             'self_rebaselined'          => 'captured',
             'cron_restored'             => 'cron_restored',
-            'cron_scheduled'            => 'cron_restored',
+            // Until 3.0.8 these three were explained as a task that had
+            // disappeared, or not at all.
+            'cron_scheduled'            => 'cron_scheduled',
+            'self_disabled'             => 'disabled',
+            'self_hooks_removed'        => 'hooks_removed',
         );
         $action = (string) $action;
         if ( ! isset( $cases[ $action ] ) ) {
@@ -183,28 +189,98 @@ class Vigilante_Self_Integrity_Guidance {
                 }
             }
         }
-        foreach ( array( 'restored', 'scheduled' ) as $hook_key ) {
-            if ( ! empty( $data[ $hook_key ] ) && is_array( $data[ $hook_key ] ) ) {
-                foreach ( $data[ $hook_key ] as $hook ) {
-                    $files[] = (string) $hook;
+
+        $key = $cases[ $action ];
+
+        // A critical entry about tasks lists only the tasks that made it
+        // critical: the same pass also restores tasks for the first time, and
+        // those are not disappearing again and again.
+        $hooks = array();
+        if ( 'cron_restored' === $key && 'critical' === $severity ) {
+            $key   = 'cron_repeated';
+            $hooks = self::repeated_hooks( $data );
+        } else {
+            foreach ( array( 'restored', 'scheduled' ) as $hook_key ) {
+                if ( ! empty( $data[ $hook_key ] ) && is_array( $data[ $hook_key ] ) ) {
+                    $hooks = array_merge( $hooks, $data[ $hook_key ] );
                 }
             }
         }
+        foreach ( $hooks as $hook ) {
+            $files[] = (string) $hook;
+        }
 
-        $key = $cases[ $action ];
+        if ( 'disabled' === $key ) {
+            // Entries written before 3.0.8 list wp-includes/functions.php when
+            // the filter hooks __return_false; that file does not switch
+            // anything off (see Vigilante_Self_Integrity::disabled_by()). Any
+            // other file is kept, wp-includes or not: one planted there is
+            // what has to be named.
+            if ( ! empty( $data['files'] ) && is_array( $data['files'] ) ) {
+                foreach ( $data['files'] as $file ) {
+                    $file = (string) $file;
+                    if ( '' !== $file && 'wp-includes/functions.php' !== $file ) {
+                        $files[] = $file;
+                    }
+                }
+            }
+            if ( empty( $files ) ) {
+                $key = 'disabled_unnamed';
+            }
+        }
+        $also_unnamed = ( 'disabled' === $key && ! empty( $data['unnamed'] ) );
+
         if ( '' === $key ) {
             $key = $codes ? self::case_key( $codes[0], 'critical' === $severity ? 'critical' : 'warning' ) : 'unknown';
-        }
-        if ( 'cron_restored' === $key && 'critical' === $severity ) {
-            $key = 'cron_repeated';
         }
 
         $guidance          = self::case_data( $key );
         $guidance['files'] = array_values( array_unique( $files ) );
+        if ( ! empty( $also_unnamed ) ) {
+            $guidance['meaning'] .= ' ' . __( 'Something else hooks the same filter with a callback that cannot be traced to a file, so this list may not be complete.', 'vigilante' );
+        }
         if ( count( array_unique( $codes ) ) > 1 ) {
             $guidance['meaning'] .= ' ' . __( 'This entry covers more than one kind of finding: File Integrity lists each one with what it means and what to do.', 'vigilante' );
         }
         return $guidance;
+    }
+
+    /**
+     * Tasks that made a cron_restored entry critical
+     *
+     * Entries written since 3.0.8 carry them under "repeated". Older ones are
+     * read from the watchdog state they stored, at the moment of the entry,
+     * which is the last restoration of each task. Without either, every
+     * restored task is listed, as before.
+     *
+     * @since 3.0.8
+     *
+     * @param array $data extra_data of the entry.
+     * @return array Hook names.
+     */
+    private static function repeated_hooks( $data ) {
+        if ( isset( $data['repeated'] ) && is_array( $data['repeated'] ) ) {
+            return array_values( array_map( 'strval', $data['repeated'] ) );
+        }
+
+        $restored = ( isset( $data['restored'] ) && is_array( $data['restored'] ) ) ? $data['restored'] : array();
+        $state    = ( isset( $data['recurrence'] ) && is_array( $data['recurrence'] ) ) ? $data['recurrence'] : array();
+
+        if ( empty( $state ) || ! method_exists( 'Vigilante_Self_Integrity', 'watchdog_severity' ) ) {
+            return array_values( array_map( 'strval', $restored ) );
+        }
+
+        $repeated = array();
+        foreach ( $restored as $hook ) {
+            $hook  = (string) $hook;
+            $entry = ( isset( $state[ $hook ] ) && is_array( $state[ $hook ] ) ) ? $state[ $hook ] : array();
+            $when  = isset( $entry['last'] ) ? (int) $entry['last'] : 0;
+            if ( $when > 0 && 'critical' === Vigilante_Self_Integrity::watchdog_severity( $entry, $when ) ) {
+                $repeated[] = $hook;
+            }
+        }
+
+        return $repeated ? $repeated : array_values( array_map( 'strval', $restored ) );
     }
 
     /**
@@ -395,6 +471,14 @@ class Vigilante_Self_Integrity_Guidance {
                 );
                 $repair  = false;
                 break;
+            case 'cron_scheduled':
+                $title   = __( 'Scheduled task created', 'vigilante' );
+                // Not "nothing had disappeared": a task lost before the watchdog
+                // ever saw it lands here too (first blind review of 3.0.8).
+                $meaning = __( 'Vigilant found that one of its scheduled tasks was not scheduled and created it. That is what happens the first time Vigilant checks its tasks on a site, and when a setting that needs one of them is switched on. It is not counted as a task that disappeared.', 'vigilante' );
+                $steps   = array();
+                $repair  = false;
+                break;
             case 'restored':
                 $title   = __( 'Integrity restored', 'vigilante' );
                 $meaning = __( 'The files that had been reported match what WordPress.org distributes again, so what was reported before is closed.', 'vigilante' );
@@ -447,6 +531,16 @@ class Vigilante_Self_Integrity_Guidance {
                 $steps   = array(
                     __( 'If you did not ask for this, treat it as a compromise: a plugin or a snippet that switches off the check of a security plugin is doing the one thing an attacker needs first.', 'vigilante' ),
                     __( 'Open the files listed above and remove that filter, or deactivate whatever added it. The check starts again on its own.', 'vigilante' ),
+                    __( 'If you turned it off on purpose because this site must not contact WordPress.org, nothing else is wrong: the plugin says so on every screen while it lasts.', 'vigilante' ),
+                );
+                $repair  = false;
+                break;
+            case 'disabled_unnamed':
+                $title   = __( 'Self-protection is switched off by code', 'vigilante' );
+                $meaning = __( 'Nothing is checking that Vigilant own files are intact, so a change to them would go unnoticed. There is no setting that does this: something on this site is using the vigilante_self_integrity_enabled filter with a callback that cannot be traced to a file, such as __return_false or another function of WordPress itself, or a function built into PHP, and then the file that adds the filter cannot be named.', 'vigilante' );
+                $steps   = array(
+                    __( 'If you did not ask for this, treat it as a compromise: a plugin or a snippet that switches off the check of a security plugin is doing the one thing an attacker needs first.', 'vigilante' ),
+                    __( 'Search your plugins, must-use plugins, drop-ins, theme and wp-config.php for vigilante_self_integrity_enabled, for example with the file manager of your hosting, and remove that line or deactivate whatever added it. The check starts again on its own.', 'vigilante' ),
                     __( 'If you turned it off on purpose because this site must not contact WordPress.org, nothing else is wrong: the plugin says so on every screen while it lasts.', 'vigilante' ),
                 );
                 $repair  = false;

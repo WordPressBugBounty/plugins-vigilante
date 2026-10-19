@@ -72,6 +72,27 @@ class Vigilante_SA_Category_Headers {
      */
     private $cause_needed = false;
 
+    /**
+     * Every value of each header of the home page, set by run()
+     *
+     * @var array<string,string[]>
+     */
+    private $lists = array();
+
+    /**
+     * Whether the cause found is a cache serving a copy made before (B74)
+     *
+     * @var bool
+     */
+    private $cause_is_cache = false;
+
+    /**
+     * Values the block of Vigilant sets, by lowercase header name, set by run()
+     *
+     * @var array<string,string>
+     */
+    private $values = array();
+
     public function __construct( Vigilante_Settings $settings ) {
         $this->settings = $settings;
     }
@@ -87,9 +108,10 @@ class Vigilante_SA_Category_Headers {
             return array();
         }
 
-        $probe    = Vigilante_SA_Helpers::probe_home();
-        $headers  = ( $probe && isset( $probe['headers'] ) ) ? $probe['headers'] : array();
-        $sec_hdrs = $this->settings->get_section( 'security_headers' );
+        $probe       = Vigilante_SA_Helpers::probe_home();
+        $headers     = ( $probe && isset( $probe['headers'] ) ) ? $probe['headers'] : array();
+        $this->lists = ( $probe && isset( $probe['lists'] ) && is_array( $probe['lists'] ) ) ? $probe['lists'] : array();
+        $sec_hdrs    = $this->settings->get_section( 'security_headers' );
 
         // The headers are written to .htaccess only while the Security Headers
         // module is on, and taken out when it is switched off. What is set in
@@ -97,7 +119,10 @@ class Vigilante_SA_Category_Headers {
         // "enabled in Vigilant but not reaching the browser" and gave half the
         // points for it.
         $this->module_on = $this->settings->is_module_enabled( 'security_headers' );
-        $this->note_what_vigilant_sends( $headers, $probe ? (int) $probe['code'] : 0 );
+        // The page generated now, for the cache (B74): asked only when the
+        // home page answered with a normal page.
+        $fresh = ( $probe && (int) $probe['code'] >= 200 && (int) $probe['code'] < 300 ) ? Vigilante_SA_Helpers::probe_fresh_home() : null;
+        $this->note_what_vigilant_sends( $headers, $probe ? (int) $probe['code'] : 0, $fresh );
 
         $results = array();
         $results[] = $this->check_csp( $headers, $sec_hdrs );
@@ -115,13 +140,14 @@ class Vigilante_SA_Category_Headers {
             foreach ( $results as $r ) {
                 $r->state  = Vigilante_SA_Check_Result::STATE_SKIP;
                 $r->score  = 0;
-                $r->detail = __( 'Could not fetch the homepage to read response headers.', 'vigilante' );
+                $r->detail = Vigilante_SA_Helpers::with_challenge( __( 'Could not fetch the homepage to read response headers.', 'vigilante' ), true );
             }
 
             return $results;
         }
 
         $this->note_headers_from_above( $results );
+        $this->note_repeated( $results );
 
         // The reason is the same for every header of the block, so it is said
         // once, in a row of its own that scores nothing, and not after each
@@ -140,7 +166,114 @@ class Vigilante_SA_Category_Headers {
             );
         }
 
+        // A cache serving a copy with other headers than the page generated
+        // now, said once (B74). Not when it is already the cause above.
+        if ( ! $this->cause_is_cache ) {
+            $diff  = $this->cache_difference( $headers, $fresh );
+            $stale = array_merge( $diff['served'], $diff['fresh'] );
+            if ( ! empty( $stale ) ) {
+                $named = implode( ', ', array_map( array( $this, 'header_label' ), $stale ) );
+                // Only the copy visitors get carries them, and so does the image:
+                // that copy is served as a file, by a server that applies the
+                // rules of .htaccess to files and not to the pages PHP generates.
+                // Emptying the cache changes nothing there (first blind review).
+                $files_only = empty( $diff['fresh'] ) && $this->found_in( Vigilante_SA_Helpers::probe_static_file(), $diff['served'], min( 2, count( $diff['served'] ) ), true );
+                array_unshift(
+                    $results,
+                    Vigilante_SA_Check_Result::info(
+                        array(
+                            'id'       => 'headers_cache_copy',
+                            'category' => self::SLUG,
+                            'label'    => __( 'Copy served by the cache', 'vigilante' ),
+                            'detail'   => $files_only
+                                ? sprintf(
+                                    /* translators: %s: comma-separated names of HTTP headers */
+                                    __( 'The home page that visitors get carries security headers (%s) that the page generated now does not: the cache serves that copy as a file, and this server applies the rules of .htaccess to files and not to the pages PHP generates, which happens on some hosting where PHP runs as CGI. Emptying the cache does not change that: ask your hosting how to add headers to the pages PHP generates.', 'vigilante' ),
+                                    $named
+                                )
+                                : sprintf(
+                                    /* translators: %s: comma-separated names of HTTP headers */
+                                    __( 'The home page that visitors get does not carry the same security headers as the page generated now (%s): it comes from a cache made before the last change. The rows below are about what visitors get. Empty the cache of the site, the hosting or the CDN and check again.', 'vigilante' ),
+                                    $named
+                                ),
+                        )
+                    )
+                );
+            }
+        }
+
         return $results;
+    }
+
+    /**
+     * Say when a header arrives more than once
+     *
+     * Until 3.0.8 a header sent twice was joined into one line and passed as
+     * it was, "DENY, SAMEORIGIN" included. It happens when the same header
+     * leaves the block of Vigilant and another place: the hosting, another
+     * plugin, or header() lines in wp-config.php. The score does not change,
+     * because the header does arrive; the row says it, as the Security Check
+     * of herramientas.ayudawp.com does. The policy that Vigilant itself sends
+     * from PHP with upgrade-insecure-requests alone is not a repetition.
+     *
+     * @since 3.0.8
+     *
+     * @param Vigilante_SA_Check_Result[] $results Results of this category.
+     */
+    private function note_repeated( array $results ) {
+        $names = array(
+            'csp'                => 'content-security-policy',
+            'hsts'               => 'strict-transport-security',
+            'x_frame'            => 'x-frame-options',
+            'x_content_type'     => 'x-content-type-options',
+            'referrer_policy'    => 'referrer-policy',
+            'permissions_policy' => 'permissions-policy',
+            'coop'               => 'cross-origin-opener-policy',
+            'corp'               => 'cross-origin-resource-policy',
+        );
+
+        foreach ( $results as $r ) {
+            if ( ! isset( $names[ $r->id ] ) || Vigilante_SA_Check_Result::STATE_SKIP === $r->state || Vigilante_SA_Check_Result::STATE_INFO === $r->state ) {
+                continue;
+            }
+            $values = isset( $this->lists[ $names[ $r->id ] ] ) ? (array) $this->lists[ $names[ $r->id ] ] : array();
+            if ( 'csp' === $r->id ) {
+                $values = array_filter( $values, array( $this, 'is_not_upgrade_only_csp' ) );
+            }
+            $count = count( $values );
+            if ( $count < 2 ) {
+                continue;
+            }
+            $r->detail .= ' ' . sprintf(
+                /* translators: %d: how many times the header arrives, always two or more */
+                _n( 'It arrives %d time: it is sent from more than one place, and only one should be left.', 'It arrives %d times: it is sent from more than one place, and only one should be left.', $count, 'vigilante' ),
+                $count
+            );
+        }
+    }
+
+    /**
+     * A header name as it is written, from its lowercase form
+     *
+     * @since 3.0.8
+     *
+     * @param string $name Lowercase name.
+     * @return string
+     */
+    private function header_label( $name ) {
+        return ucwords( (string) $name, '-' );
+    }
+
+    /**
+     * Callback of note_repeated(): a CSP value that is not the one sent from PHP
+     *
+     * @since 3.0.8
+     *
+     * @param string $value One CSP value.
+     * @return bool
+     */
+    private function is_not_upgrade_only_csp( $value ) {
+        return ! Vigilante_SA_Helpers::is_upgrade_only_csp( $value );
     }
 
     /**
@@ -202,21 +335,29 @@ class Vigilante_SA_Category_Headers {
      *
      * The cause is the likely one and is worded as such. It is looked for in
      * this order, each step being what the next one takes for granted: the
-     * rules are in .htaccess, the home page answered with a normal page, and
+     * rules are in .htaccess, the home page answered with a normal page, the
+     * page generated now does not carry them either (a cache would explain
+     * it, B74), a file the server sends by itself does not carry them either
+     * (a server that applies them to files only would explain it, B90), and
      * only then whether other headers of the same block arrive. A header
      * that arrives may come from the hosting and not from Vigilant, so with
      * the rules missing from .htaccess nothing is said about them being
      * applied, and an error page from a layer in between is not read as a
-     * server that lacks a module.
+     * server that lacks a module. The policy that Vigilant itself sends from
+     * PHP with upgrade-insecure-requests alone does not count as a header of
+     * the block that arrives: with it, a server that applied nothing read as
+     * "something removes the others".
      *
      * @since 3.0.5
      *
-     * @param array $headers Response headers from the home page probe.
-     * @param int   $code    HTTP status of that answer, 0 when there was none.
+     * @param array      $headers Response headers from the home page probe.
+     * @param int        $code    HTTP status of that answer, 0 when there was none.
+     * @param array|null $fresh   The home page generated now (probe_fresh_home()), or null.
      */
-    private function note_what_vigilant_sends( $headers, $code = 0 ) {
+    private function note_what_vigilant_sends( $headers, $code = 0, $fresh = null ) {
         $this->written           = array();
         $this->cause             = '';
+        $this->cause_is_cache    = false;
         $this->block_not_applied = false;
         $this->cause_needed      = false;
 
@@ -224,22 +365,33 @@ class Vigilante_SA_Category_Headers {
             return;
         }
 
-        $sender = new Vigilante_Security_Headers( $this->settings );
-        if ( preg_match_all( '/^\s*Header\s+(?:always\s+)?set\s+([A-Za-z-]+)\s/mi', (string) $sender->generate_rules_content(), $found ) ) {
-            $this->written = array_values( array_unique( array_map( 'strtolower', $found[1] ) ) );
+        $sender       = new Vigilante_Security_Headers( $this->settings );
+        $this->values = array();
+        if ( preg_match_all( '/^\s*Header\s+(?:always\s+)?set\s+([A-Za-z-]+)\s+"?([^"\r\n]*)"?/mi', (string) $sender->generate_rules_content(), $found, PREG_SET_ORDER ) ) {
+            foreach ( $found as $line ) {
+                $this->values[ strtolower( $line[1] ) ] = trim( $line[2] );
+            }
+            $this->written = array_keys( $this->values );
         }
         if ( empty( $this->written ) ) {
             return;
         }
 
-        $arriving = 0;
+        $missing = array();
         foreach ( $this->written as $name ) {
-            if ( '' !== $this->header_value( $headers, array( $name ) ) ) {
-                ++$arriving;
+            if ( ! $this->arrives( $name, $headers, $this->lists ) ) {
+                $missing[] = $name;
             }
         }
+        $arriving = count( $this->written ) - count( $missing );
 
         $this->block_not_applied = ( 0 === $arriving );
+
+        // With no answer from the home page every row is left unmeasured and no
+        // cause is shown, so nothing else is asked for (second blind review).
+        if ( $code <= 0 ) {
+            return;
+        }
 
         if ( ! $sender->are_rules_active() ) {
             $this->block_not_applied = true;
@@ -256,6 +408,26 @@ class Vigilante_SA_Category_Headers {
             return;
         }
 
+        if ( empty( $missing ) ) {
+            return;
+        }
+
+        // The cache first: the page generated now carries them.
+        if ( $this->found_in( $fresh, $missing ) ) {
+            $this->cause_is_cache = true;
+            $this->cause          = __( 'The page generated now does carry them, and the copy that visitors get does not: it comes from a cache made before the last change. Empty the cache of the site, the hosting or the CDN and check again.', 'vigilante' );
+            return;
+        }
+
+        // Then a server that applies them to files and not to pages. Two of
+        // them at least when two or more are missing: one header on the image
+        // can come from an nginx in front that adds nosniff to static files
+        // (first blind review of 3.0.8).
+        if ( $this->found_in( Vigilante_SA_Helpers::probe_static_file(), $missing, min( 2, count( $missing ) ), true ) ) {
+            $this->cause = __( 'They do arrive on the files the web server sends by itself, such as images, and not on the pages PHP generates: this server applies the rules of .htaccess to files only, which happens on some hosting where PHP runs as CGI. It is not that mod_headers is off: ask your hosting how to add headers to the pages PHP generates.', 'vigilante' );
+            return;
+        }
+
         if ( $arriving > 0 ) {
             // Counted by name: whether they come from this block or from
             // the hosting cannot be told from the answer, hence "likely".
@@ -264,6 +436,103 @@ class Vigilante_SA_Category_Headers {
         }
 
         $this->cause = __( 'None of the headers Vigilant sends is arriving, although its rules are in .htaccess, so the server is not applying them. On Apache that usually means that its mod_headers module is not enabled: ask your hosting.', 'vigilante' );
+    }
+
+    /**
+     * Whether a header of the block arrives in an answer
+     *
+     * A Content-Security-Policy that is only upgrade-insecure-requests is the
+     * one Vigilant sends from PHP, not the one of the block.
+     *
+     * @since 3.0.8
+     *
+     * @param string $name    Header name, lowercase.
+     * @param array  $headers Normalized headers of the answer.
+     * @param array  $lists   Every value of each header of the answer.
+     * @return bool
+     */
+    private function arrives( $name, $headers, $lists ) {
+        if ( 'content-security-policy' !== $name ) {
+            return '' !== $this->header_value( $headers, array( $name ) );
+        }
+        $values = ( isset( $lists[ $name ] ) && is_array( $lists[ $name ] ) ) ? $lists[ $name ] : array();
+        if ( empty( $values ) ) {
+            $joined = $this->header_value( $headers, array( $name ) );
+            return '' !== $joined && ! Vigilante_SA_Helpers::is_upgrade_only_csp( $joined );
+        }
+        foreach ( $values as $value ) {
+            if ( ! Vigilante_SA_Helpers::is_upgrade_only_csp( $value ) ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether any of these headers arrives in a probe with a normal answer
+     *
+     * @since 3.0.8
+     *
+     * @param array|null $probe Probe from Vigilante_SA_Helpers.
+     * @param string[]   $names Header names, lowercase.
+     * @param int        $least How many of them have to arrive.
+     * @param bool       $same_value Whether each one has to carry the value Vigilant writes.
+     * @return bool
+     */
+    private function found_in( $probe, $names, $least = 1, $same_value = false ) {
+        if ( ! is_array( $probe ) || (int) $probe['code'] < 200 || (int) $probe['code'] > 299 ) {
+            return false;
+        }
+        $found = 0;
+        foreach ( $names as $name ) {
+            if ( ! $this->arrives( $name, $probe['headers'], isset( $probe['lists'] ) ? $probe['lists'] : array() ) ) {
+                continue;
+            }
+            // On the image, the value Vigilant writes: the same header with a
+            // value of its own comes from something else, such as an nginx in
+            // front that serves the static files (second blind review).
+            if ( $same_value && isset( $this->values[ $name ] ) && 0 !== strcasecmp( trim( $this->values[ $name ] ), trim( $this->header_value( $probe['headers'], array( $name ) ) ) ) ) {
+                continue;
+            }
+            ++$found;
+        }
+        return $found >= max( 1, (int) $least );
+    }
+
+    /**
+     * Security headers whose presence differs between the copy visitors get
+     * and the page generated now
+     *
+     * Presence and not value, because a CSP with a nonce changes on every
+     * request (B74).
+     *
+     * @since 3.0.8
+     *
+     * @param array      $headers Headers of the copy visitors get.
+     * @param array|null $fresh   The page generated now.
+     * @return array{served: string[], fresh: string[]} Lowercase names that only
+     *               the copy visitors get carries, and that only the page
+     *               generated now carries.
+     */
+    private function cache_difference( $headers, $fresh ) {
+        $diff = array(
+            'served' => array(),
+            'fresh'  => array(),
+        );
+        if ( ! is_array( $fresh ) || (int) $fresh['code'] < 200 || (int) $fresh['code'] > 299 ) {
+            return $diff;
+        }
+        $names = array( 'content-security-policy', 'strict-transport-security', 'x-frame-options', 'x-content-type-options', 'referrer-policy', 'permissions-policy', 'cross-origin-opener-policy', 'cross-origin-resource-policy' );
+        foreach ( $names as $name ) {
+            $in_served = $this->arrives( $name, $headers, $this->lists );
+            $in_fresh  = $this->arrives( $name, $fresh['headers'], $fresh['lists'] );
+            if ( $in_served && ! $in_fresh ) {
+                $diff['served'][] = $name;
+            } elseif ( $in_fresh && ! $in_served ) {
+                $diff['fresh'][] = $name;
+            }
+        }
+        return $diff;
     }
 
     /**
@@ -294,6 +563,31 @@ class Vigilante_SA_Category_Headers {
         return null;
     }
 
+    /**
+     * Whether a header arrives with the value Vigilant writes for it
+     *
+     * @since 3.0.8
+     *
+     * @param string $name    Header name, lowercase.
+     * @param array  $headers Normalized headers of the answer.
+     * @return bool False when Vigilant does not write it.
+     */
+    private function carries_vigilant_value( $name, $headers ) {
+        if ( ! in_array( $name, $this->written, true ) || ! isset( $this->values[ $name ] ) ) {
+            return false;
+        }
+        $mine   = trim( (string) $this->values[ $name ], " \t;" );
+        $values = ( isset( $this->lists[ $name ] ) && is_array( $this->lists[ $name ] ) && ! empty( $this->lists[ $name ] ) )
+            ? $this->lists[ $name ]
+            : array( $this->header_value( $headers, array( $name ) ) );
+        foreach ( $values as $value ) {
+            if ( 0 === strcasecmp( $mine, trim( (string) $value, " \t;" ) ) ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private function check_csp( $headers, $sec_hdrs ) {
         $args = array(
             'id'       => 'csp',
@@ -305,7 +599,16 @@ class Vigilante_SA_Category_Headers {
 
         $saved_on   = ! empty( $sec_hdrs['csp']['enabled'] );
         $setting_on = $saved_on && $this->module_on;
-        $header     = $this->header_value( $headers, array( 'content-security-policy', 'content-security-policy-report-only' ) );
+        // The policy Vigilant sends from PHP with upgrade-insecure-requests
+        // alone restricts nothing: it is not a CSP for this row. Until 3.0.8
+        // it scored 4 of 4 and, with CSP off in Vigilant, read as delivered
+        // by something other than Vigilant (first blind review of 3.0.8).
+        // With a Report-Only next to it, the row is about the Report-Only and
+        // shows its value (second blind review of 3.0.8).
+        $enforced = $this->arrives( 'content-security-policy', $headers, $this->lists );
+        $header   = $enforced
+            ? $this->header_value( $headers, array( 'content-security-policy' ) )
+            : $this->header_value( $headers, array( 'content-security-policy-report-only' ) );
 
         if ( $header ) {
             // A policy is arriving that Vigilant is not sending. Usually another
@@ -325,7 +628,46 @@ class Vigilante_SA_Category_Headers {
                     );
                     return Vigilante_SA_Check_Result::warn( $args );
                 }
+            }
 
+            // A policy in report-only mode blocks nothing: the browser only
+            // reports what it would block. Half the points, because it is the
+            // step to take before enforcing a policy, and never the full row:
+            // until 3.0.8 it scored 4 of 4 while the Security Headers tab
+            // itself warned that nothing was being blocked (Fernando, 20 Oct
+            // 2026, after the second blind review).
+            if ( ! $enforced ) {
+                // A policy that Vigilant writes and that does not arrive is the
+                // finding, whatever else arrives: the Report-Only of another
+                // sender hid it, and the cause row with it (short blind look
+                // of 3.0.8, 20 Oct 2026). The same goes for Vigilant's own
+                // Report-Only when the one that arrives carries another value.
+                $missing = $this->sent_but_missing( $args, array( 'content-security-policy' ) );
+                if ( $missing ) {
+                    return $missing;
+                }
+                $own = $this->carries_vigilant_value( 'content-security-policy-report-only', $headers );
+                if ( ! $own ) {
+                    $missing = $this->sent_but_missing( $args, array( 'content-security-policy-report-only' ) );
+                    if ( $missing ) {
+                        return $missing;
+                    }
+                }
+                $args['detail'] = $own
+                    ? sprintf(
+                        /* translators: %s: header value (truncated) */
+                        __( 'CSP is in report-only mode in Vigilant (%s): the browser reports what the policy would block, and blocks nothing. Turn Report Only Mode off under Security Headers once the policy has been tested.', 'vigilante' ),
+                        $this->truncate( $header, 80 )
+                    )
+                    : sprintf(
+                        /* translators: %s: header value (truncated) */
+                        __( 'A Content-Security-Policy arrives in report-only mode (%s): the browser reports what it would block, and blocks nothing. Whatever sends it has to send it as Content-Security-Policy for it to protect.', 'vigilante' ),
+                        $this->truncate( $header, 80 )
+                    );
+                return Vigilante_SA_Check_Result::warn( $args );
+            }
+
+            if ( ! $setting_on ) {
                 $args['detail'] = sprintf(
                     /* translators: %s: header value (truncated) */
                     __( 'CSP delivered by something other than Vigilant: %s', 'vigilante' ),
@@ -458,7 +800,13 @@ class Vigilante_SA_Category_Headers {
             return Vigilante_SA_Check_Result::pass( $args );
         }
 
-        $missing = $header ? null : $this->sent_but_missing( $args, array( 'x-content-type-options' ) );
+        // It arrives, with another value. Until 3.0.8 this said it was missing.
+        if ( $header ) {
+            $args['detail'] = $this->wrong_value_detail( $args['label'], $header, 'nosniff', 'x-content-type-options' );
+            return Vigilante_SA_Check_Result::fail( $args );
+        }
+
+        $missing = $this->sent_but_missing( $args, array( 'x-content-type-options' ) );
         if ( $missing ) {
             return $missing;
         }
@@ -569,7 +917,14 @@ class Vigilante_SA_Category_Headers {
             return Vigilante_SA_Check_Result::fail( $args );
         }
 
-        $missing = $header ? null : $this->sent_but_missing( $args, array( 'cross-origin-opener-policy' ) );
+        // It arrives as unsafe-none while Vigilant sets another value. Until
+        // 3.0.8 this said it was missing.
+        if ( $header ) {
+            $args['detail'] = $this->wrong_value_detail( $args['label'], $header, $configured, 'cross-origin-opener-policy' );
+            return Vigilante_SA_Check_Result::fail( $args );
+        }
+
+        $missing = $this->sent_but_missing( $args, array( 'cross-origin-opener-policy' ) );
         if ( $missing ) {
             return $missing;
         }
@@ -662,6 +1017,35 @@ class Vigilante_SA_Category_Headers {
             $args['detail'] = rtrim( $args['detail'], " .\t\n" ) . '. ' . __( 'Vigilant is set to remove X-Powered-By.', 'vigilante' );
         }
         return Vigilante_SA_Check_Result::fail( $args );
+    }
+
+    /**
+     * What a header that arrives with another value says
+     *
+     * When Vigilant writes that header itself, the value it writes is not the
+     * one that arrives, so something on the way is changing it: that is said,
+     * because it is where to look.
+     *
+     * @since 3.0.8
+     *
+     * @param string $label    Name of the header, as shown.
+     * @param string $arrives  Value that arrives.
+     * @param string $expected Value expected.
+     * @param string $name     Name of the header, lowercase.
+     * @return string
+     */
+    private function wrong_value_detail( $label, $arrives, $expected, $name ) {
+        $detail = sprintf(
+            /* translators: 1: name of an HTTP header, 2: the value it arrives with, 3: the value expected */
+            __( '%1$s arrives with the value %2$s, and %3$s is expected.', 'vigilante' ),
+            $label,
+            $this->truncate( $arrives, 80 ),
+            $expected
+        );
+        if ( in_array( $name, $this->written, true ) ) {
+            $detail .= ' ' . __( 'Vigilant sends the expected value, so something on the way is changing it: the hosting, a CDN or another plugin.', 'vigilante' );
+        }
+        return $detail;
     }
 
     /**

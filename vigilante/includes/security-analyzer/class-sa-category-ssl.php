@@ -187,7 +187,7 @@ class Vigilante_SA_Category_SSL {
         $response = Vigilante_SA_Helpers::get( $http_url, array( 'redirection' => 0 ) );
 
         if ( is_wp_error( $response ) ) {
-            $args['detail'] = __( 'Could not probe the HTTP version of the site (firewall may be blocking self-requests).', 'vigilante' );
+            $args['detail'] = Vigilante_SA_Helpers::with_challenge( __( 'Could not probe the HTTP version of the site (firewall may be blocking self-requests).', 'vigilante' ) );
             return Vigilante_SA_Check_Result::skip( $args );
         }
 
@@ -253,7 +253,7 @@ class Vigilante_SA_Category_SSL {
         $probe       = Vigilante_SA_Helpers::probe_home();
 
         if ( null === $probe ) {
-            $args['detail'] = __( 'Could not fetch the homepage to scan for insecure resources.', 'vigilante' );
+            $args['detail'] = Vigilante_SA_Helpers::with_challenge( __( 'Could not fetch the homepage to scan for insecure resources.', 'vigilante' ), true );
             return Vigilante_SA_Check_Result::skip( $args );
         }
 

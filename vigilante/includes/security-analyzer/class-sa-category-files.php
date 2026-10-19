@@ -196,7 +196,7 @@ class Vigilante_SA_Category_Files {
 
         $response = Vigilante_SA_Helpers::get( trailingslashit( $upload_dir['baseurl'] ), array( 'redirection' => 0 ) );
         if ( is_wp_error( $response ) ) {
-            $args['detail'] = __( 'Could not probe the uploads directory URL.', 'vigilante' );
+            $args['detail'] = Vigilante_SA_Helpers::with_challenge( __( 'Could not probe the uploads directory URL.', 'vigilante' ) );
             return Vigilante_SA_Check_Result::skip( $args );
         }
 

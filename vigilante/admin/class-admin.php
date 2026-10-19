@@ -1259,7 +1259,9 @@ class Vigilante_Admin {
                 'icon'     => 'warning',
                 'priority' => 'critical',
                 'tab'      => 'file-integrity',
-                'message'  => __( 'Something on this site switched Vigilant self-protection off: File Integrity says which file does it.', 'vigilante' ),
+                // Not "which file": when the filter hooks a function of
+                // WordPress, such as __return_false, no file can be named.
+                'message'  => __( 'Something on this site switched Vigilant self-protection off by code: File Integrity says how to find it.', 'vigilante' ),
             );
         } elseif ( 'critical' === $vg_self_tone ) {
             $recommendations[] = array(
@@ -2009,10 +2011,13 @@ class Vigilante_Admin {
                 'logUser'                      => __( 'User', 'vigilante' ),
                 'logIpAddress'                 => __( 'IP Address', 'vigilante' ),
                 'logUserAgent'                 => __( 'User Agent', 'vigilante' ),
-                'logIpLabel'                   => __( 'IP:', 'vigilante' ),
-                'logUaLabel'                   => __( 'UA:', 'vigilante' ),
-                'logWhitelist'                 => __( 'Whitelist', 'vigilante' ),
-                'logBlacklist'                 => __( 'Blacklist', 'vigilante' ),
+                // Each button names what it acts on (since 3.0.8): with a plain
+                // Whitelist and Blacklist next to IP: and UA:, people blacklisted
+                // a User Agent taking it for the IP.
+                'logWhitelistIp'               => __( 'Whitelist this IP', 'vigilante' ),
+                'logBlacklistIp'               => __( 'Blacklist this IP', 'vigilante' ),
+                'logWhitelistUa'               => __( 'Whitelist this User Agent', 'vigilante' ),
+                'logBlacklistUa'               => __( 'Blacklist this User Agent', 'vigilante' ),
                 'logInWhitelist'               => __( 'In whitelist', 'vigilante' ),
                 'logInBlacklist'               => __( 'In blacklist', 'vigilante' ),
                 'logAdded'                     => __( 'Added!', 'vigilante' ),
@@ -2211,7 +2216,7 @@ class Vigilante_Admin {
                     } elseif ( 'critical' === $tone ) {
                         esc_html_e( 'Your security plugin may have been tampered with, and while that is true nothing it reports can be trusted.', 'vigilante' );
                     } elseif ( 'off' === $tone ) {
-                        esc_html_e( 'Nothing is checking that Vigilant own files are intact. File Integrity says which file switches it off.', 'vigilante' );
+                        esc_html_e( 'Nothing is checking that Vigilant own files are intact. File Integrity says how to find what switches it off.', 'vigilante' );
                     } else {
                         esc_html_e( 'File Integrity says what was found, what it means and what to do about it.', 'vigilante' );
                     }
@@ -4744,7 +4749,13 @@ class Vigilante_Admin {
                         <td>
                             <label>
                                 <input type="checkbox" name="firewall[limit_http_methods]" value="1" <?php checked( ! empty( $options['limit_http_methods'] ) ); ?>>
-                                <?php esc_html_e( 'Block the HTTP methods WordPress does not use (TRACE, TRACK, CONNECT and any unknown one). GET, POST, HEAD, OPTIONS, PUT, PATCH and DELETE keep working.', 'vigilante' ); ?>
+                                <?php
+                                // Until 3.0.8 TRACE was in the list. Apache answers it
+                                // before reading .htaccess (measured with the Apache of
+                                // Local, 14 Oct 2026), so the rule cannot block it there;
+                                // it stays in the rule for a server that does pass it on.
+                                esc_html_e( 'Block the HTTP methods WordPress does not use (TRACK, CONNECT and any unknown one). GET, POST, HEAD, OPTIONS, PUT, PATCH and DELETE keep working. On Apache, TRACE is answered by the server before it reads .htaccess, so only your hosting can switch it off (TraceEnable off).', 'vigilante' );
+                                ?>
                             </label>
                         </td>
                     </tr>
@@ -7236,7 +7247,7 @@ class Vigilante_Admin {
                                 'id'                 => (int) $log->id,
                                 'type'               => (string) ( $log->event_type ?? '' ),
                                 'action'             => (string) ( $log->event_action ?? '' ),
-                                'message'            => (string) ( $log->event_message ?? '' ),
+                                'message'            => Vigilante_Activity_Log::display_message( (string) ( $log->event_action ?? '' ), (string) ( $log->event_message ?? '' ) ),
                                 'user'               => (string) ( $log->user_login ?? '' ),
                                 'ip'                 => $ip_val,
                                 'user_agent'         => $ua_val,
@@ -7268,7 +7279,7 @@ class Vigilante_Admin {
                             <td><?php echo esc_html( $display_type ); ?></td>
                             <td><?php if ( ! empty( $request_method ) ) : ?><span class="vigilante-method-label vigilante-method-<?php echo esc_attr( strtolower( $request_method ) ); ?>"><?php echo esc_html( $request_method ); ?></span><?php else : ?>-<?php endif; ?></td>
                             <td><span class="vigilante-badge vigilante-badge-<?php echo esc_attr( $log->severity ); ?>"><?php echo esc_html( $display_severity ); ?></span></td>
-                            <td><?php echo esc_html( $log->event_message ); ?></td>
+                            <td><?php echo esc_html( $details['message'] ); ?></td>
                             <td><?php echo esc_html( $log->user_login ?? '-' ); ?></td>
                             <td><code><?php echo esc_html( $log->ip_address ); ?></code></td>
                             <td>
@@ -7805,6 +7816,8 @@ class Vigilante_Admin {
         $last_scan = get_option( 'vigilante_last_integrity_scan' );
         $last_results = get_option( 'vigilante_last_integrity_results' );
         $ignored_files = get_option( 'vigilante_ignored_files', array() );
+        // A scan that started and was stopped before saving (since 3.0.8).
+        $vg_unfinished = Vigilante_File_Integrity::unfinished_scan();
 
         /*
          * Vigilant own findings are shown in their own box, the first of the
@@ -8044,15 +8057,24 @@ class Vigilante_Admin {
         </div>
         <?php endif; ?>
 
-        <?php if ( $last_scan || $has_closed || $closed_last_check > 0 ) : ?>
+        <?php if ( $last_scan || $has_closed || $closed_last_check > 0 || $vg_unfinished ) : ?>
         <div id="vigilante-section-fi-last-scan" class="vigilante-settings-section">
             <h2><?php esc_html_e( 'Last Scan Results', 'vigilante' ); ?></h2>
             <?php
+            // A scan that started and was stopped before saving says so, with
+            // its cause when PHP gave it. The same text as Security Check
+            // (Vigilante_File_Integrity::unfinished_scan_text()).
+            if ( $vg_unfinished ) :
+                ?>
+            <div class="notice notice-warning inline">
+                <p><strong><?php esc_html_e( 'The last scan did not finish.', 'vigilante' ); ?></strong> <?php echo esc_html( Vigilante_File_Integrity::unfinished_scan_text( $vg_unfinished ) ); ?></p>
+            </div>
+                <?php
             // A scan the server stops halfway stores nothing, and neither
             // does one WordPress never starts: the tab kept showing the
             // last result that did finish, with nothing to say that scans
             // had stopped. Its date is the only sign.
-            if ( $last_scan && $this->settings->is_module_enabled( 'file_integrity' ) && Vigilante_File_Integrity::is_scan_overdue( $last_scan, $options['scan_frequency'] ?? 'daily' ) ) :
+            elseif ( $last_scan && $this->settings->is_module_enabled( 'file_integrity' ) && Vigilante_File_Integrity::is_scan_overdue( $last_scan, $options['scan_frequency'] ?? 'daily' ) ) :
                 ?>
             <div class="notice notice-warning inline">
                 <p><strong><?php esc_html_e( 'Scans are scheduled, and none has finished since the date below.', 'vigilante' ); ?></strong> <?php esc_html_e( 'Either WordPress is not running its scheduled tasks, or the server stops the scan before it ends, and a scan that is stopped stores no result. What you see here is old. Run a scan now: if it finishes, the scheduled tasks are what is failing. If it does not, the site is too large for the time the server gives a request, and adding large folders that do not need checking to Excluded Paths leaves more time for the rest.', 'vigilante' ); ?></p>
@@ -9841,9 +9863,15 @@ class Vigilante_Admin {
             wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
         }
 
-        // Clear previous results before running new scan
-        delete_option( 'vigilante_last_integrity_results' );
-        delete_option( 'vigilante_last_integrity_scan' );
+        // Until 3.0.8 the previous results were deleted here, before the scan:
+        // when the server stopped the scan halfway, the tab was left with
+        // nothing. The new result replaces them when it is saved.
+        //
+        // admin-ajax.php does not load wp-admin/admin.php, which is what gives
+        // the screens of the dashboard the memory of WP_MAX_MEMORY_LIMIT
+        // (admin.php:167 in 7.1.3), and wp-cron.php already does it for the
+        // scheduled scan (wp-cron.php:50). The button ran with php.ini's.
+        wp_raise_memory_limit( 'admin' );
 
         $file_integrity = new Vigilante_File_Integrity( $this->settings, $this->database, $this->activity_log );
         $results = $file_integrity->run_scan();
@@ -9907,6 +9935,17 @@ class Vigilante_Admin {
         // Starting over also means being told again: the next scan emails
         // whatever it finds, as if nothing had been reported before.
         delete_option( Vigilante_File_Integrity::NOTIFIED_OPTION );
+
+        // And a scan that did not finish goes with the results it was about:
+        // left behind, its notice said that no scan had ever finished (first
+        // blind review of 3.0.8).
+        // The record of the one that died goes, always; the marker only when
+        // it is over too (it has a cause or is too old), because a fresh one
+        // is a scan running right now (second blind review of 3.0.8).
+        delete_option( Vigilante_File_Integrity::UNFINISHED_OPTION );
+        if ( Vigilante_File_Integrity::running_marker_is_over() ) {
+            delete_option( Vigilante_File_Integrity::RUNNING_OPTION );
+        }
 
         /*
          * A pending change to wp-config.php or the root .htaccess is closed by
@@ -10302,12 +10341,17 @@ class Vigilante_Admin {
         }
         // The constructor loads the checks and their helpers.
         new Vigilante_Security_Analyzer( $this->settings, $this->activity_log );
-        $no_answer = new WP_Error( 'vigilante_no_answer', __( 'Could not fetch the homepage to read response headers.', 'vigilante' ) );
         // A new request every time: the button is pressed right after saving.
         // With no answer there is nothing to grade, and the checks would ask
-        // for the page a second time.
+        // for the page a second time. A verification screen of a firewall is
+        // no answer either, and the message says whose it is (B96).
         if ( null === Vigilante_SA_Helpers::probe_home( true ) ) {
-            return $no_answer;
+            return new WP_Error(
+                'vigilante_no_answer',
+                method_exists( 'Vigilante_SA_Helpers', 'with_challenge' )
+                    ? Vigilante_SA_Helpers::with_challenge( __( 'Could not fetch the homepage to read response headers.', 'vigilante' ), true )
+                    : __( 'Could not fetch the homepage to read response headers.', 'vigilante' )
+            );
         }
 
         $category = new Vigilante_SA_Category_Headers( $this->settings );
@@ -10338,7 +10382,7 @@ class Vigilante_Admin {
         }
 
         if ( $max < 1 ) {
-            return $no_answer;
+            return new WP_Error( 'vigilante_no_answer', __( 'Could not fetch the homepage to read response headers.', 'vigilante' ) );
         }
 
         $score  = (int) round( 100 * $earned / $max );

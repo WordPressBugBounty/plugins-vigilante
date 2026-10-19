@@ -965,7 +965,24 @@ class Vigilante_SA_Category_Internal {
         }
 
         $last = get_option( 'vigilante_last_integrity_results' );
+
+        // A scan that started and was stopped before saving (since 3.0.8). This
+        // file loads late, from disk: in the cron run in which WordPress updates
+        // Vigilant, the class in memory is the old one and has no such methods,
+        // so both are asked for.
+        $unfinished_text = '';
+        if ( method_exists( 'Vigilante_File_Integrity', 'unfinished_scan' ) && method_exists( 'Vigilante_File_Integrity', 'unfinished_scan_text' ) ) {
+            $unfinished = Vigilante_File_Integrity::unfinished_scan();
+            if ( is_array( $unfinished ) ) {
+                $unfinished_text = Vigilante_File_Integrity::unfinished_scan_text( $unfinished );
+            }
+        }
+
         if ( ! is_array( $last ) ) {
+            if ( '' !== $unfinished_text ) {
+                $args['detail'] = $unfinished_text;
+                return Vigilante_SA_Check_Result::warn( $args );
+            }
             $args['detail'] = __( 'No file integrity scan recorded yet. Run one from the File Integrity tab.', 'vigilante' );
             return Vigilante_SA_Check_Result::skip( $args );
         }
@@ -992,6 +1009,13 @@ class Vigilante_SA_Category_Internal {
         $args['data']['excluded_code'] = count( $excluded_code );
 
         if ( 0 === $suspicious && 0 === $modified ) {
+            // Clean, but it is the result of a scan older than one that did
+            // not finish: said before anything else.
+            if ( '' !== $unfinished_text ) {
+                $args['detail'] = $unfinished_text;
+                return Vigilante_SA_Check_Result::warn( $args );
+            }
+
             if ( $partial ) {
                 $args['detail'] = __( 'The last file integrity scan found nothing in what it checked, but it could not check everything. File Integrity lists what was left out.', 'vigilante' );
                 return Vigilante_SA_Check_Result::warn( $args );
@@ -1029,6 +1053,10 @@ class Vigilante_SA_Category_Internal {
         }
 
         $partial_note = $partial ? ' ' . __( 'That scan could not check everything: File Integrity lists what was left out.', 'vigilante' ) : '';
+
+        if ( '' !== $unfinished_text ) {
+            $partial_note .= ' ' . $unfinished_text;
+        }
 
         if ( ! empty( $excluded_code ) ) {
             $partial_note .= ' ' . __( 'Whole folders of plugins or themes, or the uploads folder, are in Excluded Paths, and no scan looks inside them.', 'vigilante' );

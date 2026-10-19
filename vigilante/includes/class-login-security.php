@@ -1587,15 +1587,24 @@ class Vigilante_Login_Security {
          * for a translation triggers the just in time text domain notice of
          * WordPress 6.7 and returns the English string anyway. The reader is an
          * anonymous request to an address that is supposed to look absent.
+         *
+         * Written here and not with wp_die(), whose template goes through the
+         * filters of language_attributes and of wp_robots. On plugins_loaded
+         * WordPress has not built its locale switcher yet (wp-settings.php:737
+         * in 7.1.3, after the action at :630), and WPML hooks those filters
+         * with a call to is_locale_switched(): with WPML active the 404 became
+         * a fatal error and a 500, which told a bot that something was there
+         * and left a fatal error in the log on every visit (B100, 19 Oct 2026).
+         * The page below goes through no template filter: only status_header()
+         * and nocache_headers() run filters of their own, as they did before.
          */
-        wp_die(
-            '<h1>Page not found</h1><p>The page you are looking for does not exist.</p>',
-            '404 Not Found',
-            array(
-                'response'  => 404,
-                'back_link' => false,
-            )
-        );
+        // Guarded like status_header() and wp_die(): with output already sent,
+        // header() would add a warning to the log on every visit.
+        if ( ! headers_sent() ) {
+            header( 'Content-Type: text/html; charset=utf-8' );
+        }
+        echo '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="robots" content="noindex, nofollow"><meta name="viewport" content="width=device-width"><title>404 Not Found</title></head><body><h1>Page not found</h1><p>The page you are looking for does not exist.</p></body></html>';
+        exit;
     }
 
     /**

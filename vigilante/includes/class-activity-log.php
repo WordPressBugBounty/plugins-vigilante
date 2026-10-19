@@ -936,6 +936,32 @@ class Vigilante_Activity_Log {
     }
 
     /**
+     * The message of an entry as it is shown
+     *
+     * Messages are stored already translated, in the language of the request
+     * that wrote them, except the one the fast path of the hidden login writes
+     * on plugins_loaded, before a translation can be asked for: WordPress 6.7
+     * warns about a text domain loaded too early and gives English anyway
+     * (Vigilante_Login_Security::log_early_hidden_admin_attempt()). That one is
+     * translated here, when it is shown, which also covers the entries written
+     * before 3.0.8. The export of the log goes through the same AJAX handler
+     * as the table (vigilante_get_logs), so it is translated too.
+     *
+     * @since 3.0.8
+     *
+     * @param string $action  event_action of the entry.
+     * @param string $message event_message as stored.
+     * @return string
+     */
+    public static function display_message( $action, $message ) {
+        $message = (string) $message;
+        if ( 'hidden_admin_access' === (string) $action && 'Attempt to access hidden wp-admin' === $message ) {
+            return __( 'Attempt to access hidden wp-admin', 'vigilante' );
+        }
+        return $message;
+    }
+
+    /**
      * Get total logs count
      *
      * @param array $args Query arguments.

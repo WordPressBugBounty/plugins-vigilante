@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.0.7
+Stable tag: 3.0.8
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -36,7 +36,7 @@ Is your site under active attack? Activate Under Attack mode with one click and 
 
 * **JavaScript challenge** - Every visitor must pass an automatic browser verification before accessing your site. Real browsers solve it in seconds, bots get blocked completely
 * **Aggressive rate limiting** - Requests limited to 30 per minute with 15-minute blocks for offenders
-* **HTTP method restriction** - Only GET, POST and HEAD allowed; PUT, DELETE, PATCH, OPTIONS and TRACE are blocked
+* **HTTP method restriction** - Only GET, POST and HEAD allowed; PUT, DELETE, PATCH and OPTIONS are blocked
 * **Empty user agent blocking** - Requests without a user agent header are rejected
 * **Full XML-RPC lockdown** during the attack
 * **REST API restriction** - Only authenticated users can access the REST API
@@ -544,6 +544,28 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 3.0.8 =
+Security Check tells a firewall verification screen, a stale cache and headers set only on files apart from a missing header. A File Integrity scan stopped by the server is now reported, and the scan fits the time limit of PHP.
+
+* Improved: when a security header arrives more than once, Security Check says so in its row, because it is being sent from more than one place and only one should be left. The policy that Vigilant itself sends from PHP with upgrade-insecure-requests alone does not count as a repetition.
+* Improved: Security Check also asks for the home page as it is generated now, and says when the copy that visitors get comes from a cache and does not carry the same security headers, so that the cache can be emptied.
+* Improved: when a File Integrity scan is stopped before it can save its result, because PHP runs out of time or memory or the server cuts the request, the tab and Security Check say so, with the cause when PHP gives it, and the Security Audit records it. Until now such a scan left no trace.
+* Improved: in the Security Audit, Escape closes the details popup, and the actions for the IP and for the User Agent are now in two separate blocks, each with its value and buttons that say what they act on, so that a User Agent is not blacklisted by mistake instead of the IP.
+* Fix: Security Check took the verification screen of a firewall or an anti-bot service for the site. A challenge answered with 403 passed as a protected user list, a refused wp-cron.php or a protected file, and one answered with 202 as the home page. Those checks now say that they could not measure and whose screen it was, for the screens that can be told apart: the challenges of SiteGround, Cloudflare and AWS WAF, the block pages of Cloudflare, Sucuri, Imperva, DataDome and Wordfence, and the challenge of the Under Attack mode of Vigilant itself. A file or a page served with 2xx is never taken for a screen. The Test Headers button says the same.
+* Fix: on a server that applies the header rules of .htaccess to files and not to the pages PHP generates, as some hosting with PHP as CGI does, Security Check said that mod_headers was not enabled. It now checks an image of WordPress and says what happens. A copy kept by a cache is told apart in the same way, and the policy that Vigilant sends from PHP no longer counts as a header of its .htaccess block that arrives.
+* Fix: X-Content-Type-Options and Cross-Origin-Opener-Policy with a value other than the expected one were reported as missing. The row now says which value arrives and which one is expected.
+* Fix: a blacklist that does not answer this server was reported as not listing the site. When the answer is empty, each list is now asked about the test entry it keeps listed on purpose, and an answer that is not a blacklist code, which some DNS providers give to every name, is no longer read as a listing.
+* Fix: the Limit HTTP Methods option and the description of Under Attack promised to block TRACE. Apache answers TRACE before it reads .htaccess, so only the hosting can switch it off, and the option now says so.
+* Fix: with self-protection switched off by a filter that returns __return_false, as in the example of SECURITY.md, the email and File Integrity named wp-includes/functions.php as the file that switched it off. A function or a method of WordPress itself, such as __return_false or is_admin, is no longer named, also when it is passed as a closure, and the steps say how to find the filter. A callback written as Class::method or an object that can be called is now traced to its file, and when something hooks the filter that cannot be traced to a file, the screens say so.
+* Fix: in the Security Audit, a scheduled task created for the first time was explained as one that had disappeared, a critical entry listed every task restored in that pass instead of the ones that keep disappearing, and the entries about self-protection switched off or about its hooks removed had no explanation.
+* Fix: a Content-Security-Policy with upgrade-insecure-requests alone, the one Vigilant sends from PHP, scored in Security Check as a full policy, and with CSP off in Vigilant it read as delivered by something other than Vigilant. It restricts nothing, so it no longer counts as a policy, and a site whose only CSP is that one loses those points.
+* Fix: a Content-Security-Policy-Report-Only scored in Security Check as a policy in force. In that mode the browser reports what the policy would block and blocks nothing, so the row is now a warning with half the points, and when the policy is the one of Vigilant it says how to put it in force. The strictest preset sets CSP to report-only, so a site that applied it gets half the points of that row until the mode is turned off.
+* Fix: the attempt to open the hidden wp-admin logged before translations load showed in English in a translated log. It is now translated when it is shown, older entries included.
+* Fix: with WPML active, the hidden wp-admin answered a visitor with no session with a server error instead of a not found page, and left a fatal error in the PHP log on every visit. The page is now written without the template of WordPress, with the same text and the same 404, and always as an HTML page, where a request that asked for JSON or XML got the error in that format.
+* Fix: the File Integrity scan saved its result only after asking WordPress.org about every installed plugin, so a server that stopped the request at that point lost a scan that had finished. It is now saved as soon as the files are checked, and when little time is left the closed plugins check is left to its daily run.
+* Fix: the Run Scan Now button deleted the previous result before scanning, so a scan stopped halfway left the tab empty, and it ran with the memory limit of php.ini instead of the one WordPress gives the dashboard.
+* Fix: the scan did not take the time limit of PHP into account, so on hosting that gives a request 30 seconds a scan could be stopped halfway. It now asks for more time and, when the hosting does not allow it, stops in time to save its result, measuring the time as PHP counts it on that server, and says so in the list of what it did not check.
+
 = 3.0.7 =
 Scheduled tasks run again when a cron job calls wp-cron.php by its address. Saving WP Hardening no longer breaks a wp-config.php with a define over several lines, and PHP in uploads can no longer be reached in three ways that bypassed the rule.
 
@@ -611,62 +633,12 @@ Fixes the expired password notice, which was missing when the password expired d
 * Fix: while a password change was pending, every request to the profile screen was let through, and that screen can be asked for other things: a plugin page, an importer, an action passed in the address, or the profile of another user for an account allowed to edit users. An account with an expired password could go on using those. Only its own profile form is let through now, to be shown or to be saved. On a network, the profile screens of the network admin and of the user dashboard lead to the profile of the site, where the notice is.
 * Fix: on a site whose WordPress Address and Site Address are on different hosts, a headless site for example, or whose address has accented or non-Latin letters saved as written, a user with an expired password was caught in a redirect loop. The redirect to the profile came out as a redirect to the dashboard, which sent the user to the profile again. It now reaches the profile.
 
-= 3.0.3 =
-File Integrity now compares themes with their WordPress.org package, searches all the code that has no official copy, and looks at must-use plugins, drop-ins, wp-admin, wp-includes and the rest of wp-content. Scan emails are sent once per new finding.
-
-* Improved: File Integrity compares themes from WordPress.org with the package WordPress.org publishes for the installed version. WordPress.org has no checksums for themes, so until now no theme file was compared with anything. The package is downloaded once per version.
-* Improved: File Integrity searches every PHP file of a plugin or theme with no official copy for hidden code, not only the first 50, and reads files of up to 8 MB. A file over 512,000 bytes was not opened, so it passed as clean. One over 8 MB is listed as not searched.
-* Improved: File Integrity looks at files added to wp-admin and wp-includes, at must-use plugins and drop-ins, at loose PHP files in wp-content, and at folders with PHP among the plugins or the themes that WordPress does not list as one.
-* Improved: File Integrity searches the PHP files of the other folders of wp-content (languages, upgrade and the like) for hidden code. A translation file that holds anything other than text is reported, because WordPress loads translation files on every request.
-* Improved: a new installation no longer starts with wp-content/cache among the excluded paths, so that folder is searched too. A site that already has it there keeps it.
-* Improved: File Integrity reports a .htaccess, .user.ini or php.ini outside uploads that makes the server run code or load a file.
-* Improved: File Integrity finds, in code with no official copy, request data run as code or as a command, a function chosen by the request and a file included from another server. The same text in a comment is not reported.
-* Improved: a file on which the search for hidden code cannot finish is listed as not searched instead of passing as clean.
-* Improved: File Integrity now compares wp-includes/version.php, and compares sites that are not in English with the English checksums while WordPress.org has none for their language, instead of leaving the core unchecked.
-* Improved: File Integrity reports files deleted from a plugin or a theme, and reports a failed request to WordPress.org as an error instead of treating the plugin as one with no official copy.
-* Improved: File Integrity reports more file types in uploads (.pht, .php8, names such as shell.php.suspected, .user.ini, php.ini, shell and CGI scripts), a .user.ini or php.ini in the site root that loads a file on every request, and backups left in the site root.
-* Improved: the File Integrity tab says what each kind of finding usually is and what to do about it, names the plugins and themes that could not be compared, and says when a scan was partial instead of saying that every file passed.
-* Improved: when a scan runs out of time, File Integrity and the scan email name the plugins, the themes and the areas it did not reach, and File Integrity lists the folders to exclude so that a scan run by hand reaches the rest. A scan runs for 60 seconds at most and starts from the beginning each time, so on a very large site the same part is left unchecked on every scan.
-* Improved: File Integrity and Security Check say when Excluded Paths holds the whole folder of a plugin or of a theme, or the uploads folder. No scan looks inside them, and Security Check no longer counts such a scan as clean.
-* Improved: File Integrity and Security Check say when no scheduled scan has finished for longer than the schedule allows. A scan the server stops halfway stores no result, and neither does one WordPress never starts, so the last one that did finish kept showing as the current one.
-* Improved: the scan email is sent when a scan finds something new, not after every scan, and its subject names wp-config.php or .htaccess when that is all that changed.
-* Improved: two-factor events can be filtered in Security Audit, and PHP 8.5 is in the end-of-life table of Security Check.
-* Fix: a .htaccess in uploads that only denies access is no longer reported, and neither is the rule that forbids PHP or a commented line. Options +ExecCGI and CGI or SSI handlers, which were listed as custom rules, are now suspicious.
-* Fix: the two-line index.php placeholder WordPress ships is no longer reported as PHP in uploads or as an extra file.
-* Fix: the bundled themes and Akismet no longer show as modified or missing core files when they update or are deleted.
-* Fix: a hexadecimal string of some 12,000 characters or more was not found by the search for hidden code. The longer the payload, the less it was found.
-* Fix: a function name split in pieces was not found when a long chain of joined strings came before it in the file.
-* Fix: a file built for the purpose could keep the search for hidden code busy long enough to cut the scan short.
-* Fix: the scan of uploads stopped after 10,000 files without saying so.
-* Fix: a folder the scan could not read stopped the scan of uploads, of a plugin or of a theme without saying so, and nothing after it was checked. The scan now goes on and reports the folder.
-* Fix: Scan now stored only the second half of the scan in the score history of Security Check.
-* Fix: Security Check passed a file integrity scan that had not checked everything, as long as it had found nothing in what it did check.
-* Fix: the Limit HTTP Methods label, and the comment written to .htaccess, described a rule that is not the one applied.
-* Fix: the alert setting of Security Audit said a new administrator is logged as Critical. It is logged as Warning, and has its own email in Users.
-* Fix: the readme described automatic backups of .htaccess and wp-config.php that no longer exist.
-* Fix: removed 11 strings and a method that nothing used.
-
-= 3.0.2 =
-Fixes addresses with accents or non-Latin letters in the HTTPS redirect, the Under Attack check and a custom login address, stops the www alias landing on the dashboard, saves File Integrity paths as written, and stops the default CSP from breaking the styles of sites served over http.
-
-* Fix: the HTTP to HTTPS redirect keeps the percent-encoded characters of the address. A visit to /categor%C3%ADa/ was sent to /categora/, a 404, a path in Cyrillic to //, and every parameter lost its encoded characters.
-* Fix: the same redirect takes its host from the one the site declares, not from the Host header. A visit to the www alias of the site, or to the server by its IP, was sent with a permanent redirect to the dashboard instead of the same page. A site that served other hostnames of its own through allowed_redirect_hosts now gets the declared host for all of them, while the admin area of a site whose WordPress lives on a host of its own stays on that host.
-* Fix: a hidden login address written in a non-Latin script matched nothing, so the login page was hidden and its own address answered 404. It now matches in upper and lower case hex and as raw UTF-8. An address that only matched after its encoded characters were deleted, such as /my-log%41in/ for /my-login/, no longer opens the login page.
-* Fix: after solving the Under Attack challenge the visitor lands on the page they asked for, with its accents and parameters intact.
-* Fix: the activity log keeps the address of a blocked request as it was sent, instead of with its encoded characters deleted.
-* Fix: ignoring a file in File Integrity whose name has encoded characters (a literal %20, for example) or repeated spaces now works. The path was saved with those characters deleted, so it never matched the file and the warning came back, and the saved entry could match a different file with the mangled name.
-* Fix: an excluded path in File Integrity whose name has encoded characters (a literal %20, for example) or repeated spaces is now saved as written, also when exporting and importing the settings. It was saved with them deleted, so it never matched, and when the encoded characters were the last part of the name it was saved as the folder above it, which silenced the scan of everything inside that folder. A line with HTML tags is now dropped. Entries already saved are not changed, so one that was saved cut has to be written again.
-* Fix: the admin area and its open endpoints are recognised from the path as sent. /wp-admin/admin-ajax.php%20 is no longer taken for admin-ajax.php, nor /wp-%41admin/page for a page of the admin area.
-* Fix: on a site whose address is http://, the default Content-Security-Policy no longer includes upgrade-insecure-requests. With Apache and the headers module active, that directive made browsers ask for every stylesheet, script and image over https, where the site does not answer, so the site lost its styles. The directive is now written only when the site address is https://, so a site served over https through a proxy or CDN that terminates TLS should have its site address set to https://. The rules are rewritten on update, so a site that was already affected recovers by updating, and the Security Headers tab says so next to the policy.
-* Fix: the Dashboard reads the XML-RPC setting where it lives now. The Configuration Score never gave the three points for blocking XML-RPC, and the recommendation to disable it always showed, because both read a checkbox that stopped being saved in 2.9.7. A site that blocks XML-RPC, as the factory settings do, will see its score go up by two or three points without changing anything, and the recommendation, when it applies, now leads to WP Hardening.
-* Fix: the Security Check card on the Dashboard said it ran 13 internal checks when there are 16, and no longer gives a number.
-
 For older changelog entries, please check the [changelog.txt](https://plugins.svn.wordpress.org/vigilante/trunk/changelog.txt) file
 
 == Upgrade Notice ==
 
-= 3.0.7 =
-Scheduled tasks run again when a cron job calls wp-cron.php by its address. Saving WP Hardening no longer breaks a wp-config.php with a define over several lines, and PHP in uploads can no longer be reached in three ways that bypassed the rule.
+= 3.0.8 =
+Security Check tells a firewall verification screen, a stale cache and headers set only on files apart from a missing header. A File Integrity scan stopped by the server is now reported, and the scan fits the time limit of PHP.
 
 == Support ==
 

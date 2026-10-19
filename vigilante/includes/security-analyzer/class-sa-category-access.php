@@ -251,7 +251,7 @@ class Vigilante_SA_Category_Access {
         $response = Vigilante_SA_Helpers::get( $url, array( 'redirection' => 0 ) );
 
         if ( is_wp_error( $response ) ) {
-            $args['detail'] = __( 'Could not probe /wp-admin/.', 'vigilante' );
+            $args['detail'] = Vigilante_SA_Helpers::with_challenge( __( 'Could not probe /wp-admin/.', 'vigilante' ) );
             return Vigilante_SA_Check_Result::skip( $args );
         }
 
@@ -347,7 +347,7 @@ class Vigilante_SA_Category_Access {
         $response = Vigilante_SA_Helpers::get( $url, array( 'redirection' => 0 ) );
 
         if ( is_wp_error( $response ) ) {
-            $args['detail'] = __( 'Could not probe /wp/v2/users/me.', 'vigilante' );
+            $args['detail'] = Vigilante_SA_Helpers::with_challenge( __( 'Could not probe /wp/v2/users/me.', 'vigilante' ) );
             return Vigilante_SA_Check_Result::skip( $args );
         }
 

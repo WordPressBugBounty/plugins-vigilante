@@ -417,11 +417,32 @@ class Vigilante_Self_Integrity {
      * that declares it. Turning the check off is allowed, doing it quietly is
      * not.
      *
+     * A named function or a method declared in wp-includes or wp-admin is left
+     * out: the example of SECURITY.md hooks __return_false, which lives in
+     * wp-includes/functions.php, and until 3.0.8 that file was listed as the
+     * one switching the check off, with steps telling to open it and remove
+     * the filter. The same goes for is_admin(), WP_Http::is_ip_address() or
+     * any other function or method of WordPress, also passed as a closure
+     * (Closure::fromCallable(), or __return_false(...) in PHP 8.1): who hooks
+     * it cannot be told from the callback, so it counts as one that cannot be
+     * named (case disabled_unnamed of the guidance). A closure declared there
+     * is still named, and a PHP file planted in those folders is reported by
+     * the core check of File Integrity as not part of WordPress (php_in_core).
+     *
+     * A callback written as 'Class::method' or an object with __invoke() is
+     * resolved too (until 3.0.8 they were left out without saying so), and
+     * what cannot be traced to a file, a function built into PHP such as
+     * is_null included, is counted in $unnamed, so that a list with names in
+     * it does not read as complete when something else hooks the filter as
+     * well (first blind review of 3.0.8).
+     *
+     * @param int $unnamed Set to how many callbacks could not be traced to a file.
      * @return array List of file paths, relative to the WordPress root.
      */
-    public static function disabled_by() {
+    public static function disabled_by( &$unnamed = 0 ) {
         global $wp_filter;
         $ficheros = array();
+        $unnamed  = 0;
         if ( empty( $wp_filter['vigilante_self_integrity_enabled'] ) || ! is_object( $wp_filter['vigilante_self_integrity_enabled'] ) ) {
             return $ficheros;
         }
@@ -429,24 +450,37 @@ class Vigilante_Self_Integrity {
             foreach ( (array) $entradas as $entrada ) {
                 $llamada = isset( $entrada['function'] ) ? $entrada['function'] : null;
                 try {
-                    if ( is_string( $llamada ) && function_exists( $llamada ) ) {
+                    if ( is_string( $llamada ) && false !== strpos( $llamada, '::' ) ) {
+                        $partes = explode( '::', $llamada, 2 );
+                        $ref    = new ReflectionMethod( $partes[0], $partes[1] );
+                    } elseif ( is_string( $llamada ) && function_exists( $llamada ) ) {
                         $ref = new ReflectionFunction( $llamada );
                     } elseif ( $llamada instanceof Closure ) {
                         $ref = new ReflectionFunction( $llamada );
                     } elseif ( is_array( $llamada ) && isset( $llamada[0], $llamada[1] ) ) {
                         $ref = new ReflectionMethod( is_object( $llamada[0] ) ? get_class( $llamada[0] ) : (string) $llamada[0], (string) $llamada[1] );
+                    } elseif ( is_object( $llamada ) && method_exists( $llamada, '__invoke' ) ) {
+                        $ref = new ReflectionMethod( $llamada, '__invoke' );
                     } else {
+                        ++$unnamed;
                         continue;
                     }
                 } catch ( Exception $e ) {
                     unset( $e );
+                    ++$unnamed;
                     continue;
                 } catch ( Error $e ) {
                     unset( $e );
+                    ++$unnamed;
                     continue;
                 }
                 $fichero = $ref->getFileName();
-                if ( ! $fichero ) {
+                // A function or a method of WordPress itself; a closure declared
+                // there is still named (third blind review: WP_Http::is_ip_address
+                // named wp-includes/class-wp-http.php).
+                $de_wordpress = ( $ref instanceof ReflectionMethod ) || ( $ref instanceof ReflectionFunction && 0 !== strpos( $ref->getName(), '{closure' ) );
+                if ( ! $fichero || ( $de_wordpress && self::declared_in_core( $fichero ) ) ) {
+                    ++$unnamed;
                     continue;
                 }
                 $fichero = str_replace( array( ABSPATH, WP_CONTENT_DIR . '/' ), array( '', 'wp-content/' ), $fichero );
@@ -456,6 +490,24 @@ class Vigilante_Self_Integrity {
             }
         }
         return $ficheros;
+    }
+
+    /**
+     * Whether a file is one of WordPress itself (wp-includes or wp-admin)
+     *
+     * @since 3.0.8
+     *
+     * @param string $file Absolute path.
+     * @return bool
+     */
+    private static function declared_in_core( $file ) {
+        $file = wp_normalize_path( (string) $file );
+        foreach ( array( ABSPATH . WPINC . '/', ABSPATH . 'wp-admin/' ) as $folder ) {
+            if ( 0 === strpos( $file, wp_normalize_path( $folder ) ) ) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -2184,6 +2236,10 @@ class Vigilante_Self_Integrity {
                     ),
                     array(
                         'restored'   => $restored,
+                        // The ones that made this entry critical, for the
+                        // explanation of the log, which until 3.0.8 listed
+                        // every restored task under "keep disappearing".
+                        'repeated'   => $repeated,
                         'recurrence' => $watchdog,
                     ),
                     empty( $repeated ) ? 'warning' : 'critical'
@@ -2798,9 +2854,21 @@ class Vigilante_Self_Integrity {
          * so, with the files that hook the filter, instead of a grey line.
          */
         if ( ! $enabled ) {
-            $ficheros = self::disabled_by();
+            $sin_nombre = 0;
+            $ficheros   = self::disabled_by( $sin_nombre );
             if ( empty( $ficheros ) ) {
-                $ficheros = array( '' );
+                // Nobody to name: a function of WordPress, or a callback that
+                // cannot be resolved. The guidance says so instead of sending
+                // the reader to the files listed above.
+                return array(
+                    array(
+                        'code'     => 'self_disabled',
+                        'file'     => '',
+                        'severity' => 'critical',
+                        'message'  => '',
+                        'variant'  => 'unnamed',
+                    ),
+                );
             }
             foreach ( $ficheros as $fichero ) {
                 $findings[] = array(
@@ -2808,6 +2876,16 @@ class Vigilante_Self_Integrity {
                     'file'     => $fichero,
                     'severity' => 'critical',
                     'message'  => '',
+                );
+            }
+            // Names, and something else that cannot be named: both cases.
+            if ( $sin_nombre > 0 ) {
+                $findings[] = array(
+                    'code'     => 'self_disabled',
+                    'file'     => '',
+                    'severity' => 'critical',
+                    'message'  => '',
+                    'variant'  => 'unnamed',
                 );
             }
             return $findings;
@@ -2936,15 +3014,20 @@ class Vigilante_Self_Integrity {
         $state['off_alerted'] = time();
         $this->save_state( $state );
 
-        $ficheros = self::disabled_by();
-        $findings = array(
+        $sin_nombre = 0;
+        $ficheros   = self::disabled_by( $sin_nombre );
+        $findings   = array(
             $this->finding(
                 'self_disabled',
                 $ficheros ? implode( ', ', $ficheros ) : '',
                 'critical',
-                __( 'Vigilant self-protection is switched off by code on this site.', 'vigilante' )
+                __( 'Vigilant self-protection is switched off by code on this site.', 'vigilante' ),
+                $ficheros ? '' : 'unnamed'
             ),
         );
+        if ( $ficheros && $sin_nombre > 0 ) {
+            $findings[] = $this->finding( 'self_disabled', '', 'critical', __( 'Vigilant self-protection is switched off by code on this site.', 'vigilante' ), 'unnamed' );
+        }
         // Switched off after the last check had found changed files: the alert
         // carries them too, so it is not read as only switched off.
         if ( 'critical' === ( isset( $state['last_status'] ) ? (string) $state['last_status'] : '' ) && isset( $state['last_findings'] ) && is_array( $state['last_findings'] ) ) {
@@ -2964,7 +3047,10 @@ class Vigilante_Self_Integrity {
                     implode( ', ', $ficheros )
                 )
                 : __( 'Vigilant self-protection is switched off by code on this site', 'vigilante' ),
-            array( 'files' => $ficheros ),
+            array(
+                'files'   => $ficheros,
+                'unnamed' => $sin_nombre,
+            ),
             'critical'
         );
     }

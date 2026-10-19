@@ -85,6 +85,105 @@ class Vigilante_File_Integrity {
     private $max_scan_time = self::MAX_SCAN_SECONDS;
 
     /**
+     * Option that marks a scan in progress, without autoload
+     *
+     * Written when a scan starts and deleted when its result is saved. A
+     * scan that PHP or the server stops halfway leaves it behind, and that
+     * is the only trace of it: until 3.0.8 such a scan left nothing, and the
+     * tab went on showing the last result that did finish, or nothing at all
+     * when it was the button, which cleared the previous result first.
+     *
+     * @since 3.0.8
+     */
+    const RUNNING_OPTION = 'vigilante_integrity_scan_running';
+
+    /**
+     * Option with the scan that did not finish, found by the next one that
+     * started, without autoload. Deleted when a scan finishes.
+     *
+     * @since 3.0.8
+     */
+    const UNFINISHED_OPTION = 'vigilante_integrity_scan_unfinished';
+
+    /**
+     * Seconds left in the request below which the closed-plugins check is
+     * left out of the scan
+     *
+     * It asks WordPress.org once per installed plugin, outside the scan
+     * clock: 27.6 s for 57 plugins in Testing on 4 Oct 2026. The daily check
+     * of plugin status runs it anyway.
+     *
+     * @since 3.0.8
+     */
+    const CLOSED_PLUGINS_SECONDS = 35;
+
+    /**
+     * Seconds a request for the checksums of WordPress.org may wait
+     *
+     * Also what the margin of a scan cut to the limit of PHP has to cover
+     * where PHP counts clock time (see fit_to_time_limit()).
+     *
+     * @since 3.0.8
+     */
+    const CHECKSUM_TIMEOUT = 10;
+
+    /**
+     * Token of the scan this instance started, to tell its marker apart
+     *
+     * @var string
+     */
+    private $scan_token = '';
+
+    /**
+     * Limit of PHP for this request when it is below what a scan needs and
+     * the server would not raise it, 0 otherwise
+     *
+     * @var int
+     */
+    private $php_limit = 0;
+
+    /**
+     * Seconds of processor time the scan may use, where that is what PHP
+     * counts and the limit is short, 0 otherwise
+     *
+     * @var float
+     */
+    private $cpu_budget = 0;
+
+    /**
+     * Processor time of the process when the scan started, null when it
+     * cannot be read
+     *
+     * @var float|null
+     */
+    private $cpu_at_start = null;
+
+    /**
+     * Whether the short limit of PHP is what stopped the scan
+     *
+     * @var bool
+     */
+    private $cut_by_php_limit = false;
+
+    /**
+     * What max_execution_time counts, when it is not the one of this
+     * platform: only the release checks set it, to measure the other
+     * platform's path (cpu or wall; empty to detect it)
+     *
+     * @var string
+     */
+    private static $limit_clock = '';
+
+    /**
+     * Processor time of the process when this file was loaded, which is
+     * when the plugin loads (vigilante_load_plugin() on plugins_loaded):
+     * the start of the request, give or take the boot of WordPress
+     *
+     * @var float|null
+     */
+    private static $cpu_at_load = null;
+
+    /**
      * Largest file the search for hidden code reads, in bytes
      *
      * It used to be 512,000, and a larger file was not opened at all: in a
@@ -1763,7 +1862,21 @@ class Vigilante_File_Integrity {
         if ( 0 === $this->scan_start_time ) {
             return false;
         }
-        return ( microtime( true ) - $this->scan_start_time ) > $this->max_scan_time;
+        if ( ( microtime( true ) - $this->scan_start_time ) > $this->max_scan_time ) {
+            // The clock budget was the one cut to the limit of PHP.
+            if ( $this->php_limit > 0 && $this->cpu_budget <= 0 ) {
+                $this->cut_by_php_limit = true;
+            }
+            return true;
+        }
+        if ( $this->cpu_budget > 0 && null !== $this->cpu_at_start ) {
+            $cpu = self::cpu_seconds();
+            if ( null !== $cpu && ( $cpu - $this->cpu_at_start ) > $this->cpu_budget ) {
+                $this->cut_by_php_limit = true;
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -2060,6 +2173,11 @@ class Vigilante_File_Integrity {
             'incomplete' => false,
         );
 
+        // Fit the scan into the time PHP gives this request, and leave a mark
+        // that says it started, so that one the server stops is not silent.
+        $this->fit_to_time_limit();
+        $this->mark_scan_started();
+
         // Use settings from options page
         $options = is_array( $this->options ) ? $this->options : array();
 
@@ -2215,7 +2333,9 @@ class Vigilante_File_Integrity {
         }
 
         // Stored after the last merge: merge_results() keeps only the keys it
-        // knows.
+        // knows. So is why the scan had less time than usual (until the first
+        // blind review of 3.0.8 it was written at the start and was lost).
+        $this->note_php_limit( $results );
         $not_checked['areas']   = array_values( array_unique( $not_checked['areas'] ) );
         $results['not_checked'] = $not_checked;
 
@@ -2267,16 +2387,26 @@ class Vigilante_File_Integrity {
             );
         }
 
+        // Saved here, as soon as the files are done, and not only by whoever
+        // called: what comes next asks WordPress.org about every plugin and
+        // sends the email, outside the scan clock, and a server that stopped
+        // the request in that stretch took with it a scan that had finished
+        // (27.6 s for 57 plugins in Testing, 4 Oct 2026). The callers save the
+        // same again when it returns.
+        $this->store_results( $results );
+
         // Closed plugins check: queries the wp.org repository for the closure status
         // of every installed plugin slug. Independent of the file-level scan_* toggles
         // (gated by its own `check_closed_plugins` toggle in Scan Scope). Runs BEFORE
         // the notification call so closed plugins are folded into the scan email
-        // (instead of triggering a separate one-shot). Quick (~10 s for 50 plugins).
+        // (instead of triggering a separate one-shot).
         //
         // suppress_email=true: this entry point is the file integrity scan; the
         // daily plugin-status cron passes suppress_email=false so urgent closures
         // still produce an immediate alert when the file scan is on a weekly schedule.
-        if ( ! empty( $options['check_closed_plugins'] ) ) {
+        // That daily check is also why it is left out here when the request has
+        // too little time left for it: the email would be the next thing lost.
+        if ( ! empty( $options['check_closed_plugins'] ) && $this->seconds_left_in_request() >= self::CLOSED_PLUGINS_SECONDS ) {
             if ( ! class_exists( 'Vigilante_Plugin_Status' ) ) {
                 require_once VIGILANTE_INCLUDES_DIR . 'class-plugin-status.php';
             }
@@ -2289,6 +2419,382 @@ class Vigilante_File_Integrity {
         $this->maybe_send_notification( $results );
 
         return $results;
+    }
+
+    /**
+     * Fit the scan into the time PHP gives this request
+     *
+     * The scan runs for MAX_SCAN_SECONDS, and until 3.0.8 nothing looked at
+     * max_execution_time: on a hosting that gives a request 30 seconds, PHP
+     * could stop the scan halfway, and a scan stopped there saves nothing.
+     * More time is asked for; when the server does not allow it, the scan
+     * stops in time to save its result, and the result says so.
+     *
+     * What PHP counts depends on the platform. On Linux it is processor time
+     * (ITIMER_PROF): waiting for WordPress.org or for the disk does not count,
+     * so a scan of 60 seconds of clock can fit in 30 of PHP. There the budget
+     * is measured with getrusage(), and the 60 seconds of clock stay. On
+     * Windows, and on macOS with a recent PHP, it is clock time, and the clock
+     * budget is cut. Measured on 19 Oct 2026 with the PHP of Local on Apple
+     * Silicon: 7.4 lives through a sleep(4) with a limit of 2 seconds, and
+     * 8.5 does not. Cutting the clock on Linux, as the first version of this
+     * did, left partial a scan that 3.0.7 finished (first blind review).
+     *
+     * @since 3.0.8
+     */
+    private function fit_to_time_limit() {
+        $this->php_limit        = 0;
+        $this->cpu_budget       = 0;
+        $this->cut_by_php_limit = false;
+        $this->cpu_at_start     = self::cpu_seconds();
+
+        $needed = self::MAX_SCAN_SECONDS + 30;
+        $limit  = (int) ini_get( 'max_execution_time' );
+
+        if ( $limit <= 0 || $limit >= $needed ) {
+            return;
+        }
+
+        // set_time_limit() counts from now, and does nothing where the
+        // hosting has disabled it: what counts is the limit read afterwards.
+        if ( function_exists( 'set_time_limit' ) ) {
+            set_time_limit( $needed ); // phpcs:ignore Squiz.PHP.DiscouragedFunctions.Discouraged -- Asked only when the limit of PHP is below what one scan needs; where the hosting refuses, the scan budget adapts to it below.
+        }
+        $limit = (int) ini_get( 'max_execution_time' );
+        if ( $limit <= 0 || $limit >= $needed ) {
+            return;
+        }
+
+        // PHP counts that limit from the start of the request, and in a cron
+        // run other tasks may have used part of it before the scan: what was
+        // spent is taken off, measured as PHP measures it (second blind
+        // review of 3.0.8). In processor time, since the plugin loaded: the
+        // first version took off the clock there too, and a cron run that had
+        // waited 22 seconds for the network left the scan one second of a
+        // limit PHP was not going to enforce (third blind review). The margin
+        // is for saving the result: a third of the limit, 15 seconds at most,
+        // in processor time; in clock time, also a download of checksums that
+        // starts just before the budget runs out and waits its whole timeout.
+        $this->php_limit = $limit;
+        if ( 'cpu' === self::php_limit_clock() && null !== $this->cpu_at_start ) {
+            $spent            = null !== self::$cpu_at_load ? max( 0, $this->cpu_at_start - self::$cpu_at_load ) : 0;
+            $this->cpu_budget = max( 1, $limit - min( 15, $limit / 3 ) - $spent );
+        } else {
+            $spent               = isset( $_SERVER['REQUEST_TIME_FLOAT'] ) ? max( 0, microtime( true ) - (float) $_SERVER['REQUEST_TIME_FLOAT'] ) : 0;
+            $this->max_scan_time = max( 1, $limit - min( $limit / 2, self::CHECKSUM_TIMEOUT + 5 ) - $spent );
+        }
+    }
+
+    /**
+     * What max_execution_time counts on this platform
+     *
+     * @since 3.0.8
+     *
+     * @return string cpu or wall.
+     */
+    private static function php_limit_clock() {
+        if ( '' !== self::$limit_clock ) {
+            return self::$limit_clock;
+        }
+        // A thread safe PHP on Linux counts with its own timers, in clock time
+        // (zend max execution timers, the default there; FrankenPHP, for one).
+        if ( PHP_ZTS ) {
+            return 'wall';
+        }
+        return in_array( PHP_OS_FAMILY, array( 'Windows', 'Darwin' ), true ) ? 'wall' : 'cpu';
+    }
+
+    /**
+     * Note the processor time of the process when the plugin loads
+     *
+     * @since 3.0.8
+     *
+     * @internal Called once, at the end of this file.
+     */
+    public static function note_load_cpu() {
+        if ( null === self::$cpu_at_load ) {
+            self::$cpu_at_load = self::cpu_seconds();
+        }
+    }
+
+    /**
+     * Processor time used by this process, user and system, in seconds
+     *
+     * @since 3.0.8
+     *
+     * @return float|null Null when getrusage() is not available.
+     */
+    private static function cpu_seconds() {
+        if ( ! function_exists( 'getrusage' ) ) {
+            return null;
+        }
+        $use = getrusage();
+        if ( ! is_array( $use ) || ! isset( $use['ru_utime.tv_sec'], $use['ru_utime.tv_usec'], $use['ru_stime.tv_sec'], $use['ru_stime.tv_usec'] ) ) {
+            return null;
+        }
+        return $use['ru_utime.tv_sec'] + $use['ru_utime.tv_usec'] / 1000000 + $use['ru_stime.tv_sec'] + $use['ru_stime.tv_usec'] / 1000000;
+    }
+
+    /**
+     * Note in the results why the scan had less time than usual, when the
+     * short limit of PHP is what stopped it
+     *
+     * @since 3.0.8
+     *
+     * @param array $results Scan results, by reference.
+     */
+    private function note_php_limit( &$results ) {
+        if ( ! $this->cut_by_php_limit ) {
+            return;
+        }
+        $results['time_limit']   = $this->php_limit;
+        $results['scan_budget']  = (int) ( $this->cpu_budget > 0 ? $this->cpu_budget : $this->max_scan_time );
+        $results['budget_clock'] = $this->cpu_budget > 0 ? 'cpu' : 'wall';
+    }
+
+    /**
+     * Seconds left before PHP stops this request, or a large number when it
+     * has no limit
+     *
+     * With the clock PHP uses here (see fit_to_time_limit()): processor time
+     * since the scan started where PHP counts that, which leaves out the
+     * second or two WordPress took before it, and the clock since the start
+     * of the request otherwise, which errs on the side of too little time.
+     *
+     * @since 3.0.8
+     *
+     * @return float
+     */
+    private function seconds_left_in_request() {
+        $limit = (int) ini_get( 'max_execution_time' );
+        if ( $limit <= 0 ) {
+            return PHP_INT_MAX;
+        }
+        if ( 'cpu' === self::php_limit_clock() && null !== $this->cpu_at_start ) {
+            $cpu = self::cpu_seconds();
+            if ( null !== $cpu ) {
+                return $limit - ( $cpu - $this->cpu_at_start );
+            }
+        }
+        $start = isset( $_SERVER['REQUEST_TIME_FLOAT'] ) ? (float) $_SERVER['REQUEST_TIME_FLOAT'] : (float) $this->scan_start_time;
+        return $limit - ( microtime( true ) - $start );
+    }
+
+    /**
+     * Mark that a scan started, and record the previous one if it never ended
+     *
+     * @since 3.0.8
+     */
+    private function mark_scan_started() {
+        $previous = get_option( self::RUNNING_OPTION );
+
+        // A marker that is still within its time belongs to a scan that may be
+        // running right now in another request: it is left to that one, unless
+        // its PHP already said that it died.
+        if ( is_array( $previous ) && ! empty( $previous['started'] ) && ( ! empty( $previous['cause'] ) || self::marker_is_stale( $previous ) ) ) {
+            update_option( self::UNFINISHED_OPTION, $previous, false );
+            if ( $this->activity_log ) {
+                $this->activity_log->log(
+                    'file',
+                    'integrity_scan_unfinished',
+                    self::unfinished_scan_text( $previous ),
+                    array(
+                        'started'      => (int) $previous['started'],
+                        'via'          => isset( $previous['via'] ) ? (string) $previous['via'] : '',
+                        'cause'        => isset( $previous['cause'] ) ? (string) $previous['cause'] : '',
+                        'time_limit'   => isset( $previous['time_limit'] ) ? (int) $previous['time_limit'] : 0,
+                        'memory_limit' => isset( $previous['memory_limit'] ) ? (string) $previous['memory_limit'] : '',
+                    ),
+                    'warning'
+                );
+            }
+        }
+
+        $this->scan_token = wp_generate_password( 12, false );
+        $via              = 'other';
+        if ( wp_doing_ajax() ) {
+            $via = 'button';
+        } elseif ( wp_doing_cron() ) {
+            $via = 'scheduled';
+        }
+
+        update_option(
+            self::RUNNING_OPTION,
+            array(
+                'started'      => time(),
+                'via'          => $via,
+                'token'        => $this->scan_token,
+                'time_limit'   => (int) ini_get( 'max_execution_time' ),
+                'memory_limit' => (string) ini_get( 'memory_limit' ),
+                'budget'       => (int) $this->max_scan_time,
+            ),
+            false
+        );
+
+        register_shutdown_function( array( $this, 'note_scan_stopped' ) );
+    }
+
+    /**
+     * At the end of the request: say why the scan stopped, when PHP says it
+     *
+     * Runs on shutdown, also after a fatal error. When PHP ran out of memory
+     * or time, the marker keeps it, and the notice can name the cause. When
+     * the web server killed the process, nothing runs and only the marker is
+     * left, so the notice says "most likely".
+     *
+     * @since 3.0.8
+     *
+     * @internal Hooked by mark_scan_started(); public because PHP calls it.
+     */
+    public function note_scan_stopped() {
+        try {
+            $running = get_option( self::RUNNING_OPTION );
+            if ( ! is_array( $running ) || ! isset( $running['token'] ) || $this->scan_token !== (string) $running['token'] ) {
+                return;
+            }
+            $cause = self::stop_cause( error_get_last() );
+            if ( '' === $cause ) {
+                return;
+            }
+            $running['cause'] = $cause;
+            update_option( self::RUNNING_OPTION, $running, false );
+        } catch ( Throwable $e ) {
+            unset( $e );
+        }
+    }
+
+    /**
+     * Why PHP stopped a request, from error_get_last()
+     *
+     * @since 3.0.8
+     *
+     * @param mixed $error What error_get_last() returned.
+     * @return string memory, time, error, or '' when it was not a fatal error.
+     */
+    public static function stop_cause( $error ) {
+        if ( ! is_array( $error ) || ! isset( $error['type'], $error['message'] ) || ! in_array( (int) $error['type'], array( E_ERROR, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR ), true ) ) {
+            return '';
+        }
+        $message = (string) $error['message'];
+        if ( false !== stripos( $message, 'Allowed memory size' ) ) {
+            return 'memory';
+        }
+        if ( false !== stripos( $message, 'Maximum execution time' ) ) {
+            return 'time';
+        }
+        return 'error';
+    }
+
+    /**
+     * Save the result of a scan and close its marker
+     *
+     * @since 3.0.8
+     *
+     * @param array $results Scan results.
+     */
+    private function store_results( $results ) {
+        update_option( 'vigilante_last_integrity_scan', time() );
+        update_option( 'vigilante_last_integrity_results', $results );
+        delete_option( self::RUNNING_OPTION );
+        delete_option( self::UNFINISHED_OPTION );
+    }
+
+    /**
+     * Whether a marker is older than any scan can last
+     *
+     * @since 3.0.8
+     *
+     * @param array    $marker Marker of RUNNING_OPTION.
+     * @param int|null $now    Current time.
+     * @return bool
+     */
+    private static function marker_is_stale( $marker, $now = null ) {
+        $limit  = isset( $marker['time_limit'] ) ? (int) $marker['time_limit'] : 0;
+        $budget = isset( $marker['budget'] ) ? (int) $marker['budget'] : self::MAX_SCAN_SECONDS;
+        $now    = null === $now ? time() : (int) $now;
+        return ( $now - (int) $marker['started'] ) > ( max( $limit, $budget ) + 120 );
+    }
+
+    /**
+     * Whether the marker of a scan in progress belongs to one that is over:
+     * its PHP said that it died, or it is older than any scan can last
+     *
+     * @since 3.0.8
+     *
+     * @return bool False when there is no marker, or when it may be a scan
+     *              running right now.
+     */
+    public static function running_marker_is_over() {
+        $running = get_option( self::RUNNING_OPTION );
+        return is_array( $running ) && ! empty( $running['started'] ) && ( ! empty( $running['cause'] ) || self::marker_is_stale( $running ) );
+    }
+
+    /**
+     * The scan that started and did not finish, or null
+     *
+     * The one the next scan found, or the marker of one that is older than
+     * any scan can last. The only source of that fact for the tab and for
+     * Security Check.
+     *
+     * @since 3.0.8
+     *
+     * @return array|null { int started, string via, string cause, int time_limit, string memory_limit }
+     */
+    public static function unfinished_scan() {
+        $unfinished = get_option( self::UNFINISHED_OPTION );
+        if ( is_array( $unfinished ) && ! empty( $unfinished['started'] ) ) {
+            return $unfinished;
+        }
+        $running = get_option( self::RUNNING_OPTION );
+        // A marker with a cause is one whose PHP said, as it died, that it
+        // ran out of memory or time: it is not running, and there is no need
+        // to wait until it is old to say so.
+        if ( is_array( $running ) && ! empty( $running['started'] ) && ( ! empty( $running['cause'] ) || self::marker_is_stale( $running ) ) ) {
+            return $running;
+        }
+        return null;
+    }
+
+    /**
+     * What a scan that did not finish says
+     *
+     * @since 3.0.8
+     *
+     * @param array $marker What unfinished_scan() returned.
+     * @return string
+     */
+    public static function unfinished_scan_text( $marker ) {
+        $text = sprintf(
+            /* translators: %s: date and time the scan started */
+            __( 'The scan started on %s did not finish: it was stopped before it could save its result.', 'vigilante' ),
+            wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), (int) $marker['started'] )
+        );
+        // A scan that finishes deletes the marker, so the last one that did
+        // is always older than this.
+        $text .= ' ' . ( (int) get_option( 'vigilante_last_integrity_scan', 0 ) > 0
+            ? __( 'What is shown is the last scan that finished.', 'vigilante' )
+            : __( 'No scan has finished on this site yet.', 'vigilante' ) );
+
+        $cause = isset( $marker['cause'] ) ? (string) $marker['cause'] : '';
+        if ( 'memory' === $cause ) {
+            $text .= ' ' . sprintf(
+                /* translators: %s: PHP memory limit, such as 128M */
+                __( 'PHP ran out of memory (memory_limit is %s).', 'vigilante' ),
+                isset( $marker['memory_limit'] ) ? (string) $marker['memory_limit'] : '?'
+            );
+        } elseif ( 'time' === $cause ) {
+            $text .= ' ' . sprintf(
+                /* translators: %d: seconds */
+                __( 'PHP ran out of time (max_execution_time is %d seconds).', 'vigilante' ),
+                isset( $marker['time_limit'] ) ? (int) $marker['time_limit'] : 0
+            );
+        } elseif ( 'error' === $cause ) {
+            $text .= ' ' . __( 'PHP stopped it with an error: the error log of the server has it.', 'vigilante' );
+        } else {
+            $text .= ' ' . __( 'The most likely cause is the time or the memory the server gives to one request.', 'vigilante' );
+        }
+
+        return $text . ' ' . __( 'If it happens again, ask your hosting for more time or memory for PHP.', 'vigilante' );
     }
 
     /**
@@ -4597,7 +5103,7 @@ class Vigilante_File_Integrity {
             $locale
         );
 
-        $response = wp_remote_get( $url, array( 'timeout' => 10 ) );
+        $response = wp_remote_get( $url, array( 'timeout' => self::CHECKSUM_TIMEOUT ) );
 
         if ( is_wp_error( $response ) ) {
             return $response;
@@ -5003,7 +5509,7 @@ class Vigilante_File_Integrity {
             $version
         );
 
-        $response = wp_remote_get( $url, array( 'timeout' => 10 ) );
+        $response = wp_remote_get( $url, array( 'timeout' => self::CHECKSUM_TIMEOUT ) );
 
         if ( is_wp_error( $response ) ) {
             return $response;
@@ -7120,6 +7626,27 @@ class Vigilante_File_Integrity {
             $lines[] = sprintf( __( 'Themes not checked: %s.', 'vigilante' ), implode( ', ', $themes ) );
         }
 
+        // Why it had less time than usual: the server gives a request less
+        // than a scan needs, and does not let it ask for more (since 3.0.8;
+        // see fit_to_time_limit()).
+        if ( ! empty( $lines ) && ! empty( $results['time_limit'] ) && ! empty( $results['scan_budget'] ) ) {
+            if ( 'cpu' === ( $results['budget_clock'] ?? '' ) ) {
+                $lines[] = sprintf(
+                    /* translators: 1: seconds of processor time the server gives a request, 2: seconds the scan used */
+                    __( 'This server gives a request %1$d seconds of PHP processing time and does not let the scan ask for more, so the scan stopped after %2$d of them, to be able to save its result. More time for PHP, from your hosting, lets it check more.', 'vigilante' ),
+                    (int) $results['time_limit'],
+                    (int) $results['scan_budget']
+                );
+            } else {
+                $lines[] = sprintf(
+                    /* translators: 1: seconds the server gives a request, 2: seconds the scan had */
+                    __( 'This server gives a request %1$d seconds and does not let the scan ask for more, so the scan had %2$d seconds, to be able to save its result. More time for PHP, from your hosting, lets it check more.', 'vigilante' ),
+                    (int) $results['time_limit'],
+                    (int) $results['scan_budget']
+                );
+            }
+        }
+
         return $lines;
     }
 
@@ -8168,3 +8695,7 @@ class Vigilante_File_Integrity {
         return $this->database->clear_file_hashes();
     }
 }
+
+// The processor time when the plugin loads, the start of the budget of a scan
+// where PHP counts processor time (see fit_to_time_limit()).
+Vigilante_File_Integrity::note_load_cpu();

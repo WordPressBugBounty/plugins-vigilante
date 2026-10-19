@@ -156,6 +156,16 @@
                 $search.focus().select();
             });
 
+            // Escape closes the popup of the Security Audit (since 3.0.8). It does
+            // nothing while no popup is open, so Escape keeps its other uses.
+            $(document).on('keydown', function(e) {
+                if (e.key !== 'Escape') return;
+                var $open = $('.vigilante-modal:visible');
+                if (!$open.length) return;
+                e.preventDefault();
+                $open.hide();
+            });
+
             // Start Under Attack countdown if active
             this.initUnderAttackCountdown();
         },
@@ -655,11 +665,16 @@
                     } else {
                         Vigilante_Admin.showNotice('error', response.data || vigilanteAdmin.strings.scanFailed || 'Scan failed');
                         $btn.prop('disabled', false).text(vigilanteAdmin.strings.runScanNow || 'Run Scan Now');
+                        // The previous result is still saved: it was only hidden while scanning.
+                        $lastResults.show();
                     }
                 },
                 error: function(xhr, status, error) {
                     Vigilante_Admin.showNotice('error', (vigilanteAdmin.strings.scanError || 'Scan error: %s').replace('%s', error));
                     $btn.prop('disabled', false).text(vigilanteAdmin.strings.runScanNow || 'Run Scan Now');
+                    // A scan the server stopped leaves the previous result saved, and
+                    // since 3.0.8 the button no longer deletes it first: it shows again.
+                    $lastResults.show();
                 }
             });
         },
@@ -2681,33 +2696,43 @@
             }
             html += '</table>';
 
-            // Action buttons for IP and UA
+            // Action buttons, one block for the IP and another one for the User
+            // Agent, each with its name, its value and buttons that say what they
+            // act on. Until 3.0.8 the four buttons sat in one row behind a small
+            // "IP:" and "UA:", and people blacklisted a User Agent taking it for
+            // the IP.
             html += '<div class="vigilante-popup-actions">';
             if (details.ip && details.ip !== '0.0.0.0') {
-                html += '<span class="vigilante-popup-actions-label">' + this.escapeHtml(s.logIpLabel || 'IP:') + '</span>';
+                html += '<div class="vigilante-popup-actions-group vigilante-popup-actions-ip">';
+                html += '<p class="vigilante-popup-actions-label">' + this.escapeHtml(s.logIpAddress || 'IP Address') + ' <code>' + this.escapeHtml(details.ip) + '</code></p>';
+                html += '<div class="vigilante-popup-actions-buttons">';
                 if (details.is_ip_whitelisted) {
                     html += '<button type="button" class="button button-small vigilante-btn-added" disabled><span class="dashicons dashicons-yes-alt"></span> ' + this.escapeHtml(s.logInWhitelist || 'In whitelist') + '</button> ';
                 } else {
-                    html += '<button type="button" class="button button-small vigilante-add-to-list" data-item-type="ip" data-list-type="whitelist" data-value="' + this.escapeHtml(details.ip) + '"><span class="dashicons dashicons-yes-alt"></span> ' + this.escapeHtml(s.logWhitelist || 'Whitelist') + '</button> ';
+                    html += '<button type="button" class="button button-small vigilante-add-to-list" data-item-type="ip" data-list-type="whitelist" data-value="' + this.escapeHtml(details.ip) + '"><span class="dashicons dashicons-yes-alt"></span> ' + this.escapeHtml(s.logWhitelistIp || 'Whitelist this IP') + '</button> ';
                 }
                 if (details.is_ip_blacklisted) {
-                    html += '<button type="button" class="button button-small vigilante-btn-added" disabled><span class="dashicons dashicons-dismiss"></span> ' + this.escapeHtml(s.logInBlacklist || 'In blacklist') + '</button> ';
+                    html += '<button type="button" class="button button-small vigilante-btn-added" disabled><span class="dashicons dashicons-dismiss"></span> ' + this.escapeHtml(s.logInBlacklist || 'In blacklist') + '</button>';
                 } else {
-                    html += '<button type="button" class="button button-small vigilante-add-to-list vigilante-btn-danger" data-item-type="ip" data-list-type="blacklist" data-value="' + this.escapeHtml(details.ip) + '"><span class="dashicons dashicons-dismiss"></span> ' + this.escapeHtml(s.logBlacklist || 'Blacklist') + '</button> ';
+                    html += '<button type="button" class="button button-small vigilante-add-to-list vigilante-btn-danger" data-item-type="ip" data-list-type="blacklist" data-value="' + this.escapeHtml(details.ip) + '"><span class="dashicons dashicons-dismiss"></span> ' + this.escapeHtml(s.logBlacklistIp || 'Blacklist this IP') + '</button>';
                 }
+                html += '</div></div>';
             }
             if (details.user_agent) {
-                html += '<span class="vigilante-popup-actions-label">' + this.escapeHtml(s.logUaLabel || 'UA:') + '</span>';
+                html += '<div class="vigilante-popup-actions-group vigilante-popup-actions-ua">';
+                html += '<p class="vigilante-popup-actions-label">' + this.escapeHtml(s.logUserAgent || 'User Agent') + ' <code>' + this.escapeHtml(details.user_agent) + '</code></p>';
+                html += '<div class="vigilante-popup-actions-buttons">';
                 if (details.is_ua_whitelisted) {
                     html += '<button type="button" class="button button-small vigilante-btn-added" disabled><span class="dashicons dashicons-yes-alt"></span> ' + this.escapeHtml(s.logInWhitelist || 'In whitelist') + '</button> ';
                 } else {
-                    html += '<button type="button" class="button button-small vigilante-add-to-list" data-item-type="ua" data-list-type="whitelist" data-value="' + this.escapeHtml(details.user_agent) + '"><span class="dashicons dashicons-yes-alt"></span> ' + this.escapeHtml(s.logWhitelist || 'Whitelist') + '</button> ';
+                    html += '<button type="button" class="button button-small vigilante-add-to-list" data-item-type="ua" data-list-type="whitelist" data-value="' + this.escapeHtml(details.user_agent) + '"><span class="dashicons dashicons-yes-alt"></span> ' + this.escapeHtml(s.logWhitelistUa || 'Whitelist this User Agent') + '</button> ';
                 }
                 if (details.is_ua_blacklisted) {
                     html += '<button type="button" class="button button-small vigilante-btn-added" disabled><span class="dashicons dashicons-dismiss"></span> ' + this.escapeHtml(s.logInBlacklist || 'In blacklist') + '</button>';
                 } else {
-                    html += '<button type="button" class="button button-small vigilante-add-to-list vigilante-btn-danger" data-item-type="ua" data-list-type="blacklist" data-value="' + this.escapeHtml(details.user_agent) + '"><span class="dashicons dashicons-dismiss"></span> ' + this.escapeHtml(s.logBlacklist || 'Blacklist') + '</button>';
+                    html += '<button type="button" class="button button-small vigilante-add-to-list vigilante-btn-danger" data-item-type="ua" data-list-type="blacklist" data-value="' + this.escapeHtml(details.user_agent) + '"><span class="dashicons dashicons-dismiss"></span> ' + this.escapeHtml(s.logBlacklistUa || 'Blacklist this User Agent') + '</button>';
                 }
+                html += '</div></div>';
             }
             html += '</div>';
             html += '<div class="vigilante-popup-feedback" style="display:none;"></div>';

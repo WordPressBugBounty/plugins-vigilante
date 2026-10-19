@@ -182,6 +182,7 @@ trait Vigilante_Admin_Ajax {
             $log->is_ua_whitelisted = ( '' !== $ua_val && in_array( $ua_val, $ua_whitelist, true ) );
             $log->is_ua_blacklisted = ( '' !== $ua_val && in_array( $ua_val, $ua_blacklist, true ) );
             $log->request_uri       = Vigilante_Activity_Log::extract_request_uri( $log->extra_data ?? '' );
+            $log->event_message     = Vigilante_Activity_Log::display_message( (string) ( $log->event_action ?? '' ), (string) ( $log->event_message ?? '' ) );
             // Same explanation as the first page load: without this, an entry
             // reached by filtering or paginating would open a popup with less
             // in it than the same entry opened from the first page.

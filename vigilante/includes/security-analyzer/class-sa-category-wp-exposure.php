@@ -77,7 +77,7 @@ class Vigilante_SA_Category_WP_Exposure {
         $probe            = Vigilante_SA_Helpers::probe_home();
 
         if ( null === $probe ) {
-            $args['detail'] = __( 'Could not fetch the homepage to inspect HTML meta tags.', 'vigilante' );
+            $args['detail'] = Vigilante_SA_Helpers::with_challenge( __( 'Could not fetch the homepage to inspect HTML meta tags.', 'vigilante' ), true );
             return Vigilante_SA_Check_Result::skip( $args );
         }
 
@@ -122,7 +122,7 @@ class Vigilante_SA_Category_WP_Exposure {
         $response = Vigilante_SA_Helpers::get( $url, array( 'redirection' => 0 ) );
 
         if ( is_wp_error( $response ) ) {
-            $args['detail'] = __( 'Could not probe the REST users endpoint.', 'vigilante' );
+            $args['detail'] = Vigilante_SA_Helpers::with_challenge( __( 'Could not probe the REST users endpoint.', 'vigilante' ) );
             return Vigilante_SA_Check_Result::skip( $args );
         }
 
@@ -231,7 +231,7 @@ class Vigilante_SA_Category_WP_Exposure {
         $response = Vigilante_SA_Helpers::get( $url, array( 'redirection' => 0 ) );
 
         if ( is_wp_error( $response ) ) {
-            $args['detail'] = __( 'Could not probe ?author=1.', 'vigilante' );
+            $args['detail'] = Vigilante_SA_Helpers::with_challenge( __( 'Could not probe ?author=1.', 'vigilante' ) );
             return Vigilante_SA_Check_Result::skip( $args );
         }
 
@@ -319,7 +319,7 @@ class Vigilante_SA_Category_WP_Exposure {
 
         $probe = Vigilante_SA_Helpers::probe_home();
         if ( null === $probe ) {
-            $args['detail'] = __( 'Could not read homepage HTML.', 'vigilante' );
+            $args['detail'] = Vigilante_SA_Helpers::with_challenge( __( 'Could not read homepage HTML.', 'vigilante' ), true );
             return Vigilante_SA_Check_Result::skip( $args );
         }
 
