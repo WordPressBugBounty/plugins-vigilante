@@ -495,6 +495,10 @@ class Vigilante_Self_Integrity {
     /**
      * Whether a file is one of WordPress itself (wp-includes or wp-admin)
      *
+     * Reflection gives the path PHP resolved, so with wp-includes linked from
+     * outside ABSPATH the file is under the target of the link, which is
+     * compared too since 3.0.9 (fourth blind review of 3.0.8).
+     *
      * @since 3.0.8
      *
      * @param string $file Absolute path.
@@ -503,8 +507,15 @@ class Vigilante_Self_Integrity {
     private static function declared_in_core( $file ) {
         $file = wp_normalize_path( (string) $file );
         foreach ( array( ABSPATH . WPINC . '/', ABSPATH . 'wp-admin/' ) as $folder ) {
-            if ( 0 === strpos( $file, wp_normalize_path( $folder ) ) ) {
-                return true;
+            $folders = array( wp_normalize_path( $folder ) );
+            $real    = realpath( $folder );
+            if ( false !== $real ) {
+                $folders[] = trailingslashit( wp_normalize_path( $real ) );
+            }
+            foreach ( $folders as $prefix ) {
+                if ( 0 === strpos( $file, $prefix ) ) {
+                    return true;
+                }
             }
         }
         return false;

@@ -107,7 +107,8 @@ class Vigilante_Security_Analyzer {
                 // checks or changing their max value.
                 // 3.0.0: 30 -> 40 (self_integrity check added, worth 10: the
                 // integrity of the plugin that runs every other check).
-                'max'   => 40,
+                // 3.0.9: 40 -> 43 (php_security_fixes, worth 3).
+                'max'   => 43,
             ),
             'reputation'  => array(
                 'slug'     => 'reputation',

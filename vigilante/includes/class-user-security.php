@@ -3001,7 +3001,9 @@ class Vigilante_User_Security {
             return false;
         }
 
-        $expire_days = absint( $settings['expire_days'] ?? 90 );
+        // Never below the 7 days the screen allows: a 0 stored before 3.0.9
+        // expired every password with a date (B69, a).
+        $expire_days = max( 7, absint( $settings['expire_days'] ?? 90 ) );
         $last_change = get_user_meta( $user_id, 'vigilante_password_changed', true );
 
         // If no record, set it now (first time)
@@ -3040,7 +3042,7 @@ class Vigilante_User_Security {
             return -1;
         }
 
-        $expire_days = absint( $settings['expire_days'] ?? 90 );
+        $expire_days = max( 7, absint( $settings['expire_days'] ?? 90 ) );
         $last_change = get_user_meta( $user_id, 'vigilante_password_changed', true );
 
         if ( ! $last_change ) {

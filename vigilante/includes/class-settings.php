@@ -1951,6 +1951,17 @@ class Vigilante_Settings {
             }
         }
 
+        // The screen asks for 7 days or more and the generic validator only
+        // casts, so 0 got stored, from an import or a request that skipped
+        // the field limits, and then every password with a date had expired
+        // (B69, a). Vigilante_User_Security reads it with the same floor. No
+        // ceiling: a longer period saved that way harms nobody, and cutting
+        // it on the next save of any tab would expire passwords earlier than
+        // the site set, without a word (first blind review of 3.0.9).
+        if ( isset( $validated['user_security']['password_expiration']['expire_days'] ) ) {
+            $validated['user_security']['password_expiration']['expire_days'] = max( 7, (int) $validated['user_security']['password_expiration']['expire_days'] );
+        }
+
         /*
          * The lock on the settings the shared files are built from is NOT applied
          * here, and that is a decision, not an oversight. The second cross review

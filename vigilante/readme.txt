@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.0.8
+Stable tag: 3.0.9
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -191,7 +191,7 @@ On-demand security audit built into the Dashboard. No external services, no acco
 
 * More than 50 checks across 6 categories: SSL/TLS, HTTP Headers, WP Exposure, Access & Auth, Sensitive Files and Internal Checks
 * Single 0-100 score with A-E grade, plus per-category breakdown and explanatory details for every check
-* 16 exclusive internal checks impossible from the outside: PHP end-of-life status, pending updates, inactive plugins, closed or removed plugins, Vigilant self-protection, file permissions, default salts detection, `wp_` table prefix, `admin` username, administrators without 2FA enrolled, module status, recent audit errors, last File Integrity scan result and whether audit alerts are configured
+* 17 exclusive internal checks impossible from the outside: PHP end-of-life status, PHP security fixes, pending updates, inactive plugins, closed or removed plugins, Vigilant self-protection, file permissions, default salts detection, `wp_` table prefix, `admin` username, administrators without 2FA enrolled, module status, recent audit errors, last File Integrity scan result and whether audit alerts are configured
 * DNS-only reputation lookup against Spamhaus ZEN, Barracuda BRBL and SpamCop SCBL (informational - listings are flagged but don't deduct from the score)
 * Two-phase scan: fast local checks appear in under a second, remote checks stream in as they complete
 * Weekly automatic scan with opt-in email alert if the score drops by 10+ points or a new critical check starts failing
@@ -342,7 +342,7 @@ Use the built-in header testing tool in the Security Headers tab, or visit secur
 
 = What is Security Check? =
 
-Security Check is an on-demand audit built into the Dashboard. It runs more than 50 checks across 6 categories (SSL/TLS, HTTP headers, WordPress exposure, access and authentication, sensitive files, and internal checks) and returns a 0–100 score with an A–E grade. Unlike external online scanners, it runs entirely on your server and has access to 16 exclusive internal checks: PHP end-of-life status, pending updates, closed/removed plugins, Vigilant self-protection, file permissions, default salts detection, administrators without 2FA enrolled, and more.
+Security Check is an on-demand audit built into the Dashboard. It runs more than 50 checks across 6 categories (SSL/TLS, HTTP headers, WordPress exposure, access and authentication, sensitive files, and internal checks) and returns a 0–100 score with an A–E grade. Unlike external online scanners, it runs entirely on your server and has access to 17 exclusive internal checks: PHP end-of-life status, PHP security fixes, pending updates, closed/removed plugins, Vigilant self-protection, file permissions, default salts detection, administrators without 2FA enrolled, and more.
 
 = Does Security Check send my data to an external service? =
 
@@ -544,6 +544,19 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 3.0.9 =
+Security Check now says when the PHP of the server lacks the fixes of PHP2Shell, the critical flaws of October 2026, and the firewall blacklist no longer accepts an address of the site itself, which stopped WP-Cron.
+
+* Improved: Security Check has a new row in Internal Checks, PHP security fixes, that compares the release of PHP, and not only its branch, with the critical security releases of PHP that Vigilant knows about. The first one is PHP2Shell (CVE-2026-109618 and CVE-2026-109619, October 2026), fixed in PHP 8.5.12, 8.4.27, 8.3.36 and 8.2.35. An older release of those branches fails, and so does a branch that no longer gets fixes. A release marked by a Linux distribution, which can carry fixes without changing its number, also on a branch PHP no longer fixes, and a test release are a warning, because the number cannot tell. Until now a site on PHP 8.5.3 passed, so a site with an older PHP gets a lower score until PHP is updated, and the weekly scan, where its email is switched on, reports the row as a new failing check.
+* Improved: the hidden login answers wp-login.php, wp-admin and the login shortcuts with one same page, the 404 page of the theme, as an address that does not exist gets it, so they cannot be told apart from a missing page. Until now wp-login.php showed the theme and wp-admin a plain page, and comparing them showed that something was there. Vigilant keeps a copy of that page, taken by asking the site for a missing address and renewed every day, after a theme switch and after updates; while there is none, every path gets the same plain page.
+* Fix: with a custom login URL, /login.php answered with a redirect to the hidden login address, because WordPress sends that address to the login page and Vigilant only blocked /login and /wp-login.php. It now gets the same not found page as the rest.
+* Fix: an address of the site itself could be put in the firewall blacklist: a loopback address, the address of the server or the one its domain points to. The requests WordPress sends to itself come from one of them, so WP-Cron stopped and the REST API test of Site Health failed with nothing on screen to say why. Saving the Firewall tab now leaves such an entry out, also one saved before, and says so in a second notice; the button of the Security Audit refuses it; and the Dashboard recommends removing one that is already saved.
+* Fix: on a hosting that disables gethostbynamel() or gethostbyname(), the blacklist checks of Security Check stopped it with a fatal error, and its weekly run with it. They now say that the hosting disabled that function of PHP and are skipped.
+* Fix: the password expiry setting could be saved at 0 days through an import or a request that skipped the limits of the field, and then every password with a date had expired. It can no longer be saved below 7 days, the minimum on screen, and a 0 saved before is read as 7.
+* Fix: where PHP counts its time limit in clock time, as on Windows, a File Integrity scan fitted to a short limit could start a request for checksums that waited longer than the time left, and the server stopped the scan before it saved its result. That wait now shrinks to the time left. Where PHP counts processor time, the time used by other tasks of the same scheduled run now counts too, so the closed plugins check does not start with less time ahead than it needs.
+* Fix: with the wp-includes folder linked from another place on the server, the alert about self-protection switched off by a filter could name a file of WordPress itself again.
+* Fix: with Content-Security-Policy in report-only mode, the Test Headers button said so twice.
+
 = 3.0.8 =
 Security Check tells a firewall verification screen, a stale cache and headers set only on files apart from a missing header. A File Integrity scan stopped by the server is now reported, and the scan fits the time limit of PHP.
 
@@ -623,22 +636,12 @@ The Dashboard shows one grade, the one of Security Check, on a stricter scale. I
 * Fix: when WordPress updated Vigilant in the background and the daily maintenance of Vigilant fell due in that same run, Vigilant took the update for a version change made outside the updater, wrote it down as such and could send a warning email. It now waits for the check it runs at the end of every update, and so do the other checks while WordPress is running its background updates in another process. An update is handled by the version that is being replaced, so this takes effect from the update that follows this one.
 * Fix: File Integrity reported as suspicious a call to the old PHP function that builds a function from a string when the call was only inside a comment, where plugins leave it next to the code that replaced it. Comments are no longer searched for it, and a live call is reported as before.
 
-= 3.0.4 =
-Fixes the expired password notice, which was missing when the password expired during an open session, lands the user at the top of the profile where the notice is, fixes a redirect loop for WooCommerce customers, and limits an account with an expired password to its own profile form.
-
-* Improved: when a password has expired, the user is taken to the top of their profile, where the notice says why, instead of straight to the password field with the notice out of sight above it. The notice now has a link to the field.
-* Fix: the notice that a password has expired was missing when it expired while the user was still logged in. The user was sent to the profile with no explanation, and the notice only appeared after logging in again.
-* Fix: on the last day before a password expires the warning notice was not shown, so the forced change arrived with no warning the day before.
-* Fix: in a WooCommerce store, an account with no access to the admin area, a customer for example, whose role is in Affected Roles was caught in a redirect loop when its password expired. WooCommerce sent it from the profile to My Account and Vigilant sent it back, so it could neither use the store nor change the password. That account is now let into its profile screen in the admin area while the change is pending, and only into that screen. The password is changed there, not in My Account, and once it is saved WooCommerce takes the account back to My Account as usual.
-* Fix: while a password change was pending, every request to the profile screen was let through, and that screen can be asked for other things: a plugin page, an importer, an action passed in the address, or the profile of another user for an account allowed to edit users. An account with an expired password could go on using those. Only its own profile form is let through now, to be shown or to be saved. On a network, the profile screens of the network admin and of the user dashboard lead to the profile of the site, where the notice is.
-* Fix: on a site whose WordPress Address and Site Address are on different hosts, a headless site for example, or whose address has accented or non-Latin letters saved as written, a user with an expired password was caught in a redirect loop. The redirect to the profile came out as a redirect to the dashboard, which sent the user to the profile again. It now reaches the profile.
-
 For older changelog entries, please check the [changelog.txt](https://plugins.svn.wordpress.org/vigilante/trunk/changelog.txt) file
 
 == Upgrade Notice ==
 
-= 3.0.8 =
-Security Check tells a firewall verification screen, a stale cache and headers set only on files apart from a missing header. A File Integrity scan stopped by the server is now reported, and the scan fits the time limit of PHP.
+= 3.0.9 =
+Security Check now says when the PHP of the server lacks the fixes of PHP2Shell, the critical flaws of October 2026, and the firewall blacklist no longer accepts an address of the site itself, which stopped WP-Cron.
 
 == Support ==
 

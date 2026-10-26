@@ -80,6 +80,24 @@ class Vigilante_SA_Category_Reputation {
 
         $results = array();
 
+        // The hosting can disable gethostbynamel(), and in PHP 8 a disabled
+        // function does not exist: calling it was a fatal error in the middle
+        // of Security Check and of its weekly run, the @ does not stop that
+        // (short blind look of 3.0.9, measured with disable_functions).
+        if ( ! function_exists( 'gethostbynamel' ) ) {
+            $results[] = Vigilante_SA_Check_Result::skip(
+                array(
+                    'id'       => 'reputation_overview',
+                    'category' => self::SLUG,
+                    'max'      => 0,
+                    'label'    => __( 'Site IP for blacklist queries', 'vigilante' ),
+                    'detail'   => __( 'The hosting has disabled gethostbynamel(), the PHP function that asks DNS, so the blacklists cannot be queried and these checks were skipped.', 'vigilante' ),
+                    'fix_link' => '',
+                )
+            );
+            return $results;
+        }
+
         $ip = $this->resolve_site_ip();
 
         // A site on a private or reserved address (a local install, a staging box
@@ -249,6 +267,9 @@ class Vigilante_SA_Category_Reputation {
      * @return string[] Empty when nothing came back.
      */
     private static function lookup( $hostname ) {
+        if ( ! function_exists( 'gethostbynamel' ) ) {
+            return array();
+        }
         $records = @gethostbynamel( $hostname ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
         return is_array( $records ) ? array_values( array_filter( $records, 'is_string' ) ) : array();
     }
@@ -327,9 +348,12 @@ class Vigilante_SA_Category_Reputation {
             return $host;
         }
 
-        $ip = @gethostbyname( $host ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
-        if ( $ip === $host ) {
-            return ''; // gethostbyname returns the input on failure.
+        // The same function as the blacklist lookups, so one guard covers both:
+        // gethostbyname() can be disabled on its own (since 3.0.9).
+        $found = self::lookup( $host );
+        $ip    = isset( $found[0] ) ? $found[0] : '';
+        if ( '' === $ip ) {
+            return '';
         }
         if ( ! filter_var( $ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4 ) ) {
             return ''; // DNSBLs we use are IPv4-only.

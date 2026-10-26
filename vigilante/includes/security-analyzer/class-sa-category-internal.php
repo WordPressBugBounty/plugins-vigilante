@@ -1,12 +1,15 @@
 <?php
 /**
- * Security Analyzer — Internal-exclusive category (40 pts).
+ * Security Analyzer — Internal-exclusive category (43 pts).
  *
  * The differential of this analyzer vs any external scanner. Each check
  * reads data that is impossible to observe from the outside.
  *
  * Checks:
  *  - php_version_eol (3)
+ *  - php_security_fixes (3)  ← v3.0.9: the release, not only the branch,
+ *                              against the critical PHP security releases
+ *                              this version knows about (PHP2Shell).
  *  - wp_core_updates (3)
  *  - plugin_updates (2)
  *  - theme_updates (1)
@@ -74,6 +77,7 @@ class Vigilante_SA_Category_Internal {
 
         $results   = array();
         $results[] = $this->check_php_version();
+        $results[] = $this->check_php_security_fixes();
         $results[] = $this->check_wp_core_updates();
         $results[] = $this->check_plugin_updates();
         $results[] = $this->check_theme_updates();
@@ -148,6 +152,264 @@ class Vigilante_SA_Category_Internal {
             __( 'PHP %1$s within support window (EOL %2$s).', 'vigilante' ),
             $branch,
             $table[ $branch ]
+        );
+        return Vigilante_SA_Check_Result::pass( $args );
+    }
+
+    /**
+     * Whether the running PHP has the fixes of the critical security releases this version knows about
+     *
+     * The row above only looks at the branch, so a PHP 8.5.3 passed it while
+     * PHP2Shell, fixed in 8.5.12, let anyone run code on the server. Nothing
+     * in WordPress says so either: the Serve Happy API behind the dashboard
+     * and Site Health answers by branch too (measured on 25 Oct 2026, it
+     * calls 8.5.3 and 8.1.33 secure).
+     *
+     * @since 3.0.9
+     *
+     * @return Vigilante_SA_Check_Result
+     */
+    private function check_php_security_fixes() {
+        return self::php_fixes_result( PHP_MAJOR_VERSION, PHP_MINOR_VERSION, PHP_RELEASE_VERSION, PHP_EXTRA_VERSION );
+    }
+
+    /**
+     * Critical PHP security releases known to this version of Vigilant, newest first
+     *
+     * For each one, the first release of every supported branch that carries
+     * the fix. A branch older than every branch listed gets no fix, because it
+     * was past its end of life when the fix came out, and a branch newer than
+     * every branch listed came out with it.
+     *
+     * Hardcoded like Vigilante_SA_Helpers::php_eol_table(), so Security Check
+     * stays offline. Source: the security announcements of
+     * https://www.php.net/. Add an entry with the Vigilant release that
+     * follows a critical security release of PHP, not for every monthly
+     * release: being one release behind is not a finding.
+     *
+     * Kept in this file and not in the helpers: the categories are read from
+     * disk when the analyzer is created, so in the cron run in which WordPress
+     * updates Vigilant this file can be new while a class loaded earlier is
+     * old (the fatal error of score_tone(), 3.0.5).
+     *
+     * @since 3.0.9
+     *
+     * @return array[] Each with 'name', 'cves' (string[]), 'date' (Y-m-d), 'what' (what the flaws allow) and 'fixed' (branch => first fixed release).
+     */
+    public static function php_security_fixes() {
+        return array(
+            array(
+                'name'  => 'PHP2Shell',
+                'cves'  => array( 'CVE-2026-109618', 'CVE-2026-109619' ),
+                'date'  => '2026-10-21',
+                'what'  => __( 'critical flaws that let anyone run code on the server', 'vigilante' ),
+                'fixed' => array(
+                    '8.2' => '8.2.35',
+                    '8.3' => '8.3.36',
+                    '8.4' => '8.4.27',
+                    '8.5' => '8.5.12',
+                ),
+            ),
+        );
+    }
+
+    /**
+     * Where a PHP release stands against a list of critical security releases
+     *
+     * @since 3.0.9
+     *
+     * @param int     $major   Major version.
+     * @param int     $minor   Minor version.
+     * @param int     $release Release within the branch.
+     * @param array[] $fixes   As php_security_fixes() returns them.
+     * @return array {
+     *     @type string     $state    'fixed'; 'behind', an older release of a branch that got every fix it lacks;
+     *                                or 'no_fix', a branch that did not get one of them.
+     *     @type string     $required For 'behind', the first release of the branch with every fix.
+     *     @type array|null $advisory The newest entry it lacks, or the newest entry when it lacks none.
+     * }
+     */
+    public static function php_fix_status( $major, $minor, $release, $fixes ) {
+        $branch  = (int) $major . '.' . (int) $minor;
+        $current = $branch . '.' . (int) $release;
+        $status  = array(
+            'state'    => 'fixed',
+            'required' => '',
+            'advisory' => null,
+        );
+        $newest  = null;
+        $missing = null;
+
+        foreach ( (array) $fixes as $advisory ) {
+            $fixed = ( isset( $advisory['fixed'] ) && is_array( $advisory['fixed'] ) ) ? $advisory['fixed'] : array();
+            if ( empty( $fixed ) ) {
+                continue;
+            }
+
+            if ( null === $newest ) {
+                $newest = $advisory;
+            }
+
+            if ( isset( $fixed[ $branch ] ) ) {
+                if ( version_compare( $current, $fixed[ $branch ], '>=' ) ) {
+                    continue;
+                }
+                if ( '' === $status['required'] || version_compare( $fixed[ $branch ], $status['required'], '>' ) ) {
+                    $status['required'] = $fixed[ $branch ];
+                }
+                if ( 'no_fix' !== $status['state'] ) {
+                    $status['state'] = 'behind';
+                }
+            } else {
+                $branches = array_map( 'strval', array_keys( $fixed ) );
+                usort( $branches, 'version_compare' );
+                if ( version_compare( $branch, end( $branches ), '>' ) ) {
+                    continue;
+                }
+                $status['state'] = 'no_fix';
+            }
+
+            if ( null === $missing ) {
+                $missing = $advisory;
+            }
+        }
+
+        $status['advisory'] = ( 'fixed' === $status['state'] ) ? $newest : $missing;
+
+        return $status;
+    }
+
+    /**
+     * The row for a given PHP release
+     *
+     * Public and static so a harness can ask about any release: the constants
+     * of the running PHP cannot be changed.
+     *
+     * Most fixes reach a site as a new release of PHP. Some Linux
+     * distributions apply them to the release they ship instead, and keep its
+     * number: Debian and Ubuntu add their own mark to it (PHP_EXTRA_VERSION),
+     * so a marked build below the fix, or on a branch PHP no longer fixes, is
+     * a warning that the number cannot tell, not a failure. A distribution
+     * that adds no mark cannot be told apart from an old release, and the
+     * failure says how to check.
+     *
+     * @since 3.0.9
+     *
+     * @param int    $major   PHP_MAJOR_VERSION.
+     * @param int    $minor   PHP_MINOR_VERSION.
+     * @param int    $release PHP_RELEASE_VERSION.
+     * @param string $extra   PHP_EXTRA_VERSION.
+     * @return Vigilante_SA_Check_Result
+     */
+    public static function php_fixes_result( $major, $minor, $release, $extra ) {
+        $branch  = (int) $major . '.' . (int) $minor;
+        $version = $branch . '.' . (int) $release . (string) $extra;
+        $status  = self::php_fix_status( $major, $minor, $release, self::php_security_fixes() );
+        $item    = $status['advisory'];
+
+        $args = array(
+            'id'       => 'php_security_fixes',
+            'category' => self::SLUG,
+            'max'      => 3,
+            'label'    => __( 'PHP security fixes', 'vigilante' ),
+            'fix_link' => '',
+            'data'     => array(
+                'php_full' => $version,
+                'state'    => $status['state'],
+                'required' => $status['required'],
+            ),
+        );
+
+        if ( ! is_array( $item ) ) {
+            $args['detail'] = __( 'Vigilant has no critical PHP security release to compare with.', 'vigilante' );
+            return Vigilante_SA_Check_Result::info( $args );
+        }
+
+        $name = (string) $item['name'];
+        $cves = implode( ', ', (array) $item['cves'] );
+        $what = (string) $item['what'];
+        $args['data']['advisory'] = $name;
+
+        // A test release (8.5.12RC1, 8.6.0RC3) carries the number of the
+        // release it leads to; any other mark is a build of a distribution.
+        $test_release = (bool) preg_match( '/^-?(dev|alpha|beta|rc)/i', (string) $extra );
+        $marked       = '' !== (string) $extra && ! $test_release;
+
+        // Some distributions keep fixing a branch after PHP stops: Ubuntu
+        // 22.04 ships 8.1 with its own mark (8.1.2-1ubuntu2.23), and saying
+        // that it lacks the fix was not known to be true (first blind review
+        // of 3.0.9). The row about the branch already fails it: every branch
+        // Vigilant runs on (7.4 and later) is in php_eol_table().
+        if ( 'no_fix' === $status['state'] && $marked ) {
+            $args['detail'] = sprintf(
+                /* translators: 1: PHP version as PHP reports it, 2: name of the security release like PHP2Shell, 3: CVE identifiers, 4: what the flaws allow, like "critical flaws that let anyone run code on the server" */
+                __( 'The version number of PHP %1$s carries an addition by whoever built it, as Linux distributions do, and some keep fixing a branch after PHP stops. So the number cannot tell whether this PHP has the fixes of %2$s (%3$s), %4$s, which PHP did not publish for this branch. Ask your host to confirm it, or move to a supported branch.', 'vigilante' ),
+                $version,
+                $name,
+                $cves,
+                $what
+            );
+            return Vigilante_SA_Check_Result::warn( $args );
+        }
+
+        if ( 'no_fix' === $status['state'] ) {
+            $args['detail'] = sprintf(
+                /* translators: 1: PHP branch like 8.1, 2: name of the security release like PHP2Shell, 3: CVE identifiers, 4: what the flaws allow, like "critical flaws that let anyone run code on the server" */
+                __( 'PHP %1$s no longer receives security fixes, so it does not have those of %2$s (%3$s), %4$s. Update to a supported branch.', 'vigilante' ),
+                $branch,
+                $name,
+                $cves,
+                $what
+            );
+            return Vigilante_SA_Check_Result::fail( $args );
+        }
+
+        // A fix can arrive in any test release or only in the stable one.
+        if ( $test_release ) {
+            $args['detail'] = sprintf(
+                /* translators: 1: PHP version as PHP reports it, 2: name of the security release like PHP2Shell, 3: CVE identifiers, 4: what the flaws allow, like "critical flaws that let anyone run code on the server" */
+                __( 'PHP %1$s is a test release, and its number cannot tell whether it has the fixes of %2$s (%3$s), %4$s. Use a stable release of PHP on a live site.', 'vigilante' ),
+                $version,
+                $name,
+                $cves,
+                $what
+            );
+            return Vigilante_SA_Check_Result::warn( $args );
+        }
+
+        if ( 'behind' === $status['state'] && $marked ) {
+            $args['detail'] = sprintf(
+                /* translators: 1: PHP version as PHP reports it, 2: first release of its branch with the fix, 3: name of the security release like PHP2Shell, 4: CVE identifiers, 5: what the flaws allow, like "critical flaws that let anyone run code on the server" */
+                __( 'The version number of PHP %1$s carries an addition by whoever built it, as Linux distributions do, and they can apply fixes without changing the number. So the number cannot tell whether this PHP has the fixes of %3$s (%4$s), %5$s, which reached its branch in %2$s. Ask your host to confirm it.', 'vigilante' ),
+                $version,
+                $status['required'],
+                $name,
+                $cves,
+                $what
+            );
+            return Vigilante_SA_Check_Result::warn( $args );
+        }
+
+        if ( 'behind' === $status['state'] ) {
+            $args['detail'] = sprintf(
+                /* translators: 1: PHP version, 2: first release of its branch with the fix, 3: name of the security release like PHP2Shell, 4: CVE identifiers, 5: what the flaws allow, like "critical flaws that let anyone run code on the server" */
+                __( 'PHP %1$s is older than %2$s, the first release of its branch with the fixes of %3$s (%4$s), %5$s. Update PHP, or ask your host to. Some Linux distributions apply fixes without changing the version number: your host can tell you whether yours has them.', 'vigilante' ),
+                $version,
+                $status['required'],
+                $name,
+                $cves,
+                $what
+            );
+            return Vigilante_SA_Check_Result::fail( $args );
+        }
+
+        $args['detail'] = sprintf(
+            /* translators: 1: PHP version, 2: name of the security release like PHP2Shell, 3: CVE identifiers, 4: month and year of that release */
+            __( 'PHP %1$s has the fixes of %2$s (%3$s), the last critical security release of PHP that this version of Vigilant knows about (%4$s).', 'vigilante' ),
+            $version,
+            $name,
+            $cves,
+            wp_date( 'F Y', (int) strtotime( $item['date'] . ' 12:00:00 UTC' ) )
         );
         return Vigilante_SA_Check_Result::pass( $args );
     }

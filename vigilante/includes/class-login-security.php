@@ -20,6 +20,37 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Vigilante_Login_Security {
 
     /**
+     * Option with the copy of the 404 page of the site (send_not_found())
+     *
+     * @since 3.0.9
+     */
+    const NOT_FOUND_OPTION = 'vigilante_hidden_404_copy';
+
+    /**
+     * Single event that takes that copy
+     *
+     * @since 3.0.9
+     */
+    const NOT_FOUND_EVENT = 'vigilante_capture_not_found';
+
+    /**
+     * Largest copy kept, in bytes: a 404 page is not this big, and the copy is
+     * read on every blocked request
+     *
+     * @since 3.0.9
+     */
+    const NOT_FOUND_MAX_BYTES = 300000;
+
+    /**
+     * Small option with when the copy was last asked for and taken, and for
+     * which theme and address: what maybe_schedule_not_found_copy() reads
+     * instead of the copy
+     *
+     * @since 3.0.9
+     */
+    const NOT_FOUND_STATE = 'vigilante_hidden_404_state';
+
+    /**
      * Settings instance
      *
      * @var Vigilante_Settings
@@ -180,6 +211,17 @@ class Vigilante_Login_Security {
         // wp_redirect_admin_locations() (1000), which would 302 the
         // shortcut to wp_login_url() — the hidden URL — leaking the slug.
         add_action( 'template_redirect', array( $this, 'block_login_shortcuts' ), 1 );
+
+        // The copy of the 404 of the theme that every blocked path serves
+        // (send_not_found()): taken by a scheduled event, renewed by the daily
+        // maintenance, after a theme switch or an update, and when an
+        // administrator opens the Dashboard or a page of Vigilant and it is
+        // missing or old.
+        add_action( self::NOT_FOUND_EVENT, array( __CLASS__, 'capture_not_found_copy' ) );
+        add_action( 'switch_theme', array( __CLASS__, 'schedule_not_found_copy' ) );
+        add_action( 'upgrader_process_complete', array( __CLASS__, 'schedule_not_found_copy' ) );
+        add_action( 'load-index.php', array( __CLASS__, 'maybe_schedule_not_found_copy' ) );
+        add_action( 'load-toplevel_page_vigilante', array( __CLASS__, 'maybe_schedule_not_found_copy' ) );
     }
 
     /**
@@ -589,7 +631,7 @@ class Vigilante_Login_Security {
     }
 
     /**
-     * Block WordPress' pretty-URL login shortcuts (/login, /wp-login.php).
+     * Block WordPress' pretty-URL login shortcuts (/login, /login.php, /wp-login.php).
      *
      * Core's wp_redirect_admin_locations() (template_redirect, priority
      * 1000) turns a 404 on those paths into wp_redirect( wp_login_url() ).
@@ -608,7 +650,20 @@ class Vigilante_Login_Security {
 
         $request = strtolower( $this->get_request_path() );
 
-        if ( ! in_array( $request, array( 'login', 'wp-login.php' ), true ) ) {
+        // Every address wp_redirect_admin_locations() sends to wp_login_url()
+        // (wp-includes/canonical.php:1059-1068 in 7.1.3). /login.php was not
+        // on this list until 3.0.9 and got a 302 to the hidden slug (first
+        // blind review of B107); site_url( 'login' ) differs from home with
+        // WordPress in its own folder.
+        $shortcuts = array( 'login', 'login.php', 'wp-login.php' );
+        $home_path = (string) wp_parse_url( home_url(), PHP_URL_PATH );
+        $site_path = (string) wp_parse_url( site_url( 'login' ), PHP_URL_PATH );
+        if ( '' !== $home_path && 0 === strpos( $site_path, $home_path ) ) {
+            $site_path = substr( $site_path, strlen( $home_path ) );
+        }
+        $shortcuts[] = strtolower( trim( $site_path, '/' ) );
+
+        if ( ! in_array( $request, $shortcuts, true ) ) {
             return;
         }
 
@@ -836,101 +891,209 @@ class Vigilante_Login_Security {
     }
 
     /**
-     * Show 404 page (full version with theme template)
-     * Use this only when WordPress is fully loaded (login_init, template_redirect, etc.)
-     */
-    private function show_404() {
-
-        global $wp_query;
-
-        // Set 404 status
-        status_header( 404 );
-        nocache_headers();
-
-        // $wp_query always exists by now: wp-settings.php creates it before
-        // 'init' fires, and serve_404() only routes here once 'wp_loaded' has
-        // passed. Earlier versions called wp() when it was missing, a branch
-        // that was never reachable and that misled a performance analysis into
-        // blaming the main query for the cost of the render.
-        if ( isset( $wp_query ) && is_object( $wp_query ) ) {
-            $wp_query->set_404();
-        }
-
-        // Try to get the theme's 404 template
-        $template = get_query_template( '404' );
-
-
-        if ( $template && file_exists( $template ) ) {
-            include $template;
-            exit;
-        }
-
-        // Block themes have no 404.php; resolve their 404 template the same
-        // way core's template-loader does, so those sites also get the
-        // theme's 404 instead of the plain fallback page.
-        if ( function_exists( 'locate_block_template' ) ) {
-            $template = locate_block_template( '', '404', array( '404' ) );
-
-            if ( $template && file_exists( $template ) ) {
-                include $template;
-                exit;
-            }
-        }
-
-        // Fallback to simple 404
-        $this->show_404_simple();
-    }
-
-    /**
-     * Serve the hidden-URL 404 through a single decision point.
+     * Serve the hidden-URL 404 through a single decision point
      *
-     * All blocking paths call this helper so the response never diverges by
-     * accident. Rendering a theme template is only safe once 'wp_loaded' has
-     * fired: that is the point the rest of the stack assumes has passed
-     * before any template runs, and WooCommerce for one does not set up the
-     * cart until then. block_wp_login_access() runs at 'login_init' and
-     * block_login_shortcuts() at 'template_redirect', both after 'wp_loaded',
-     * so those keep the themed 404; block_wp_admin_access() runs inside
-     * 'init' and gets the simple page.
-     *
-     * 2.9.3 gated this on 'after_setup_theme', which has already fired by
-     * 'init'. The wp-admin path therefore included the theme's 404.php from
-     * inside 'init' on every blocked request, filling debug.log with
-     * _doing_it_wrong notices and costing a full page render per rejection.
+     * Every blocking path ends here, so the answer never diverges by
+     * accident. Since 3.0.9 that answer is the same on all of them: the copy
+     * of the 404 page of the site, theme included (send_not_found()). Until
+     * then wp-login.php and the shortcuts rendered the theme and wp-admin
+     * served a plain page, so whoever compared the two knew there was
+     * something at those addresses (decision of Fernando, 26 Oct 2026).
      *
      * @since 2.9.3
      */
     private function serve_404() {
-        if ( did_action( 'wp_loaded' ) && ! is_admin() ) {
-            $this->show_404();
-        }
-
-        $this->show_404_simple();
+        self::send_not_found();
     }
 
     /**
-     * Show simple 404 page (for early execution before WordPress is fully loaded)
-     * Use this when intercepting requests very early (plugins_loaded, admin init, etc.)
+     * Ask the site for an address that does not exist and keep its answer
+     *
+     * What a visitor without a session gets for a missing page: the body, the
+     * two headers WordPress itself sends with it (Content-Type and the Link to
+     * the REST API) and X-UA-Compatible, which some themes add. It is only
+     * kept when it is a 404 page in HTML and not the screen of a firewall, of
+     * an anti-bot service or of Under Attack; when it is not, the copy there
+     * was stays, and with none every blocked path serves the plain page.
+     *
+     * The address carries a random token, and send_not_found() puts the path
+     * that was asked for in its place, for themes that print it. The token
+     * does not name the plugin, so a theme that prints it in its own way
+     * gives nothing away (first blind review of B107).
+     *
+     * Every attempt is written down in NOT_FOUND_STATE, so a capture that
+     * keeps failing is not asked for again before an hour.
+     *
+     * @since 3.0.9
+     *
+     * @return bool Whether a copy was taken.
      */
-    private function show_404_simple() {
-        status_header( 404 );
-        nocache_headers();
-        
-        // Use wp_die which is the WordPress standard for early termination
-        wp_die(
-            sprintf(
-                '<h1>%s</h1><p>%s</p><p><a href="%s">%s</a></p>',
-                esc_html__( 'Page not found', 'vigilante' ),
-                esc_html__( 'The page you are looking for does not exist.', 'vigilante' ),
-                esc_url( home_url( '/' ) ),
-                esc_html__( 'Go to homepage', 'vigilante' )
-            ),
-            esc_html__( '404 Not Found', 'vigilante' ),
+    public static function capture_not_found_copy() {
+        $state            = get_option( self::NOT_FOUND_STATE );
+        $state            = is_array( $state ) ? $state : array();
+        $state['attempt'] = time();
+        update_option( self::NOT_FOUND_STATE, $state, false );
+
+        // The theme and the address are those of the moment the page is asked
+        // for: read after the request, a theme switch during its 5 seconds
+        // would label the old page with the new theme (short blind look of B107).
+        $theme = (string) get_option( 'stylesheet' );
+        $home  = (string) get_option( 'home' );
+        $token = 'zz' . strtolower( wp_generate_password( 14, false, false ) );
+        $url   = home_url( '/' . $token . '/' );
+
+        $response = wp_remote_get(
+            $url,
             array(
-                'response'  => 404,
-                'back_link' => false,
+                'timeout'     => 5,
+                'redirection' => 0,
+                // What WordPress does when it asks itself (spawn_cron(), Site Health).
+                'sslverify'   => apply_filters( 'https_local_ssl_verify', false, $url ), // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- The filter of WordPress itself, applied as core applies it (wp-includes/cron.php:993).
+                'headers'     => array(
+                    'User-Agent' => 'Vigilant-Security-Analyzer/1.0',
+                ),
             )
         );
+
+        if ( is_wp_error( $response ) || 404 !== (int) wp_remote_retrieve_response_code( $response ) ) {
+            return false;
+        }
+
+        $body = (string) wp_remote_retrieve_body( $response );
+        $type = self::header_value( wp_remote_retrieve_header( $response, 'content-type' ) );
+        if ( '' === $body || strlen( $body ) > self::NOT_FOUND_MAX_BYTES || 0 !== stripos( $type, 'text/html' ) ) {
+            return false;
+        }
+
+        if ( ! class_exists( 'Vigilante_SA_Helpers' ) ) {
+            require_once VIGILANTE_INCLUDES_DIR . 'security-analyzer/class-sa-helpers.php';
+        }
+        if ( method_exists( 'Vigilante_SA_Helpers', 'challenge_of' ) ) {
+            $headers = wp_remote_retrieve_headers( $response );
+            $headers = is_object( $headers ) && method_exists( $headers, 'getAll' ) ? $headers->getAll() : (array) $headers;
+            if ( '' !== Vigilante_SA_Helpers::challenge_of( 404, $headers, $body ) ) {
+                return false;
+            }
+        }
+
+        $links = wp_remote_retrieve_header( $response, 'link' );
+        $links = array_values( array_filter( array_map( array( __CLASS__, 'header_value' ), (array) $links ) ) );
+        $ua    = self::header_value( wp_remote_retrieve_header( $response, 'x-ua-compatible' ) );
+
+        $saved = update_option(
+            self::NOT_FOUND_OPTION,
+            array(
+                'body'    => $body,
+                'type'    => $type,
+                'links'   => $links,
+                'extra'   => '' !== $ua ? array( 'X-UA-Compatible' => $ua ) : array(),
+                'token'   => $token,
+                'theme'   => $theme,
+                'home'    => $home,
+                'taken'   => time(),
+            ),
+            false
+        );
+
+        // The state only says fresh when the copy is really there: a body the
+        // database refuses would have left a day with nothing stored and
+        // nothing asked for.
+        if ( ! $saved ) {
+            return false;
+        }
+
+        $state['taken'] = time();
+        $state['theme'] = $theme;
+        $state['home']  = $home;
+        update_option( self::NOT_FOUND_STATE, $state, false );
+
+        return true;
+    }
+
+    /**
+     * A header value from the answer of the site, on one line
+     *
+     * A header that came more than once arrives as an array; its first value
+     * is the one taken (a repeated Content-Type gave no copy at all, first
+     * blind review of B107).
+     *
+     * @since 3.0.9
+     *
+     * @param mixed $value Value.
+     * @return string
+     */
+    private static function header_value( $value ) {
+        if ( is_array( $value ) ) {
+            $value = reset( $value );
+        }
+        return is_string( $value ) ? trim( (string) preg_replace( '/[\r\n]+/', ' ', $value ) ) : '';
+    }
+
+    /**
+     * Ask for a new copy in the background
+     *
+     * @since 3.0.9
+     */
+    public static function schedule_not_found_copy() {
+        if ( ! wp_next_scheduled( self::NOT_FOUND_EVENT ) ) {
+            wp_schedule_single_event( time(), self::NOT_FOUND_EVENT );
+        }
+    }
+
+    /**
+     * On the Dashboard or a page of Vigilant, ask for a copy when there is
+     * none for the current theme and address, or it is more than a day old
+     *
+     * The daily maintenance renews it too; this covers the first day after
+     * turning the hidden login on or updating Vigilant, and the subsites of a
+     * network. It reads only the small NOT_FOUND_STATE, never the copy, and
+     * it does not ask again within an hour of an attempt, so a capture that
+     * keeps failing costs one request an hour at most (first blind review of
+     * B107: it ran on every page of wp-admin and asked again every minute).
+     *
+     * @since 3.0.9
+     */
+    public static function maybe_schedule_not_found_copy() {
+        if ( wp_doing_ajax() || ! current_user_can( 'manage_options' ) ) {
+            return;
+        }
+        $state = get_option( self::NOT_FOUND_STATE );
+        $state = is_array( $state ) ? $state : array();
+        if ( ! empty( $state['attempt'] ) && ( time() - (int) $state['attempt'] ) < HOUR_IN_SECONDS ) {
+            return;
+        }
+        $fresh = ! empty( $state['taken'] ) && ( time() - (int) $state['taken'] ) <= DAY_IN_SECONDS
+            && isset( $state['theme'], $state['home'] )
+            && (string) get_option( 'stylesheet' ) === $state['theme']
+            && (string) get_option( 'home' ) === $state['home'];
+        if ( ! $fresh ) {
+            self::schedule_not_found_copy();
+        }
+    }
+
+    /**
+     * Whether a copy still describes the 404 page of this site
+     *
+     * The theme and the address of the site are compared with the live
+     * options, so a theme switch by any route falls back to the plain page.
+     * A copy more than a week old is not served either: one that stopped
+     * being renewed (captures that keep failing, a subsite nobody opens) would
+     * go on serving old asset addresses, or a script a cleanup removed since
+     * (first blind review of B107).
+     *
+     * @since 3.0.9
+     *
+     * @param mixed $copy What NOT_FOUND_OPTION holds.
+     * @return bool
+     */
+    private static function not_found_copy_is_valid( $copy ) {
+        return is_array( $copy )
+            && isset( $copy['body'], $copy['type'], $copy['token'], $copy['theme'], $copy['home'], $copy['taken'] )
+            && is_string( $copy['body'] ) && '' !== $copy['body']
+            && is_string( $copy['token'] ) && strlen( $copy['token'] ) >= 8
+            && ( time() - (int) $copy['taken'] ) <= WEEK_IN_SECONDS
+            && (string) get_option( 'stylesheet' ) === $copy['theme']
+            && (string) get_option( 'home' ) === $copy['home'];
     }
 
     /**
@@ -1579,9 +1742,6 @@ class Vigilante_Login_Security {
 
         self::log_early_hidden_admin_attempt();
 
-        status_header( 404 );
-        nocache_headers();
-
         /*
          * Deliberately not translated. This runs on plugins_loaded, where asking
          * for a translation triggers the just in time text domain notice of
@@ -1597,13 +1757,169 @@ class Vigilante_Login_Security {
          * and left a fatal error in the log on every visit (B100, 19 Oct 2026).
          * The page below goes through no template filter: only status_header()
          * and nocache_headers() run filters of their own, as they did before.
+         * Since 3.0.9 it is the copy of the 404 page of the site, replayed
+         * without running any template either (send_not_found()).
          */
+        self::send_not_found();
+    }
+
+    /**
+     * The 404 of the hidden login: the copy of the 404 page of the site
+     *
+     * The same answer on every blocked path, early or late, so wp-login.php,
+     * wp-admin and an address that does not exist cannot be told apart by
+     * their page (B107, decision of Fernando, 26 Oct 2026). The copy is
+     * replayed as it was taken, with no template run and no filter of the
+     * theme, which keeps the early path as cheap as before and out of the
+     * reach of what broke it with WPML (B100). The token of the address it
+     * was taken from is replaced with the path asked for, escaped. With no
+     * copy for the current theme and address, the plain page, also the same
+     * on every path.
+     *
+     * Headers that other plugins send from PHP on a real 404 (send_headers)
+     * are not replayed: only the two WordPress sends itself.
+     *
+     * @since 3.0.9
+     */
+    private static function send_not_found() {
+        $copy = get_option( self::NOT_FOUND_OPTION );
+        if ( ! self::not_found_copy_is_valid( $copy ) ) {
+            self::send_plain_404();
+        }
+
+        status_header( 404 );
+        nocache_headers();
+
+        self::keep_only_clearing_cookies();
+
+        // Guarded like status_header(): with output already sent, header()
+        // would add a warning to the log on every visit.
+        if ( ! headers_sent() ) {
+            header( 'Content-Type: ' . self::header_value( $copy['type'] ) );
+            foreach ( (array) ( isset( $copy['links'] ) ? $copy['links'] : array() ) as $link ) {
+                $link = self::header_value( $link );
+                if ( '' !== $link ) {
+                    header( 'Link: ' . $link, false );
+                }
+            }
+            if ( isset( $copy['extra']['X-UA-Compatible'] ) && '' !== self::header_value( $copy['extra']['X-UA-Compatible'] ) ) {
+                header( 'X-UA-Compatible: ' . self::header_value( $copy['extra']['X-UA-Compatible'] ) );
+            }
+        }
+
+        // Themes that print the address that was not found print the token.
+        // The path goes in with every character outside letters, digits and
+        // / . _ ~ - written as %XX, which is safe in text, in an attribute, in
+        // a script and in a URL alike: esc_html() alone was not enough where
+        // the browser decodes entities before running script, an inline event
+        // handler or a javascript: address (first blind review of B107). One
+        // pass and in any case, so a theme that capitalises the token does not
+        // leave it in the page, and a path that carries it is not expanded
+        // again. A trailing slash is kept only when the request had one.
+        $path    = (string) strtok( Vigilante_IP_Utils::request_uri(), '?#' );
+        $trimmed = (string) preg_replace_callback(
+            '~[^A-Za-z0-9/._\~%-]~',
+            function ( $c ) {
+                return rawurlencode( $c[0] );
+            },
+            trim( $path, '/' )
+        );
+        $slash   = ( '' !== $trimmed && '/' === substr( $path, -1 ) ) ? '/' : '';
+        $body    = preg_replace_callback(
+            '~' . preg_quote( (string) $copy['token'], '~' ) . '(/?)~i',
+            function ( $m ) use ( $trimmed, $slash ) {
+                return esc_html( $trimmed ) . ( '' !== $m[1] ? $slash : '' );
+            },
+            $copy['body']
+        );
+        // PCRE gives up with null, not an empty string: the plain page then,
+        // never a blank 404.
+        if ( ! is_string( $body ) ) {
+            self::send_plain_404();
+        }
+
+        // A whole page, scripts and styles included, that no escaping function
+        // can pass through unchanged. Exception to the rule of never silencing
+        // a security sniff, decided by Fernando on 26 Oct 2026 for B107.
+        echo $body; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- The 404 page this same site served to a visitor without a session (capture_not_found_copy()), replayed as it was; the only part of this request in it is the path, escaped with esc_html() above.
+        exit;
+    }
+
+    /**
+     * Leave in the answer only the cookies that clear one
+     *
+     * A missing page sends no cookie, and wp-login.php sends some before
+     * login_init: wordpress_test_cookie always and wp_lang with ?wp_lang=,
+     * which told a blocked wp-login.php apart (first blind review of B107 and
+     * the short looks that followed). The only reason to keep a cookie is the
+     * one another plugin sends to clear a session before the block, a session
+     * timeout that sends the visitor to the login page: without it the
+     * browser kept the good cookie. So a cookie stays only when it is already
+     * expired (Max-Age of 0 or less, or an Expires in the past).
+     *
+     * @since 3.0.9
+     */
+    private static function keep_only_clearing_cookies() {
+        if ( headers_sent() ) {
+            return;
+        }
+        $keep = array();
+        foreach ( headers_list() as $line ) {
+            if ( 0 !== stripos( $line, 'Set-Cookie:' ) ) {
+                continue;
+            }
+            // A Max-Age wins over Expires, and of several the last counts, as
+            // browsers read them; one that is not a whole number is ignored,
+            // as they ignore it (max-age=0x is no clearing cookie; last short
+            // blind look of B107).
+            if ( preg_match_all( '/;\s*max-age\s*=\s*(-?\d+)\s*(?=;|$)/i', $line, $m ) ) {
+                if ( (int) end( $m[1] ) <= 0 ) {
+                    $keep[] = $line;
+                }
+                continue;
+            }
+            if ( preg_match( '/;\s*expires=([^;]+)/i', $line, $m ) ) {
+                $when = strtotime( trim( $m[1] ) );
+                if ( false !== $when && $when < time() ) {
+                    $keep[] = $line;
+                }
+            }
+        }
+        header_remove( 'Set-Cookie' );
+        foreach ( $keep as $line ) {
+            header( $line, false );
+        }
+    }
+
+    /**
+     * The plain 404 page of the hidden login, the same on every path
+     *
+     * Until 3.0.9 the page of the early path and the one of show_404_simple() (now gone),
+     * written with wp_die(), translated and with a link, did not look alike,
+     * and a bot with a made-up session cookie, which skips the early path,
+     * could see both (fifth blind review of 3.0.8). Not translated and with no
+     * template filter, for the reasons given in
+     * maybe_block_hidden_admin_early(). The character set is the one of the
+     * site, as wp_die() writes it.
+     *
+     * @since 3.0.9
+     */
+    private static function send_plain_404() {
+        status_header( 404 );
+        nocache_headers();
+        self::keep_only_clearing_cookies();
+
+        $charset = preg_replace( '/[^A-Za-z0-9_-]/', '', (string) get_option( 'blog_charset' ) );
+        if ( '' === $charset ) {
+            $charset = 'UTF-8';
+        }
+
         // Guarded like status_header() and wp_die(): with output already sent,
         // header() would add a warning to the log on every visit.
         if ( ! headers_sent() ) {
-            header( 'Content-Type: text/html; charset=utf-8' );
+            header( 'Content-Type: text/html; charset=' . $charset );
         }
-        echo '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="robots" content="noindex, nofollow"><meta name="viewport" content="width=device-width"><title>404 Not Found</title></head><body><h1>Page not found</h1><p>The page you are looking for does not exist.</p></body></html>';
+        echo '<!DOCTYPE html><html><head><meta charset="' . esc_attr( $charset ) . '"><meta name="robots" content="noindex, nofollow"><meta name="viewport" content="width=device-width"><title>404 Not Found</title></head><body><h1>Page not found</h1><p>The page you are looking for does not exist.</p></body></html>';
         exit;
     }
 

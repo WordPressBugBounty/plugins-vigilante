@@ -906,4 +906,110 @@ class Vigilante_IP_Utils {
 
         return esc_url_raw( wp_unslash( $_SERVER['REQUEST_URI'] ) );
     }
+
+    /**
+     * Addresses of this site itself
+     *
+     * The loopback addresses, the ones the web server says it answers on
+     * (SERVER_ADDR, and LOCAL_ADDR on IIS) and, when asked, the IPv4 addresses
+     * the host of the site address resolves to. The requests WordPress sends
+     * to itself, such as the REST API test of Site Health and the call to
+     * wp-cron.php, come from one of them, so a blacklist entry that matches
+     * one stops WordPress from reaching itself. Until 3.0.9 nothing kept such
+     * an entry out, and a site that had blacklisted its own server had WP-Cron
+     * stopped without a word (B104).
+     *
+     * Behind NAT or a CDN none of them has to be the address a request to
+     * itself arrives from, so this backs a warning and never a decision about
+     * a request. Every value comes from the server or from DNS, none from the
+     * request.
+     *
+     * @since 3.0.9
+     *
+     * @param bool $resolve Whether to look up the host of the site in DNS, which can take a moment.
+     * @return string[] Valid addresses, without repeats.
+     */
+    public static function own_site_addresses( $resolve = true ) {
+        $addresses = array( '127.0.0.1', '::1' );
+
+        if ( isset( $_SERVER['SERVER_ADDR'] ) && is_string( $_SERVER['SERVER_ADDR'] ) ) {
+            $addresses[] = trim( sanitize_text_field( wp_unslash( $_SERVER['SERVER_ADDR'] ) ) );
+        }
+        if ( isset( $_SERVER['LOCAL_ADDR'] ) && is_string( $_SERVER['LOCAL_ADDR'] ) ) {
+            $addresses[] = trim( sanitize_text_field( wp_unslash( $_SERVER['LOCAL_ADDR'] ) ) );
+        }
+
+        $host = wp_parse_url( home_url(), PHP_URL_HOST );
+        if ( $resolve && is_string( $host ) && '' !== $host ) {
+            $literal = trim( $host, '[]' );
+            if ( false !== filter_var( $literal, FILTER_VALIDATE_IP ) ) {
+                $addresses[] = $literal;
+            } else {
+                $addresses = array_merge( $addresses, self::resolve_own_host( $host ) );
+            }
+        }
+
+        $valid = array();
+        foreach ( $addresses as $address ) {
+            if ( false !== filter_var( $address, FILTER_VALIDATE_IP ) && ! in_array( $address, $valid, true ) ) {
+                $valid[] = $address;
+            }
+        }
+
+        return $valid;
+    }
+
+    /**
+     * IPv4 addresses the host of the site resolves to, remembered for a while
+     *
+     * The Dashboard asks on every view while the blacklist has entries, and a
+     * lookup waits for the resolver, its whole timeout each time when DNS is
+     * broken. And the hosting can disable gethostbynamel(): in PHP 8 a disabled
+     * function does not exist, so calling it was a fatal error on the
+     * Dashboard and when saving the Firewall tab (first blind review of 3.0.9,
+     * measured with disable_functions). Twelve hours for an answer, ten
+     * minutes for none.
+     *
+     * @since 3.0.9
+     *
+     * @param string $host Host name.
+     * @return string[]
+     */
+    private static function resolve_own_host( $host ) {
+        $key    = 'vigilante_own_ips_' . md5( strtolower( (string) $host ) );
+        $cached = get_transient( $key );
+        if ( is_array( $cached ) ) {
+            return $cached;
+        }
+
+        $found = function_exists( 'gethostbynamel' ) ? gethostbynamel( (string) $host ) : false;
+        $found = is_array( $found ) ? array_values( array_filter( $found, 'is_string' ) ) : array();
+        set_transient( $key, $found, empty( $found ) ? 10 * MINUTE_IN_SECONDS : 12 * HOUR_IN_SECONDS );
+
+        return $found;
+    }
+
+    /**
+     * Entries of a list of patterns that match any of the given addresses
+     *
+     * @since 3.0.9
+     *
+     * @param array    $list      Patterns, in any form matches() accepts.
+     * @param string[] $addresses Addresses to test.
+     * @return string[] The entries that match, in the order of the list.
+     */
+    public static function entries_matching( $list, $addresses ) {
+        $hits = array();
+
+        foreach ( (array) $list as $entry ) {
+            foreach ( (array) $addresses as $address ) {
+                if ( self::matches( (string) $address, (string) $entry ) ) {
+                    $hits[] = (string) $entry;
+                    break;
+                }
+            }
+        }
+
+        return $hits;
+    }
 }

@@ -193,6 +193,8 @@ class Vigilante_Deactivator {
         wp_unschedule_hook( 'vigilante_plugin_status_check' );
         // Post-update verification single events (scheduled with per-update args).
         wp_unschedule_hook( 'vigilante_fi_postupdate_verify' );
+        // The copy of the 404 page of the hidden login (since 3.0.9).
+        wp_unschedule_hook( 'vigilante_capture_not_found' );
     }
 
     /**

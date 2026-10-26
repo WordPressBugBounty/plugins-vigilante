@@ -1297,6 +1297,37 @@ class Vigilante_Admin {
             );
         }
 
+        // An address of the site in the blacklist stops WP-Cron and fails the
+        // REST API test of Site Health, and saving the tab now keeps one out,
+        // but an entry stored before 3.0.9 or imported stays until somebody
+        // says so (B104). The DNS lookup runs only when the list has entries.
+        $vg_blacklist = isset( $options['firewall']['ip_blacklist'] ) ? (array) $options['firewall']['ip_blacklist'] : array();
+        if ( ! empty( $options['modules']['firewall'] ) && ! empty( $vg_blacklist ) ) {
+            // Loaded with the plugin; required here for the harnesses that build
+            // this class with only what they need (poc/menores-302.sh).
+            if ( ! class_exists( 'Vigilante_IP_Utils' ) ) {
+                require_once VIGILANTE_INCLUDES_DIR . 'class-ip-utils.php';
+            }
+            $vg_own = Vigilante_IP_Utils::entries_matching( $vg_blacklist, Vigilante_IP_Utils::own_site_addresses() );
+            if ( ! empty( $vg_own ) ) {
+                $recommendations[] = array(
+                    'icon'     => 'warning',
+                    'priority' => 'critical',
+                    'tab'      => 'firewall',
+                    'message'  => sprintf(
+                        /* translators: %s: comma separated list of blacklist entries */
+                        _n(
+                            'The firewall blacklist blocks an address of this site (%s), so WordPress cannot reach itself and WP-Cron and the REST API test of Site Health fail. Remove it in the Firewall tab.',
+                            'The firewall blacklist blocks addresses of this site (%s), so WordPress cannot reach itself and WP-Cron and the REST API test of Site Health fail. Remove them in the Firewall tab.',
+                            count( $vg_own ),
+                            'vigilante'
+                        ),
+                        implode( ', ', $vg_own )
+                    ),
+                );
+            }
+        }
+
         // Critical: Login security disabled
         if ( empty( $options['modules']['login_security'] ) ) {
             $recommendations[] = array(
@@ -8856,6 +8887,7 @@ class Vigilante_Admin {
 
         $rejected_ips     = array();
         $rejected_proxies = array();
+        $own_site_ips     = array();
 
         // Handle modules
         if ( 'modules' === $section && isset( $data['modules'] ) ) {
@@ -8882,7 +8914,7 @@ class Vigilante_Admin {
                 // match still sits in a security list looking like protection,
                 // so the ones that cannot match are dropped and reported back
                 // instead of being stored in silence.
-                $rejected_ips = $this->filter_ip_lists( $section, $processed, $rejected_proxies );
+                $rejected_ips = $this->filter_ip_lists( $section, $processed, $rejected_proxies, $own_site_ips );
 
                 // Save the processed section
                 $saved_options[ $section ] = $processed;
@@ -8977,6 +9009,25 @@ class Vigilante_Admin {
         // from the message, and the page shows it in notices of its own.
         $toggled      = ( 'modules' === $section && isset( $data['modules'] ) && is_array( $data['modules'] ) ) ? array_map( 'sanitize_key', array_keys( $data['modules'] ) ) : array();
         $file_notices = $this->save_file_notices( $section, $toggled );
+
+        // What was left out of the blacklist goes in the second notice, which
+        // stays on screen: the message says what was saved.
+        if ( ! empty( $own_site_ips ) ) {
+            $own_notice = esc_html(
+                sprintf(
+                    /* translators: %s: comma separated list of the blacklist entries that were not saved. */
+                    _n(
+                        'This blacklist entry matches an address of this site, and blocking it would stop WordPress from reaching itself (WP-Cron, the REST API test of Site Health), so it was not saved: %s',
+                        'These blacklist entries match an address of this site, and blocking them would stop WordPress from reaching itself (WP-Cron, the REST API test of Site Health), so they were not saved: %s',
+                        count( $own_site_ips ),
+                        'vigilante'
+                    ),
+                    implode( ', ', $own_site_ips )
+                )
+            );
+            $file_notices['not_written'] = isset( $file_notices['not_written'] ) ? $file_notices['not_written'] . '<br>' . $own_notice : $own_notice;
+        }
+
         if ( ! empty( $file_notices ) ) {
             wp_send_json_success( array_merge( array( 'message' => $message ), $file_notices ) );
         }
@@ -8989,12 +9040,18 @@ class Vigilante_Admin {
      *
      * @since 2.9.9
      *
-     * @param string $section   Section being saved.
-     * @param array  $processed Section data, edited in place.
+     * Since 3.0.9 it also keeps out of the blacklist the entries that match
+     * an address of this site, and hands them back in $own_site (B104).
+     *
+     * @param string $section          Section being saved.
+     * @param array  $processed        Section data, edited in place.
+     * @param array  $rejected_proxies Trusted proxy entries that were dropped.
+     * @param array  $own_site         Blacklist entries dropped because they match an address of this site.
      * @return array Entries that were dropped, for the message back to the user.
      */
-    private function filter_ip_lists( $section, &$processed, &$rejected_proxies = array() ) {
+    private function filter_ip_lists( $section, &$processed, &$rejected_proxies = array(), &$own_site = array() ) {
         $rejected_proxies = array();
+        $own_site         = array();
 
         // Trusted proxies feed an identity decision, so only exact addresses and
         // CIDR ranges belong there: a wildcard is stripped with its own message,
@@ -9025,6 +9082,17 @@ class Vigilante_Admin {
             $split             = Vigilante_IP_Utils::split_list( $processed[ $key ] );
             $processed[ $key ] = $split['valid'];
             $rejected          = array_merge( $rejected, $split['rejected'] );
+        }
+
+        // The requests WordPress sends to itself come from an address of the
+        // site, and the blacklist is checked before anything else, so an entry
+        // that matches one stopped WP-Cron and failed the REST API test of
+        // Site Health with nothing on screen to say why.
+        if ( 'firewall' === $section && ! empty( $processed['ip_blacklist'] ) && is_array( $processed['ip_blacklist'] ) ) {
+            $own_site = Vigilante_IP_Utils::entries_matching( $processed['ip_blacklist'], Vigilante_IP_Utils::own_site_addresses() );
+            if ( ! empty( $own_site ) ) {
+                $processed['ip_blacklist'] = array_values( array_diff( $processed['ip_blacklist'], $own_site ) );
+            }
         }
 
         return array_values( array_unique( $rejected ) );
@@ -10361,7 +10429,12 @@ class Vigilante_Admin {
         $earned   = 0;
         $max      = 0;
 
+        $row_says_report_only = false;
+
         foreach ( $category->run( 'slow' ) as $check ) {
+            if ( 'csp' === $check->id && isset( $check->data['report_only'] ) && 'vigilant' === $check->data['report_only'] ) {
+                $row_says_report_only = true;
+            }
             if ( Vigilante_SA_Check_Result::STATE_SKIP === $check->state ) {
                 continue;
             }
@@ -10388,12 +10461,19 @@ class Vigilante_Admin {
         $score  = (int) round( 100 * $earned / $max );
         $sender = new Vigilante_Security_Headers( $this->settings );
 
+        // In report-only mode the only warning about the settings is that
+        // mode, and when Vigilant's policy arrives the CSP row already says it
+        // with what to do: the button listed it twice (fifth blind review of
+        // 3.0.8). When it does not arrive the row is about that, and the note
+        // still says how the policy is set.
+        $csp_notes = $row_says_report_only ? array() : $sender->get_csp_warnings();
+
         return array(
             'grade'    => Vigilante_SA_Helpers::grade_for_score( $score ),
             'score'    => $score,
             'passed'   => $passed,
             'failing'  => $failed,
-            'notes'    => array_merge( $notes, $sender->get_csp_warnings() ),
+            'notes'    => array_merge( $notes, $csp_notes ),
             // For the script of a page opened before the update: see above.
             'headers'  => array(),
             'missing'  => array(),

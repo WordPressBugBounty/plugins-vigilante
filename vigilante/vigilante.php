@@ -3,7 +3,7 @@
  * Plugin Name: Vigilant - 100% Free Security Suite: Firewall, 2FA, Login, Headers, Scanner…
  * Plugin URI: https://servicios.ayudawp.com
  * Description: Complete security solution for WordPress. Firewall, 2FA, security headers, login protection, file integrity monitoring, activity logging and more.
- * Version: 3.0.8
+ * Version: 3.0.9
  * Author: Fernando Tellado
  * Author URI: https://ayudawp.com
  * Text Domain: vigilante
@@ -24,7 +24,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Plugin constants
  */
-define( 'VIGILANTE_VERSION', '3.0.8' );
+define( 'VIGILANTE_VERSION', '3.0.9' );
 define( 'VIGILANTE_PLUGIN_FILE', __FILE__ );
 define( 'VIGILANTE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'VIGILANTE_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -859,6 +859,14 @@ final class Vigilante_Main {
         // Clean expired 2FA codes and trusted devices
         $this->database->cleanup_expired_2fa_codes();
         $this->database->cleanup_expired_trusted_devices();
+
+        // Renew the copy of the 404 page that the hidden login serves on
+        // every blocked path, which changes with the theme and its updates
+        // (B107, since 3.0.9).
+        $vg_login = $this->settings->get_section( 'login_security' );
+        if ( $this->settings->is_module_enabled( 'login_security' ) && ! empty( $vg_login['custom_login_url'] ) && method_exists( 'Vigilante_Login_Security', 'capture_not_found_copy' ) ) {
+            Vigilante_Login_Security::capture_not_found_copy();
+        }
 
         // Remove sensitive files (readme.html, license.txt, licencia.txt)
         // WordPress core updates recreate these files, so we clean them daily.

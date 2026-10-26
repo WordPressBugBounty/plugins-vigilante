@@ -653,6 +653,11 @@ class Vigilante_SA_Category_Headers {
                         return $missing;
                     }
                 }
+                // The Test Headers button leaves out the note of the settings
+                // that says the same (fifth blind review of 3.0.8).
+                if ( $own ) {
+                    $args['data']['report_only'] = 'vigilant';
+                }
                 $args['detail'] = $own
                     ? sprintf(
                         /* translators: %s: header value (truncated) */

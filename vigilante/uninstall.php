@@ -129,6 +129,7 @@ function vigilante_uninstall_site() {
         'vigilante_analyzer_weekly_scan',
         'vigilante_under_attack_post_scan',
         'vigilante_plugin_status_check',
+        'vigilante_capture_not_found',
     );
 
     foreach ( $hooks_to_clear as $hook ) {
@@ -205,6 +206,8 @@ function vigilante_uninstall_site() {
         'vigilante_plugin_status_last_check',
         'vigilante_ignored_closed_plugins',
         'vigilante_self_integrity_state',
+        'vigilante_hidden_404_copy',
+        'vigilante_hidden_404_state',
     );
 
     foreach ( $options_to_delete as $option ) {
@@ -253,6 +256,7 @@ function vigilante_uninstall_final_sweep() {
         'vigilante_under_attack_post_scan',
         'vigilante_plugin_status_check',
         'vigilante_fi_postupdate_verify',
+        'vigilante_capture_not_found',
     );
 
     foreach ( $hooks as $hook ) {
@@ -283,7 +287,9 @@ function vigilante_uninstall_final_sweep() {
             'vigilante_server_software',
             'vigilante_server_files_version',
             'vigilante_server_files_pending',
-            'vigilante_server_files_retry_after'
+            'vigilante_server_files_retry_after',
+            'vigilante_hidden_404_copy',
+            'vigilante_hidden_404_state'
         )"
     );
 }

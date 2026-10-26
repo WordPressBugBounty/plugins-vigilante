@@ -230,6 +230,18 @@ trait Vigilante_Admin_Ajax {
             wp_send_json_error( __( 'Invalid IP address.', 'vigilante' ) );
         }
 
+        // The activity log shows the requests WordPress sends to itself, and
+        // blacklisting the address they come from stopped WP-Cron (B104).
+        if ( 'ip' === $item_type && 'blacklist' === $list_type && array() !== Vigilante_IP_Utils::entries_matching( array( $value ), Vigilante_IP_Utils::own_site_addresses() ) ) {
+            wp_send_json_error(
+                sprintf(
+                    /* translators: %s: the IP address that was not added */
+                    __( '%s is an address of this site, and blocking it would stop WordPress from reaching itself (WP-Cron, the REST API test of Site Health), so it was not added to the blacklist.', 'vigilante' ),
+                    $value
+                )
+            );
+        }
+
         $option_key = $item_type . '_' . $list_type; // ip_whitelist, ip_blacklist, ua_whitelist, ua_blacklist
         $options    = $this->settings->get_section( 'firewall' );
         $list       = isset( $options[ $option_key ] ) ? (array) $options[ $option_key ] : array();

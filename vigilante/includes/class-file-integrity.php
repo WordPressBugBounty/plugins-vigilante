@@ -2557,9 +2557,12 @@ class Vigilante_File_Integrity {
      * has no limit
      *
      * With the clock PHP uses here (see fit_to_time_limit()): processor time
-     * since the scan started where PHP counts that, which leaves out the
-     * second or two WordPress took before it, and the clock since the start
-     * of the request otherwise, which errs on the side of too little time.
+     * since the plugin loaded where PHP counts that, and the clock since the
+     * start of the request otherwise, both on the side of too little time.
+     * Until 3.0.9 the processor time counted from the start of the scan, so
+     * other tasks of the same cron run were left out and the closed plugins
+     * check could start with less time ahead than this said (fourth blind
+     * review of 3.0.8).
      *
      * @since 3.0.8
      *
@@ -2571,13 +2574,37 @@ class Vigilante_File_Integrity {
             return PHP_INT_MAX;
         }
         if ( 'cpu' === self::php_limit_clock() && null !== $this->cpu_at_start ) {
-            $cpu = self::cpu_seconds();
+            $cpu  = self::cpu_seconds();
+            $from = null !== self::$cpu_at_load ? self::$cpu_at_load : $this->cpu_at_start;
             if ( null !== $cpu ) {
-                return $limit - ( $cpu - $this->cpu_at_start );
+                return $limit - ( $cpu - $from );
             }
         }
         $start = isset( $_SERVER['REQUEST_TIME_FLOAT'] ) ? (float) $_SERVER['REQUEST_TIME_FLOAT'] : (float) $this->scan_start_time;
         return $limit - ( microtime( true ) - $start );
+    }
+
+    /**
+     * Seconds the next request for checksums may wait
+     *
+     * CHECKSUM_TIMEOUT, or less when the scan was fitted to a short limit of
+     * PHP that counts clock time and less is left. With a limit of 20 seconds
+     * or less the margin of fit_to_time_limit() does not cover a whole
+     * download, and the first request for the checksums of WordPress did not
+     * look at the time left at all (fourth blind review of 3.0.8). Where PHP
+     * counts processor time, waiting for the answer costs none of it. A
+     * download cut short fails like one with no answer, which the scan
+     * already reports as an error.
+     *
+     * @since 3.0.9
+     *
+     * @return int
+     */
+    private function checksum_timeout() {
+        if ( $this->php_limit <= 0 || $this->cpu_budget > 0 ) {
+            return self::CHECKSUM_TIMEOUT;
+        }
+        return (int) max( 1, min( self::CHECKSUM_TIMEOUT, floor( $this->seconds_left_in_request() - 3 ) ) );
     }
 
     /**
@@ -5103,7 +5130,7 @@ class Vigilante_File_Integrity {
             $locale
         );
 
-        $response = wp_remote_get( $url, array( 'timeout' => self::CHECKSUM_TIMEOUT ) );
+        $response = wp_remote_get( $url, array( 'timeout' => $this->checksum_timeout() ) );
 
         if ( is_wp_error( $response ) ) {
             return $response;
@@ -5509,7 +5536,7 @@ class Vigilante_File_Integrity {
             $version
         );
 
-        $response = wp_remote_get( $url, array( 'timeout' => self::CHECKSUM_TIMEOUT ) );
+        $response = wp_remote_get( $url, array( 'timeout' => $this->checksum_timeout() ) );
 
         if ( is_wp_error( $response ) ) {
             return $response;
