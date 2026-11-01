@@ -190,6 +190,7 @@ trait Vigilante_Two_Factor_Session {
         $texts = array(
             'attempts' => __( 'Too many incorrect verification codes. The verification session was closed for security. Log in again to start a new one.', 'vigilante' ),
             'expired'  => __( 'The verification session expired. Log in again to start a new one.', 'vigilante' ),
+            'locked'   => __( 'Too many wrong verification codes for this account. Verification is stopped for a few minutes; try again later.', 'vigilante' ),
         );
 
         if ( ! isset( $texts[ $notice ] ) ) {
@@ -484,6 +485,263 @@ trait Vigilante_Two_Factor_Session {
 
         $this->set_cookie( $this->pending_cookie_name(), '', time() - YEAR_IN_SECONDS, 'Strict' );
         unset( $_COOKIE[ $this->pending_cookie_name() ] );
+    }
+
+    // =========================================================================
+    // Codes per account (B61)
+    // =========================================================================
+
+    /**
+     * Wrong codes an account may send within the window before it is stopped.
+     *
+     * Until 3.0.9 the only limits were the three tries of each pending session,
+     * which a new correct password opened again from zero once they ran out,
+     * and the lockout of Login Security, which counts per address and does not
+     * exist on a subsite of a network that switched that module off. Whoever
+     * had the password could go on guessing codes without end from one subsite,
+     * and from anywhere with a new address per round: measured on 1 Nov 2026,
+     * 150 codes over 50 passwords without a single refusal in both cases. The
+     * count lives on the account, in user meta, which a network shares, and
+     * depends on no other module.
+     *
+     * @since 3.0.10
+     *
+     * @return int
+     */
+    private function account_failure_limit() {
+        return max( 1, absint( apply_filters( 'vigilante_2fa_account_max_failures', 10 ) ) );
+    }
+
+    /**
+     * Seconds a wrong code counts against the account.
+     *
+     * @since 3.0.10
+     *
+     * @return int
+     */
+    private function account_failure_window() {
+        return max( MINUTE_IN_SECONDS, absint( apply_filters( 'vigilante_2fa_account_failure_window', 15 * MINUTE_IN_SECONDS ) ) );
+    }
+
+    /**
+     * Tries counted against the account inside the window, oldest first.
+     *
+     * One meta row per try, holding its time. Rows are only ever added, never
+     * rewritten, so two requests that arrive together cannot overwrite each
+     * other's count the way a single counter read and written back would. The
+     * cache is dropped first so the count includes what other requests added.
+     *
+     * @since 3.0.10
+     *
+     * @param int $user_id User ID.
+     * @return int[]
+     */
+    private function account_failures( $user_id ) {
+        wp_cache_delete( absint( $user_id ), 'user_meta' );
+
+        $since  = time() - $this->account_failure_window();
+        $stamps = array();
+
+        foreach ( (array) get_user_meta( absint( $user_id ), 'vigilante_2fa_failed_code', false ) as $stamp ) {
+            $stamp = absint( $stamp );
+
+            if ( $stamp > $since ) {
+                $stamps[] = $stamp;
+            }
+        }
+
+        sort( $stamps );
+
+        return $stamps;
+    }
+
+    /**
+     * Whether the account has used up its wrong codes for now.
+     *
+     * @since 3.0.10
+     *
+     * @param int $user_id User ID.
+     * @return bool
+     */
+    protected function account_is_locked( $user_id ) {
+        return count( $this->account_failures( $user_id ) ) >= $this->account_failure_limit();
+    }
+
+    /**
+     * Take one try from the account before a code is checked.
+     *
+     * Counted before the check and not after it, so that requests sent in
+     * parallel each see the tries of the others: with the count written after
+     * the check, all of them would pass the test at once. A correct code clears
+     * the count afterwards (clear_account_failures()). Rows older than the
+     * window are removed here, so an account never holds more than the limit
+     * plus the requests that arrived at the same time.
+     *
+     * @since 3.0.10
+     *
+     * @param int $user_id User ID.
+     * @return bool False when the account has no try left.
+     */
+    protected function reserve_code_attempt( $user_id ) {
+        $user_id = absint( $user_id );
+
+        if ( ! $user_id || $this->account_is_locked( $user_id ) ) {
+            return false;
+        }
+
+        $since = time() - $this->account_failure_window();
+
+        foreach ( (array) get_user_meta( $user_id, 'vigilante_2fa_failed_code', false ) as $stamp ) {
+            if ( absint( $stamp ) <= $since ) {
+                delete_user_meta( $user_id, 'vigilante_2fa_failed_code', $stamp );
+            }
+        }
+
+        add_user_meta( $user_id, 'vigilante_2fa_failed_code', (string) time() );
+
+        return count( $this->account_failures( $user_id ) ) <= $this->account_failure_limit();
+    }
+
+    /**
+     * Forget the tries of an account once it got a code right.
+     *
+     * @since 3.0.10
+     *
+     * @param int $user_id User ID.
+     */
+    protected function clear_account_failures( $user_id ) {
+        delete_user_meta( absint( $user_id ), 'vigilante_2fa_failed_code' );
+    }
+
+    /**
+     * Minutes until the account may send a code again.
+     *
+     * @since 3.0.10
+     *
+     * @param int $user_id User ID.
+     * @return int At least 1.
+     */
+    private function account_wait_minutes( $user_id ) {
+        $stamps = $this->account_failures( $user_id );
+        $over   = count( $stamps ) - $this->account_failure_limit();
+
+        if ( $over < 0 ) {
+            return 1;
+        }
+
+        $until = $stamps[ $over ] + $this->account_failure_window();
+
+        return max( 1, (int) ceil( ( $until - time() ) / MINUTE_IN_SECONDS ) );
+    }
+
+    /**
+     * The refusal given at login while the account is stopped.
+     *
+     * Only reached with the right password, and Login Security does not count
+     * it as a failed login (CONTROLLED_REJECTIONS).
+     *
+     * @since 3.0.10
+     *
+     * @param int $user_id User ID.
+     * @return WP_Error
+     */
+    protected function account_locked_error( $user_id ) {
+        $minutes = $this->account_wait_minutes( $user_id );
+
+        return new WP_Error(
+            'vigilante_2fa_locked',
+            sprintf(
+                /* translators: %d: Minutes to wait. */
+                _n(
+                    'Too many wrong verification codes for this account. Try again in %d minute.',
+                    'Too many wrong verification codes for this account. Try again in %d minutes.',
+                    $minutes,
+                    'vigilante'
+                ),
+                $minutes
+            )
+        );
+    }
+
+    /**
+     * After a wrong code: when it was the last one, log it and tell people.
+     *
+     * Every one of those codes came after the right password, so this is the
+     * clearest sign the plugin gets that a password is in someone else's
+     * hands. The account holder and the site recipients are told once per
+     * window.
+     *
+     * @since 3.0.10
+     *
+     * @param int $user_id User ID.
+     */
+    protected function note_failed_code( $user_id ) {
+        $user_id = absint( $user_id );
+
+        if ( ! $this->account_is_locked( $user_id ) || get_transient( 'vigilante_2fa_locked_' . $user_id ) ) {
+            return;
+        }
+
+        set_transient( 'vigilante_2fa_locked_' . $user_id, 1, $this->account_failure_window() );
+
+        $user = get_userdata( $user_id );
+
+        if ( ! $user ) {
+            return;
+        }
+
+        $limit   = $this->account_failure_limit();
+        $minutes = (int) ceil( $this->account_failure_window() / MINUTE_IN_SECONDS );
+
+        $this->log_event(
+            '2fa_account_locked',
+            $user_id,
+            sprintf(
+                /* translators: 1: Number of wrong codes, 2: Minutes. */
+                __( 'Two-factor verification stopped for this account after %1$d wrong codes sent with the right password, for %2$d minutes', 'vigilante' ),
+                $limit,
+                $minutes
+            ),
+            'critical'
+        );
+
+        if ( ! class_exists( 'Vigilante_Email_Template' ) ) {
+            return;
+        }
+
+        $subject = sprintf(
+            /* translators: %s: Username. */
+            __( 'Two-factor verification stopped for %s', 'vigilante' ),
+            $user->user_login
+        );
+
+        $body  = Vigilante_Email_Template::alert_box(
+            sprintf(
+                /* translators: 1: Number of wrong codes, 2: Minutes. */
+                __( 'Someone entered the right password for this account and then %1$d wrong verification codes. Vigilant stopped verification for this account for %2$d minutes.', 'vigilante' ),
+                $limit,
+                $minutes
+            )
+        );
+        $body .= Vigilante_Email_Template::p( __( 'If it was not the account holder, the password is known to someone else: change it now.', 'vigilante' ), '#1d2327', true );
+        $body .= Vigilante_Email_Template::data_table(
+            array(
+                __( 'Username', 'vigilante' )   => $user->user_login,
+                __( 'Last address', 'vigilante' ) => Vigilante_IP_Utils::get_client_ip(),
+                __( 'Site', 'vigilante' )       => home_url( '/' ),
+            )
+        );
+
+        // Two sends, so neither side sees the other's address in the To line.
+        $admins = array_diff( array_filter( (array) Vigilante_Email_Template::get_admin_recipients() ), array( $user->user_email ) );
+
+        if ( is_email( $user->user_email ) ) {
+            Vigilante_Email_Template::send( $user->user_email, $subject, __( 'Two-factor verification stopped', 'vigilante' ), $body, true );
+        }
+
+        if ( ! empty( $admins ) ) {
+            Vigilante_Email_Template::send( array_values( $admins ), $subject, __( 'Two-factor verification stopped', 'vigilante' ), $body, true );
+        }
     }
 
     /**

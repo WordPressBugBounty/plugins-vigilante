@@ -53,6 +53,19 @@ class Vigilante_SA_Helpers {
     private static $home_challenge = '';
 
     /**
+     * Whether the home page was asked for in this scan and gave no usable answer.
+     *
+     * Until 3.0.9 only a good answer was kept, so with the home page down, cut
+     * off by a firewall or behind a verification screen, every check that wanted
+     * it asked again: up to four requests of 4 seconds in the same phase, and
+     * the checks could read different answers. Reported by Albert Calzada (B112).
+     *
+     * @since 3.0.10
+     * @var bool
+     */
+    private static $home_probe_failed = false;
+
+    /**
      * Who served a verification screen to the last request made by get(),
      * or '' when that answer was the site
      *
@@ -247,6 +260,11 @@ class Vigilante_SA_Helpers {
         if ( ! $force_refresh && null !== self::$home_probe ) {
             return self::$home_probe;
         }
+        // Already asked and no answer: the same no answer, with the same reason
+        // in home_challenge(), until the cache is reset or a refresh is forced.
+        if ( ! $force_refresh && self::$home_probe_failed ) {
+            return null;
+        }
         // A new look at the home page is a new look at all of it: the copy
         // generated now and the static file are asked for again too.
         self::$fresh_probe  = false;
@@ -267,7 +285,8 @@ class Vigilante_SA_Helpers {
         self::$home_challenge = '';
 
         if ( is_wp_error( $response ) ) {
-            self::$home_probe = null;
+            self::$home_probe        = null;
+            self::$home_probe_failed = true;
             return null;
         }
 
@@ -276,12 +295,14 @@ class Vigilante_SA_Helpers {
         // check says it could not measure, and says why.
         $challenge = self::challenge_of_response( $response );
         if ( '' !== $challenge ) {
-            self::$home_challenge = $challenge;
-            self::$home_probe     = null;
+            self::$home_challenge    = $challenge;
+            self::$home_probe        = null;
+            self::$home_probe_failed = true;
             return null;
         }
 
-        self::$home_probe = array(
+        self::$home_probe_failed = false;
+        self::$home_probe        = array(
             'code'    => (int) wp_remote_retrieve_response_code( $response ),
             'headers' => self::normalize_headers( wp_remote_retrieve_headers( $response ) ),
             // Every value of each header, as it arrived: the line above joins
@@ -709,7 +730,8 @@ class Vigilante_SA_Helpers {
      * Reset memoized probe caches. Called at the start of each scan.
      */
     public static function reset_cache() {
-        self::$home_probe     = null;
+        self::$home_probe        = null;
+        self::$home_probe_failed = false;
         self::$tls_info       = null;
         self::$home_challenge = '';
         self::$last_challenge = '';

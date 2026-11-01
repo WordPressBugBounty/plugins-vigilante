@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.0.9
+Stable tag: 3.0.10
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -544,6 +544,19 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 3.0.10 =
+Two factor now stops an account after 10 wrong codes in 15 minutes and emails its holder, Ignore applies to the file as it is when ignored, and the visitor IP is read right behind proxies that add the port, such as Azure.
+
+* Improved: Ignore in File Integrity now applies to a file as it is when it is ignored: if it changes, goes away or comes back, its finding shows again and the file leaves the ignored list. Excluded Paths is still the way to stop watching a file or a folder for good. Files ignored with an earlier version of Vigilant show once more, to be ignored again.
+* Improved: only one File Integrity scan runs at a time. Run Scan Now says when another scan is already running and since when, the scheduled scan leaves it to the one that is running, and a scan the server stops is always the one reported.
+* Improved: Security Check asks for the home page once per scan also when it does not answer or answers with a verification screen, instead of once per check that reads it.
+* Fix: two-factor verification had no limit per account. The tries of each verification session started again with every correct password, and the lockout of Login Security counts per address and does not run on a site of a network where that module is off. Each account now has 10 wrong codes in 15 minutes, by app or by email, counted across sessions and addresses; then verification stops until that time passes, and the account holder and the site recipients get an email, because every one of those codes came with the right password.
+* Fix: behind a proxy that writes the port in X-Forwarded-For or X-Real-IP, as Azure App Service does, every visitor was read as the proxy, for the firewall, the rate limit, the login lockout and the IP lists, and the notice that detects a proxy did not show. The port is now set aside, and the IP whitelist rules of .htaccess accept it too.
+* Fix: on a site whose WordPress lives on a host of its own, the redirect to set up the authenticator app once the grace period ended went to the dashboard, which redirected again, in a loop. The Activity Log and File Integrity menu shortcuts landed on the dashboard there too.
+* Fix: Remove X-Powered-By and Server headers now also removes an X-Powered-By header added by the server configuration, such as PleskLin on Plesk. Security Check no longer calls a value without a version number version information, and when the header still arrives with the rules of Vigilant applied, it says that the server adds it outside .htaccess.
+* Fix: on a network, deleting a site now also removes Vigilant's tables for that site, its activity log included. The two factor table stays while it holds an enrolment, because accounts belong to the network.
+* Fix: the IP blocklist of Comment Security, which only code can fill, compared the connection address as text. It now reads the visitor IP and matches the list as the firewall does.
+
 = 3.0.9 =
 Security Check now says when the PHP of the server lacks the fixes of PHP2Shell, the critical flaws of October 2026, and the firewall blacklist no longer accepts an address of the site itself, which stopped WP-Cron.
 
@@ -610,38 +623,12 @@ Vigilant now tells you when it cannot write wp-config.php or .htaccess. Until no
 * Fix: the description of the Maximum preset said that its Content Security Policy was set to report-only mode. The preset enforces it, and the description now says so.
 * Fix: the Test Headers button said nothing when its request failed outright. It now shows an error.
 
-= 3.0.5 =
-The Dashboard shows one grade, the one of Security Check, on a stricter scale. It counts a setting only while its module is on and leaves out what it could not measure, so some scores go down. The notice about scheduled tasks no longer says that files were modified.
-
-* Improved: the Dashboard shows one grade. Security Check, which measures the site, keeps its letter and comes first. What was the Configuration Score is now Vigilant configuration: a bar with a percentage and no letter, next to the recommendations and the modules it counts. Two letters side by side read as two grades of the same site that did not agree.
-* Improved: Security Check and each of its categories use a stricter scale of letters: A is a perfect score, B starts at 85, C at 70, D at 50 and E is anything below. Until now a B ran from 70 to 99, so a site with many failing checks sat one letter away from a perfect one. The numbers do not change with this, but many sites will see a lower letter.
-* Improved: Security Check leaves a check it could not run out of the score, and says how many were not measured. Until now such a check counted as a zero, so a request to your own site that timed out lowered the score as if the check had failed, and the result changed from one scan to the next. A check that is only informational, such as a header switched off on purpose, no longer keeps the score from reaching 100.
-* Improved: the percentage of Vigilant configuration is worked out over the same total on every site, and a module that is switched off loses its points and the points of its settings. Until now those settings left the total too, so a site with most modules off kept a middling figure, and switching Security Audit off with no alert configured raised it. Sites with modules switched off will see a lower percentage.
-* Improved: the Active theme row of Security Check is informational and no longer gives 5 points. Whether the theme has an update pending is already scored by another check. This can move the score by a point or two.
-* Improved: Security Check says when a security header reaches the browser from a Vigilant block in the .htaccess of a folder above the site, which is what happens to a WordPress installed in a subfolder of another one. Until now only the Content-Security-Policy check said so.
-* Improved: when Vigilant finds one of its scheduled tasks missing and schedules it again, the second time in 30 days is now a warning, with no email and no effect on the scores, and it goes away by itself after a week with no task missing. It only becomes critical, with one email a week at most, from the third time within one week or the fourth within 30 days. Until now the second time was already critical, both scores dropped to E, and the notice stayed for 30 days whatever was done. WordPress itself drops a scheduled task when it cannot save its next run, so two in a month does not mean that something is removing them.
-* Improved: the hourly task of Vigilant is no longer watched. It does nothing, and being hourly it was the one most often lost.
-* Improved: Vigilant no longer waits for an administrator to open the dashboard to schedule again a task that went missing: it also checks from the scheduled tasks of WordPress itself, which run twice a day. Until now, when the daily maintenance task was removed, it stayed missing and nothing watched the others until an administrator came by.
-* Improved: the steps of the notice about scheduled tasks say first that Vigilant has scheduled the tasks again, then what to look for, and leave a possible compromise for the case that keeps repeating.
-* Fix: Security Check passed checks on a setting that was saved while the module that applies it was switched off, so the protection was not running: the custom login URL, the login attempt limit, two-factor, XML-RPC, the RSD, Windows Live Writer and shortlink tags, and the checks that read Security Audit and File Integrity. With the Security Headers module off, the Content-Security-Policy and HSTS checks said that something was removing the header and gave half the points. They now fail and name the module that is off. Sites with modules switched off will see a lower score, and the weekly scan, where its email is switched on, will report the checks that start failing.
-* Fix: the Test Headers button graded the settings of its tab without asking the site for anything, so it could show a B where no header reached the browser. It now measures what arrives, with the checks and the scale of Security Check. And Security Check says when a header is switched on in Vigilant but does not arrive, with the likely cause, and gives it no points.
-* Fix: three texts of Security Check that could be read wrong. The check of /wp-admin/ said that visitors were sent to the login page whatever the redirect was. The two checks of users over the REST API were named almost the same: one is the list of users, the other only tells a visitor who they are, and WordPress answers that one with a 401 on any site, so it is now informational and no longer gives 2 points. And a single user was counted as 1 user records.
-* Fix: Security Check counted an administrator as protected by two-factor when the role was not among the enforced roles or the account was among the excluded users.
-* Fix: Security Check passed the checks for exposed files (.env, .git/config, debug.log, copies of wp-config.php, developer scripts and wp-cron.php) when the request it sends to the site got no answer. They are now shown as not measured.
-* Fix: the file permissions check of Security Check reads wp-config.php when it is one folder above WordPress, and says so when it cannot find it instead of passing.
-* Fix: on the Dashboard, switching a module saved the change twice and showed for a moment a score worked out differently from the one the page shows once reloaded.
-* Fix: in Security Check, the bar of each category kept its color after a scan until the page was reloaded.
-* Fix: when the critical notice was about scheduled tasks, the email, the File Integrity box, the admin notice, the Dashboard recommendation and the note on the scores said that the files of Vigilant had been modified, with every file intact. They now say that scheduled tasks keep being removed, count tasks instead of files, and no longer ask for a repair or for a new scan, which cleared nothing.
-* Fix: when the hooks of Vigilant self-protection had been removed, the email, the File Integrity box, the admin notice, the Dashboard recommendation and the note on the scores said that the files of Vigilant had been modified, and with self-protection switched off by code so did the email and the note on the scores. They now say what was found. With self-protection switched off by code, the Dashboard also asked to turn it on, which no setting does: it now says that something on the site switched it off and where to look.
-* Fix: when WordPress updated Vigilant in the background and the daily maintenance of Vigilant fell due in that same run, Vigilant took the update for a version change made outside the updater, wrote it down as such and could send a warning email. It now waits for the check it runs at the end of every update, and so do the other checks while WordPress is running its background updates in another process. An update is handled by the version that is being replaced, so this takes effect from the update that follows this one.
-* Fix: File Integrity reported as suspicious a call to the old PHP function that builds a function from a string when the call was only inside a comment, where plugins leave it next to the code that replaced it. Comments are no longer searched for it, and a live call is reported as before.
-
 For older changelog entries, please check the [changelog.txt](https://plugins.svn.wordpress.org/vigilante/trunk/changelog.txt) file
 
 == Upgrade Notice ==
 
-= 3.0.9 =
-Security Check now says when the PHP of the server lacks the fixes of PHP2Shell, the critical flaws of October 2026, and the firewall blacklist no longer accepts an address of the site itself, which stopped WP-Cron.
+= 3.0.10 =
+Two factor now stops an account after 10 wrong codes in 15 minutes and emails its holder, Ignore applies to the file as it is when ignored, and the visitor IP is read right behind proxies that add the port, such as Azure.
 
 == Support ==
 

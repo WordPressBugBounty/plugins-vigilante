@@ -206,6 +206,14 @@ class Vigilante_Two_Factor_Email {
             return $this->api_requires_2fa_error();
         }
 
+        // An account that has used up its wrong codes gets no new code and no
+        // new session until the window passes, whatever the address (B61). Until
+        // 3.0.9 each correct password a minute apart sent a fresh code with three
+        // fresh tries, and an email to the account holder every time.
+        if ( $this->account_is_locked( $user->ID ) ) {
+            return $this->account_locked_error( $user->ID );
+        }
+
         // Check if there's a very recent code (less than 60 seconds old) to avoid duplicate emails on rapid retries
         $existing_code = $this->database->get_2fa_code( $user->ID );
         $code_is_recent = $existing_code
@@ -355,10 +363,19 @@ class Vigilante_Two_Factor_Email {
         // login lives there.
         $redirect_to = $this->pending_login_redirect();
 
+        // Tries per account, across codes, sessions and addresses (B61). Taken
+        // before the code is checked, so parallel requests count each other.
+        if ( ! $this->reserve_code_attempt( $user_id ) ) {
+            $this->clear_pending_verification();
+            $this->redirect_to_login_with_notice( 'locked' );
+        }
+
         // Verify code
         $result = $this->verify_code( $user_id, $code );
 
         if ( is_wp_error( $result ) ) {
+            $this->note_failed_code( $user_id );
+
             // Out of attempts: the session is gone, so the form that would show
             // this message is not painted any more. Say it on the login screen
             // instead of bouncing the visitor there with no explanation.
@@ -376,6 +393,7 @@ class Vigilante_Two_Factor_Email {
 
         // Verification successful
         $this->clear_pending_verification();
+        $this->clear_account_failures( $user_id );
         $this->database->mark_2fa_code_used( $user_id );
 
         // Trust device if requested (and if the option allows it, see trust_device)

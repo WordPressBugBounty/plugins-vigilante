@@ -504,6 +504,124 @@ class Vigilante_Database {
         return true;
     }
 
+    /**
+     * Add this plugin's tables to those core drops when a site is deleted
+     *
+     * Hooked to wpmu_drop_tables, which wp_uninitialize_site() applies to the
+     * tables of the site being deleted (wp-includes/ms-site.php:822-836 in
+     * 7.1.3). Every site of a network creates its seven tables the first time
+     * Vigilant loads there, and until this filter existed deleting a subsite
+     * left all seven behind.
+     *
+     * The names are built from the prefix of the site being deleted, never the
+     * one in force, and only from the seven names of this class.
+     *
+     * Nothing is added for the main site of a network. Its tables carry the
+     * base prefix and are where a network keeps its two factor enrolments by
+     * default (totp_legacy_blog_ids() looks there first). Core will not drop
+     * the main site from wpmu_delete_blog() (wp-admin/includes/ms.php:82-88),
+     * but wp_delete_site() does not ask, so this does.
+     *
+     * The TOTP table stays while it holds an enrolment. Accounts belong to the
+     * network, and totp_table_for_user() reads the enrolment from the table of
+     * the site where it was made, wherever the login arrives. Dropping it would
+     * turn an account with a second factor into one that has not set it up,
+     * which is the branch of check_2fa_requirement() that lets the login
+     * through with a grace period. Decided by Fernando on 26 Oct 2026.
+     *
+     * @since 3.0.10
+     *
+     * @param string[] $tables  Tables core is about to drop.
+     * @param int      $site_id ID of the site being deleted. Optional because a
+     *                          plugin may apply the filter with the list alone.
+     * @return string[]
+     */
+    public function add_site_tables_to_drop( $tables, $site_id = 0 ) {
+        $tables = (array) $tables;
+
+        // get_site() only exists on a network, and nothing stops a plugin from
+        // applying this filter on a single site.
+        if ( ! is_multisite() ) {
+            return $tables;
+        }
+
+        $site_id = (int) $site_id;
+        $site    = ( $site_id > 0 ) ? get_site( $site_id ) : null;
+
+        if ( ! $site || is_main_site( $site_id, (int) $site->network_id ) ) {
+            return $tables;
+        }
+
+        $prefix = $this->wpdb->get_blog_prefix( $site_id );
+
+        if ( $prefix === $this->wpdb->base_prefix ) {
+            return $tables;
+        }
+
+        $totp = $prefix . $this->two_factor_totp_table;
+        $ours = array(
+            $prefix . $this->activity_log_table,
+            $prefix . $this->login_attempts_table,
+            $prefix . $this->file_integrity_table,
+            $prefix . $this->two_factor_codes_table,
+            $prefix . $this->two_factor_devices_table,
+            $prefix . $this->two_factor_notifications_table,
+        );
+
+        if ( ! $this->table_holds_totp_enrolments( $totp ) ) {
+            $ours[] = $totp;
+        }
+
+        foreach ( $ours as $table ) {
+            if ( ! in_array( $table, $tables, true ) ) {
+                $tables[] = $table;
+            }
+        }
+
+        return $tables;
+    }
+
+    /**
+     * Whether a TOTP table holds an enrolment, or might
+     *
+     * A table that is not there holds nothing. When the database cannot be
+     * asked, the answer is yes: losing an enrolment on a guess is worse than
+     * leaving one table behind.
+     *
+     * @since 3.0.10
+     *
+     * @param string $table Full table name.
+     * @return bool
+     */
+    private function table_holds_totp_enrolments( $table ) {
+        // phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- %i placeholder requires WP 6.2+, and the sniff reports inside the multiline prepare() (measured with Plugin Check: six errors without it). Read once, while the site is being deleted.
+        $found = $this->wpdb->get_var(
+            $this->wpdb->prepare( 'SHOW TABLES LIKE %s', $this->wpdb->esc_like( $table ) )
+        );
+
+        if ( '' !== $this->wpdb->last_error ) {
+            return true;
+        }
+
+        // Without regard to case: with lower_case_table_names at 1 or 2, MySQL
+        // answers in lower case for a prefix written in capitals, and a strict
+        // comparison read a table with enrolments as missing.
+        if ( ! is_string( $found ) || 0 !== strcasecmp( $found, $table ) ) {
+            return false;
+        }
+
+        $configured = $this->wpdb->get_var(
+            $this->wpdb->prepare( 'SELECT COUNT(*) FROM %i WHERE is_configured = 1', $table )
+        );
+        // phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared
+
+        if ( '' !== $this->wpdb->last_error || null === $configured ) {
+            return true;
+        }
+
+        return (int) $configured > 0;
+    }
+
     // =========================================================================
     // ACTIVITY LOG METHODS
     // =========================================================================

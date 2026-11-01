@@ -470,6 +470,10 @@ class Vigilante_Htaccess_Protection {
         if ( ! empty( $this->options['remove_fingerprinting_headers'] ) ) {
             $rules[] = '# Remove server fingerprinting headers';
             $rules[] = '<IfModule mod_headers.c>';
+            // Both tables of mod_headers: PHP's own header goes in "always",
+            // and one added by the server configuration without "always"
+            // (Plesk's PleskLin) only leaves with a plain unset (B110).
+            $rules[] = '    Header unset X-Powered-By';
             $rules[] = '    Header always unset X-Powered-By';
             $rules[] = '    Header always unset Server';
             $rules[] = '</IfModule>';
@@ -688,14 +692,35 @@ class Vigilante_Htaccess_Protection {
              */
             $lines[] = '    RewriteCond %{ENV:VIGILANTE_TRUSTED_PROXY} "!=1" [OR]';
 
-            if ( 'exact' === $pattern['type'] && ! $header_is_chain ) {
-                $lines[] = '    RewriteCond ' . $header_variable . ' "!=' . $pattern['ip'] . '" [NC]';
+            /*
+             * The header entry may carry the port the proxy received the
+             * connection from: Azure App Service writes 203.0.113.7:51234 and
+             * [2001:db8::1]:443. Until 3.0.9 an exact entry of the whitelist did
+             * not match those, which failed safe (the visitor was filtered) but
+             * did not agree with PHP once Vigilante_IP_Utils::strip_port() came
+             * in (B113). So the exact address may be followed by a port, an IPv6
+             * address may come in brackets, and a prefix may start with one.
+             */
+            $address = $pattern['regex'];
+            $leading = '';
+
+            if ( false !== strpos( $pattern['regex'], ':' ) ) {
+                $address = ( 'exact' === $pattern['type'] )
+                    ? '(' . $pattern['regex'] . '|\\[' . $pattern['regex'] . '\\](:[0-9]+)?)'
+                    : $pattern['regex'];
+                $leading = '\\[?';
             } elseif ( 'exact' === $pattern['type'] ) {
-                $lines[] = '    RewriteCond ' . $header_variable . ' "!(^|, *)' . $pattern['regex'] . ' *$" [NC]';
+                $address = $pattern['regex'] . '(:[0-9]+)?';
+            }
+
+            if ( 'exact' === $pattern['type'] && ! $header_is_chain ) {
+                $lines[] = '    RewriteCond ' . $header_variable . ' "!^' . $address . '$" [NC]';
+            } elseif ( 'exact' === $pattern['type'] ) {
+                $lines[] = '    RewriteCond ' . $header_variable . ' "!(^|, *)' . $address . ' *$" [NC]';
             } elseif ( $header_is_chain ) {
-                $lines[] = '    RewriteCond ' . $header_variable . ' "!(^|, *)' . $pattern['regex'] . '[^,]*$" [NC]';
+                $lines[] = '    RewriteCond ' . $header_variable . ' "!(^|, *)' . $leading . $address . '[^,]*$" [NC]';
             } else {
-                $lines[] = '    RewriteCond ' . $header_variable . ' "!^' . $pattern['regex'] . '" [NC]';
+                $lines[] = '    RewriteCond ' . $header_variable . ' "!^' . $leading . $address . '" [NC]';
             }
         }
 

@@ -554,6 +554,8 @@ class Vigilante_Security_Headers {
 
         // Remove X-Powered-By
         $rules[] = '    # Hide PHP version';
+        // Both tables of mod_headers, as in the Protection block (B110).
+        $rules[] = '    Header unset X-Powered-By';
         $rules[] = '    Header always unset X-Powered-By';
 
         $rules[] = '</IfModule>';

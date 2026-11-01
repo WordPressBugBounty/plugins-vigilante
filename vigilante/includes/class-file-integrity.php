@@ -62,6 +62,23 @@ class Vigilante_File_Integrity {
     private $ignored_files;
 
     /**
+     * Fingerprint of each ignored file when it was ignored, keyed by path.
+     *
+     * @since 3.0.10
+     * @var array<string,string>
+     */
+    private $ignored_hashes = null;
+
+    /**
+     * Ignored paths this scan found changed, with the fingerprint they were
+     * compared against, so they leave the list once the scan is done.
+     *
+     * @since 3.0.10
+     * @var array<string,string>
+     */
+    private $ignored_changed = array();
+
+    /**
      * Scan start time for timeout control
      *
      * @var float
@@ -76,6 +93,20 @@ class Vigilante_File_Integrity {
      * scan, so the results say what was not reached (see not_checked_lines()).
      */
     const MAX_SCAN_SECONDS = 60;
+
+    /**
+     * Largest folder whose content is fingerprinted when it is ignored (B102)
+     *
+     * @since 3.0.10
+     */
+    const IGNORED_FOLDER_MAX_FILES = 2000;
+
+    /**
+     * Largest total size, in bytes, of a folder fingerprinted when it is ignored (B102)
+     *
+     * @since 3.0.10
+     */
+    const IGNORED_FOLDER_MAX_BYTES = 52428800;
 
     /**
      * Maximum scan time in seconds (default 60s for thorough scanning)
@@ -133,6 +164,22 @@ class Vigilante_File_Integrity {
      * @var string
      */
     private $scan_token = '';
+
+    /**
+     * The running marker as this scan stored it, '' when it holds none
+     *
+     * @since 3.0.10
+     * @var string
+     */
+    private $running_raw = '';
+
+    /**
+     * When the scan that refused this one started (mark_scan_started())
+     *
+     * @since 3.0.10
+     * @var int
+     */
+    private $running_since = 0;
 
     /**
      * Limit of PHP for this request when it is below what a scan needs and
@@ -1896,6 +1943,11 @@ class Vigilante_File_Integrity {
     public function run_scheduled_scan() {
         $results = $this->run_scan();
 
+        // Another scan was running and saves its own result (B111).
+        if ( false === $results ) {
+            return;
+        }
+
         // Store last scan time
         update_option( 'vigilante_last_integrity_scan', time() );
         update_option( 'vigilante_last_integrity_results', $results );
@@ -2087,7 +2139,7 @@ class Vigilante_File_Integrity {
             // Honor the user ignore list, exactly as run_scan()'s filter_ignored()
             // does, so the verifier never warns about a file the user silenced.
             $rel = $type . 's/' . $slug . '/' . $file;
-            if ( in_array( $rel, (array) $this->ignored_files, true ) ) {
+            if ( $this->is_ignored_version( $rel ) ) {
                 continue;
             }
             if ( ! file_exists( $path ) ) {
@@ -2176,7 +2228,10 @@ class Vigilante_File_Integrity {
         // Fit the scan into the time PHP gives this request, and leave a mark
         // that says it started, so that one the server stops is not silent.
         $this->fit_to_time_limit();
-        $this->mark_scan_started();
+        if ( ! $this->mark_scan_started() ) {
+            // Another scan is running: it saves its own result (B111).
+            return false;
+        }
 
         // Use settings from options page
         $options = is_array( $this->options ) ? $this->options : array();
@@ -2349,6 +2404,7 @@ class Vigilante_File_Integrity {
         $results['modified']   = $this->filter_ignored( $results['modified'] );
         $results['suspicious'] = $this->filter_ignored( $results['suspicious'] );
         $results['extra']      = $this->filter_ignored( $results['extra'] );
+        $this->forget_changed_ignores();
 
         $results['scan_time'] = round( microtime( true ) - $this->scan_start_time, 2 );
 
@@ -2610,33 +2666,23 @@ class Vigilante_File_Integrity {
     /**
      * Mark that a scan started, and record the previous one if it never ended
      *
+     * The marker is also the lock: only one scan runs at a time. Until 3.0.9
+     * two of them could run together (the button pressed while the scheduled
+     * one ran), each scanning everything and asking WordPress.org about every
+     * plugin, and the second overwrote the marker of the first, so a scan the
+     * server stopped could leave no notice at all (B111, reported by Albert
+     * Calzada). The marker is taken with INSERT IGNORE, a dead or stale one is
+     * replaced only if it still holds what was read, and it is removed only by
+     * the scan that holds it: never read-then-write and never add_option(),
+     * which inserts with ON DUPLICATE KEY UPDATE when the request already
+     * believes the option missing (wp-includes/option.php).
+     *
      * @since 3.0.8
+     * @since 3.0.10 Returns whether this scan got the marker.
+     *
+     * @return bool False when another scan is running.
      */
     private function mark_scan_started() {
-        $previous = get_option( self::RUNNING_OPTION );
-
-        // A marker that is still within its time belongs to a scan that may be
-        // running right now in another request: it is left to that one, unless
-        // its PHP already said that it died.
-        if ( is_array( $previous ) && ! empty( $previous['started'] ) && ( ! empty( $previous['cause'] ) || self::marker_is_stale( $previous ) ) ) {
-            update_option( self::UNFINISHED_OPTION, $previous, false );
-            if ( $this->activity_log ) {
-                $this->activity_log->log(
-                    'file',
-                    'integrity_scan_unfinished',
-                    self::unfinished_scan_text( $previous ),
-                    array(
-                        'started'      => (int) $previous['started'],
-                        'via'          => isset( $previous['via'] ) ? (string) $previous['via'] : '',
-                        'cause'        => isset( $previous['cause'] ) ? (string) $previous['cause'] : '',
-                        'time_limit'   => isset( $previous['time_limit'] ) ? (int) $previous['time_limit'] : 0,
-                        'memory_limit' => isset( $previous['memory_limit'] ) ? (string) $previous['memory_limit'] : '',
-                    ),
-                    'warning'
-                );
-            }
-        }
-
         $this->scan_token = wp_generate_password( 12, false );
         $via              = 'other';
         if ( wp_doing_ajax() ) {
@@ -2645,20 +2691,175 @@ class Vigilante_File_Integrity {
             $via = 'scheduled';
         }
 
-        update_option(
-            self::RUNNING_OPTION,
-            array(
-                'started'      => time(),
-                'via'          => $via,
-                'token'        => $this->scan_token,
-                'time_limit'   => (int) ini_get( 'max_execution_time' ),
-                'memory_limit' => (string) ini_get( 'memory_limit' ),
-                'budget'       => (int) $this->max_scan_time,
-            ),
-            false
+        $marker = array(
+            'started'      => time(),
+            'via'          => $via,
+            'token'        => $this->scan_token,
+            'time_limit'   => (int) ini_get( 'max_execution_time' ),
+            'memory_limit' => (string) ini_get( 'memory_limit' ),
+            'budget'       => (int) $this->max_scan_time,
         );
 
+        $raw = $this->take_running_marker( $marker );
+
+        if ( '' === $raw ) {
+            $previous_raw = $this->read_running_marker();
+            $previous     = is_string( $previous_raw ) ? maybe_unserialize( $previous_raw ) : false;
+
+            if ( null === $previous_raw ) {
+                // Removed between the two queries: try once more.
+                $raw = $this->take_running_marker( $marker );
+            } elseif ( ! is_array( $previous ) || empty( $previous['started'] ) ) {
+                // Not a marker this plugin wrote: nothing to keep from it.
+                $raw = $this->replace_running_marker( $previous_raw, $marker );
+            } elseif ( ! empty( $previous['cause'] ) || self::marker_is_stale( $previous ) ) {
+                // A marker whose PHP already said that it died, or past its time.
+                $raw = $this->replace_running_marker( $previous_raw, $marker );
+
+                if ( '' !== $raw ) {
+                    update_option( self::UNFINISHED_OPTION, $previous, false );
+                    if ( $this->activity_log ) {
+                        $this->activity_log->log(
+                            'file',
+                            'integrity_scan_unfinished',
+                            self::unfinished_scan_text( $previous ),
+                            array(
+                                'started'      => (int) $previous['started'],
+                                'via'          => isset( $previous['via'] ) ? (string) $previous['via'] : '',
+                                'cause'        => isset( $previous['cause'] ) ? (string) $previous['cause'] : '',
+                                'time_limit'   => isset( $previous['time_limit'] ) ? (int) $previous['time_limit'] : 0,
+                                'memory_limit' => isset( $previous['memory_limit'] ) ? (string) $previous['memory_limit'] : '',
+                            ),
+                            'warning'
+                        );
+                    }
+                }
+            }
+
+            if ( '' === $raw ) {
+                $this->running_since = ( is_array( $previous ) && ! empty( $previous['started'] ) ) ? (int) $previous['started'] : time();
+                $this->scan_token    = '';
+                return false;
+            }
+        }
+
+        $this->running_raw = $raw;
+
         register_shutdown_function( array( $this, 'note_scan_stopped' ) );
+
+        return true;
+    }
+
+    /**
+     * Take the running marker if there is none
+     *
+     * @since 3.0.10
+     *
+     * @param array $marker Marker of this scan.
+     * @return string The stored value when taken, '' when another one is there.
+     */
+    private function take_running_marker( array $marker ) {
+        global $wpdb;
+
+        $value = maybe_serialize( $marker );
+
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- The scan lock (B111): INSERT IGNORE is the atomic "create only if missing" that add_option() is not; the cache is cleared right after.
+        $taken = $wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'off')", self::RUNNING_OPTION, $value ) );
+
+        self::forget_cached_marker();
+
+        return 1 === (int) $taken ? $value : '';
+    }
+
+    /**
+     * The running marker as stored, read from the table and not from the cache
+     *
+     * @since 3.0.10
+     *
+     * @return string|null Null when there is none.
+     */
+    private function read_running_marker() {
+        global $wpdb;
+
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- The scan lock (B111) is decided on the row itself: a cached copy may be another process's past.
+        $value = $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s LIMIT 1", self::RUNNING_OPTION ) );
+
+        return null === $value ? null : (string) $value;
+    }
+
+    /**
+     * Replace the running marker, only if it still holds what was read
+     *
+     * Two scans that find the same dead marker cannot both take it: the second
+     * one's UPDATE finds a different value and changes nothing.
+     *
+     * @since 3.0.10
+     *
+     * @param string $expected Stored value that was read.
+     * @param array  $marker   Marker of this scan.
+     * @return string The stored value when taken, '' otherwise.
+     */
+    private function replace_running_marker( $expected, array $marker ) {
+        global $wpdb;
+
+        $value = maybe_serialize( $marker );
+
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- The scan lock (B111): an UPDATE conditioned on the value read, so only one scan takes over a dead marker; the cache is cleared right after.
+        $changed = $wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s AND option_value = %s", $value, self::RUNNING_OPTION, (string) $expected ) );
+
+        self::forget_cached_marker();
+
+        return 1 === (int) $changed ? $value : '';
+    }
+
+    /**
+     * Remove the running marker, only if it is this scan's
+     *
+     * @since 3.0.10
+     *
+     * @return bool Whether this scan's marker was there and is gone.
+     */
+    private function release_running_marker() {
+        global $wpdb;
+
+        if ( '' === $this->running_raw ) {
+            return false;
+        }
+
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- The scan lock (B111): deleted only while it still holds this scan's value, so a scan never removes another's marker; the cache is cleared right after.
+        $gone = $wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value = %s", self::RUNNING_OPTION, $this->running_raw ) );
+
+        self::forget_cached_marker();
+        $this->running_raw = '';
+
+        return 1 === (int) $gone;
+    }
+
+    /**
+     * Drop every cached trace of the running marker after a direct query
+     *
+     * @since 3.0.10
+     */
+    private static function forget_cached_marker() {
+        wp_cache_delete( self::RUNNING_OPTION, 'options' );
+        wp_cache_delete( 'alloptions', 'options' );
+
+        $missing = wp_cache_get( 'notoptions', 'options' );
+        if ( is_array( $missing ) && isset( $missing[ self::RUNNING_OPTION ] ) ) {
+            unset( $missing[ self::RUNNING_OPTION ] );
+            wp_cache_set( 'notoptions', $missing, 'options' );
+        }
+    }
+
+    /**
+     * When the scan that holds the marker started, for whoever could not start
+     *
+     * @since 3.0.10
+     *
+     * @return int Unix time, or 0 when this scan was not refused.
+     */
+    public function running_since() {
+        return (int) $this->running_since;
     }
 
     /**
@@ -2722,8 +2923,12 @@ class Vigilante_File_Integrity {
     private function store_results( $results ) {
         update_option( 'vigilante_last_integrity_scan', time() );
         update_option( 'vigilante_last_integrity_results', $results );
-        delete_option( self::RUNNING_OPTION );
-        delete_option( self::UNFINISHED_OPTION );
+
+        // Only this scan's marker, and the notice of an unfinished scan only
+        // when that marker was still this scan's (B111).
+        if ( $this->release_running_marker() ) {
+            delete_option( self::UNFINISHED_OPTION );
+        }
     }
 
     /**
@@ -8042,11 +8247,273 @@ class Vigilante_File_Integrity {
                         return true;
                     }
 
-                    $file = is_array( $item ) && isset( $item['file'] ) ? $item['file'] : '';
-                    return ! in_array( $file, $this->ignored_files, true );
+                    $file = is_array( $item ) && isset( $item['file'] ) ? (string) $item['file'] : '';
+                    if ( $this->is_ignored_version( $file ) ) {
+                        return false;
+                    }
+                    if ( '' !== $file && in_array( $file, (array) $this->ignored_files, true ) ) {
+                        $this->ignored_changed[ $file ] = isset( $this->ignored_hashes[ $file ] ) ? (string) $this->ignored_hashes[ $file ] : '';
+                    }
+                    return true;
                 }
             )
         );
+    }
+
+    /**
+     * Take off the ignore list the files this scan found changed
+     *
+     * An entry hides one version of a file. Once the scan sees another, the
+     * finding is back in the results, and keeping the path on the list showed
+     * the file in both places, ignored and reported (Fernando, reviewing 3.0.10
+     * on 1 Nov 2026). The list now holds only what is hidden.
+     *
+     * The options are read again and an entry is only removed while it still
+     * holds the fingerprint this scan compared: ignoring the file again while
+     * the scan ran accepted its new content, and that stays.
+     *
+     * @since 3.0.10
+     */
+    private function forget_changed_ignores() {
+        if ( empty( $this->ignored_changed ) ) {
+            return;
+        }
+
+        $ignored = get_option( 'vigilante_ignored_files', array() );
+        $hashes  = get_option( 'vigilante_ignored_hashes', array() );
+        $ignored = is_array( $ignored ) ? $ignored : array();
+        $hashes  = is_array( $hashes ) ? $hashes : array();
+        $gone    = array();
+
+        foreach ( $this->ignored_changed as $file => $compared ) {
+            $now = isset( $hashes[ $file ] ) ? (string) $hashes[ $file ] : '';
+            if ( $now === $compared ) {
+                $gone[] = (string) $file;
+                unset( $hashes[ $file ] );
+            }
+        }
+
+        $this->ignored_changed = array();
+
+        if ( empty( $gone ) ) {
+            return;
+        }
+
+        $ignored = array_values( array_diff( $ignored, $gone ) );
+        update_option( 'vigilante_ignored_hashes', $hashes, false );
+        update_option( 'vigilante_ignored_files', $ignored );
+        $this->ignored_files  = $ignored;
+        $this->ignored_hashes = $hashes;
+    }
+
+    /**
+     * Whether a finding is hidden by the ignore list: the same path AND the same content
+     *
+     * Until 3.0.9 the list held paths only, so a file ignored once was never
+     * reported again whatever happened to it afterwards: whoever could write to a
+     * PHP file the administrator had accepted (in uploads, in the site root) was
+     * invisible from then on. Asked in the support forum on 20 Oct 2026 (B102).
+     * Ignoring now records what the file was at that moment, and a different
+     * content, the file going away or coming back brings the finding back.
+     * Excluded Paths is still the way to stop watching a path for good.
+     *
+     * An entry written before 3.0.10 has no fingerprint, and nothing says
+     * whether the file changed after it was ignored, so it shows once more and
+     * is ignored again with its fingerprint: one notice too many is better than
+     * adopting in silence what may already have changed.
+     *
+     * @since 3.0.10
+     *
+     * @param string $file Path as the scan names it.
+     * @return bool
+     */
+    private function is_ignored_version( $file ) {
+        if ( '' === $file || ! in_array( $file, (array) $this->ignored_files, true ) ) {
+            return false;
+        }
+
+        // Read only when a listed path is met: the class is built on every
+        // request while the module is on, and an option saved without autoload
+        // would cost a query on each of them (second blind review of 3.0.10).
+        if ( null === $this->ignored_hashes ) {
+            $hashes               = get_option( 'vigilante_ignored_hashes', array() );
+            $this->ignored_hashes = is_array( $hashes ) ? $hashes : array();
+        }
+
+        $recorded = isset( $this->ignored_hashes[ $file ] ) ? (string) $this->ignored_hashes[ $file ] : '';
+
+        // Only a fingerprint that says what the file holds hides it. 'missing'
+        // or 'unreadable' recorded for a file the scan did find means the path
+        // did not resolve, and comparing those would hide it whatever it
+        // became (first blind review of 3.0.10).
+        return self::is_content_fingerprint( $recorded ) && hash_equals( $recorded, $this->current_fingerprint( $file ) );
+    }
+
+    /**
+     * Whether a fingerprint says what a file or a folder holds: a SHA-256
+     *
+     * @since 3.0.10
+     *
+     * @param string $fingerprint Value of current_fingerprint().
+     * @return bool
+     */
+    private static function is_content_fingerprint( $fingerprint ) {
+        return 1 === preg_match( '/^[0-9a-f]{64}$/', (string) $fingerprint );
+    }
+
+    /**
+     * What a file or a folder is now: a SHA-256, or 'missing' or 'unreadable'
+     *
+     * @since 3.0.10
+     *
+     * @param string $file Path as the scan names it.
+     * @return string
+     */
+    public function current_fingerprint( $file ) {
+        $path = $this->absolute_from_finding( $file );
+
+        if ( '' === $path ) {
+            return 'unreadable';
+        }
+
+        if ( is_dir( $path ) ) {
+            return $this->folder_fingerprint( $path );
+        }
+
+        if ( ! is_file( $path ) ) {
+            return 'missing';
+        }
+
+        $hash = hash_file( 'sha256', $path );
+
+        return false === $hash ? 'unreadable' : $hash;
+    }
+
+    /**
+     * What a folder holds: one SHA-256 over the path and content of every file in it
+     *
+     * The second blind review of 3.0.10 found the first version of this, which
+     * gave every folder the same 'folder': ignoring the row of a folder with PHP
+     * files that WordPress does not list hid it whatever was added to it later,
+     * a new shell included, since that row is the only signal of such a file.
+     * A folder too large to read here comes back 'unreadable', and cannot be
+     * ignored as it is: Excluded Paths is the way to stop watching it.
+     *
+     * @since 3.0.10
+     *
+     * @param string $path Absolute path of the folder.
+     * @return string
+     */
+    private function folder_fingerprint( $path ) {
+        $lines = array();
+        $bytes = 0;
+        $root  = trailingslashit( str_replace( '\\', '/', $path ) );
+
+        try {
+            $walk = new RecursiveIteratorIterator(
+                new RecursiveDirectoryIterator( $path, FilesystemIterator::SKIP_DOTS )
+            );
+
+            foreach ( $walk as $entry ) {
+                if ( ! $entry->isFile() ) {
+                    continue;
+                }
+
+                $bytes += (int) $entry->getSize();
+
+                if ( count( $lines ) >= self::IGNORED_FOLDER_MAX_FILES || $bytes > self::IGNORED_FOLDER_MAX_BYTES ) {
+                    return 'unreadable';
+                }
+
+                $hash = hash_file( 'sha256', $entry->getPathname() );
+
+                if ( false === $hash ) {
+                    return 'unreadable';
+                }
+
+                $lines[] = substr( str_replace( '\\', '/', $entry->getPathname() ), strlen( $root ) ) . ' ' . $hash;
+            }
+        } catch ( Exception $e ) {
+            unset( $e );
+            return 'unreadable';
+        }
+
+        sort( $lines );
+
+        return hash( 'sha256', "vigilante-folder\n" . implode( "\n", $lines ) );
+    }
+
+    /**
+     * Absolute path of a file as the scan names it
+     *
+     * Core files and anything outside the plugin and theme scans are named from
+     * the WordPress directory (relative_path()); plugin and theme files from
+     * their own folder, as plugins/<slug>/... and themes/<slug>/... (see the
+     * plugin and theme scans). A path that climbs out with .. is refused.
+     *
+     * @since 3.0.10
+     *
+     * @param string $file Path as the scan names it.
+     * @return string Absolute path, or '' when it cannot be one.
+     */
+    private function absolute_from_finding( $file ) {
+        $file = str_replace( '\\', '/', (string) $file );
+
+        if ( '' === $file || preg_match( '#(^|/)\.\.(/|$)#', $file ) ) {
+            return '';
+        }
+
+        // A path the scan could not make relative stays absolute: a content
+        // folder outside the WordPress one, as Bedrock lays it out. Taken as it
+        // is only under the folders WordPress itself declares, so the handlers
+        // cannot be used to ask about files of the server around it (first and
+        // second blind reviews of 3.0.10).
+        if ( 0 === strpos( $file, '/' ) || preg_match( '#^[A-Za-z]:/#', $file ) ) {
+            $uploads = wp_get_upload_dir();
+            $roots   = array( ABSPATH, WP_CONTENT_DIR, WP_PLUGIN_DIR, WPMU_PLUGIN_DIR, isset( $uploads['basedir'] ) ? $uploads['basedir'] : '' );
+
+            foreach ( $roots as $root ) {
+                if ( '' === (string) $root ) {
+                    continue;
+                }
+
+                $root = trailingslashit( str_replace( '\\', '/', (string) $root ) );
+
+                if ( '/' !== $root && 0 === strpos( $file, $root ) ) {
+                    return $file;
+                }
+            }
+
+            return '';
+        }
+
+        $file = ltrim( $file, '/' );
+
+        // wp-config.php may live one folder above WordPress, which the scan of
+        // the critical files reads and names as wp-config.php.
+        if ( false === strpos( $file, '/' ) ) {
+            $critical = $this->critical_file_path( $file );
+
+            if ( false !== $critical ) {
+                return $critical;
+            }
+        }
+
+        if ( 0 === strpos( $file, 'plugins/' ) ) {
+            return WP_PLUGIN_DIR . '/' . substr( $file, 8 );
+        }
+
+        if ( 0 === strpos( $file, 'themes/' ) ) {
+            $rest  = substr( $file, 7 );
+            $slash = strpos( $rest, '/' );
+            $slug  = false === $slash ? $rest : substr( $rest, 0, $slash );
+            $theme = wp_get_theme( $slug );
+            $dir   = $theme->exists() ? $theme->get_stylesheet_directory() : get_theme_root() . '/' . $slug;
+
+            return $dir . ( false === $slash ? '' : substr( $rest, $slash ) );
+        }
+
+        return ABSPATH . $file;
     }
 
     /**
@@ -8656,11 +9123,33 @@ class Vigilante_File_Integrity {
 
         $ignored = get_option( 'vigilante_ignored_files', array() );
 
-        if ( ! in_array( $file_path, $ignored, true ) ) {
-            $ignored[] = $file_path;
-            return update_option( 'vigilante_ignored_files', $ignored );
+        // This version of the file, so a later change shows again (B102). Written
+        // also when the path was already on the list: ignoring again a finding
+        // that came back accepts the new content.
+        // A file whose content cannot be read cannot be ignored as it is now:
+        // its finding would stay hidden whatever it became. Excluded Paths is
+        // the way to stop watching it.
+        $fingerprint = $this->current_fingerprint( $file_path );
+
+        if ( ! self::is_content_fingerprint( $fingerprint ) ) {
+            return false;
         }
 
+        $hashes               = get_option( 'vigilante_ignored_hashes', array() );
+        $hashes               = is_array( $hashes ) ? $hashes : array();
+        $hashes[ $file_path ] = $fingerprint;
+        update_option( 'vigilante_ignored_hashes', $hashes, false );
+        $this->ignored_hashes = $hashes;
+
+        if ( ! in_array( $file_path, $ignored, true ) ) {
+            $ignored[] = $file_path;
+            $this->ignored_files = $ignored;
+            update_option( 'vigilante_ignored_files', $ignored );
+        }
+
+        // True means accepted: the handlers answer an error only for a file
+        // that cannot be ignored as it is. update_option() also says false
+        // when it finds the value already stored, which is not a refusal.
         return true;
     }
 
@@ -8673,6 +9162,15 @@ class Vigilante_File_Integrity {
     public function unignore_file( $file_path ) {
         $ignored = get_option( 'vigilante_ignored_files', array() );
         $ignored = array_values( array_diff( $ignored, array( $file_path ) ) );
+
+        $hashes = get_option( 'vigilante_ignored_hashes', array() );
+        if ( is_array( $hashes ) && isset( $hashes[ $file_path ] ) ) {
+            unset( $hashes[ $file_path ] );
+            update_option( 'vigilante_ignored_hashes', $hashes, false );
+            $this->ignored_hashes = $hashes;
+        }
+
+        $this->ignored_files = $ignored;
 
         return update_option( 'vigilante_ignored_files', $ignored );
     }
@@ -8692,6 +9190,10 @@ class Vigilante_File_Integrity {
      * @return bool
      */
     public function clear_ignored_files() {
+        delete_option( 'vigilante_ignored_hashes' );
+        $this->ignored_files  = array();
+        $this->ignored_hashes = array();
+
         return delete_option( 'vigilante_ignored_files' );
     }
 

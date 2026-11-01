@@ -902,7 +902,19 @@ class Vigilante_Admin {
         );
 
         if ( isset( $tab_map[ $page ] ) ) {
-            wp_safe_redirect( admin_url( 'admin.php?page=vigilante&tab=' . $tab_map[ $page ] ) );
+            // Same fallback as the address itself: wp_safe_redirect() only
+            // knows the home host and sent a site whose WordPress lives on a
+            // host of its own to the dashboard instead (B67).
+            $tab_url = admin_url( 'admin.php?page=vigilante&tab=' . $tab_map[ $page ] );
+
+            add_filter(
+                'wp_safe_redirect_fallback',
+                static function () use ( $tab_url ) {
+                    return $tab_url;
+                }
+            );
+
+            wp_safe_redirect( $tab_url );
             exit;
         }
     }
@@ -1954,14 +1966,14 @@ class Vigilante_Admin {
                 'actions'             => __( 'Actions', 'vigilante' ),
                 'ignore'              => __( 'Ignore', 'vigilante' ),
                 'ignoring'            => __( 'Ignoring...', 'vigilante' ),
-                'fileIgnored'         => __( 'File added to ignored list.', 'vigilante' ),
+                'fileIgnored'         => __( 'File ignored as it is now. If it changes, it will show again.', 'vigilante' ),
                 'fileUnignored'       => __( 'File removed from ignored list.', 'vigilante' ),
                 'confirmClearIgnored' => __( 'Remove all files from the ignored list? They will appear in scan results again.', 'vigilante' ),
                 'ignoredCleared'      => __( 'Ignored files list cleared. Page will reload...', 'vigilante' ),
                 'selectAll'           => __( 'Select all', 'vigilante' ),
                 'bulkIgnoreSelected'  => __( 'Ignore selected', 'vigilante' ),
                 'bulkNoSelection'     => __( 'Select at least one file first.', 'vigilante' ),
-                'bulkConfirmIgnore'   => __( 'Ignore the selected files? They will be hidden from future scan results until you remove them from the ignored list.', 'vigilante' ),
+                'bulkConfirmIgnore'   => __( 'Ignore the selected files as they are now? They will be hidden from scan results until they change or you remove them from the ignored list.', 'vigilante' ),
                 'bulkConfirmUnignore' => __( 'Remove the selected files from the ignored list? They will appear in scan results again.', 'vigilante' ),
                 'bulkProcessing'      => __( 'Processing...', 'vigilante' ),
                 /* translators: %d: number of files selected for bulk action. */
@@ -2372,6 +2384,10 @@ class Vigilante_Admin {
                     $parts     = explode( ',', $candidate );
                     $candidate = trim( $parts[0] );
                 }
+                // A proxy that writes the port ("203.0.113.7:51234", Azure App
+                // Service) is still a proxy: until 3.0.9 this notice never showed
+                // there (B113).
+                $candidate = Vigilante_IP_Utils::strip_port( $candidate );
                 if ( ! filter_var( $candidate, FILTER_VALIDATE_IP ) || $candidate === $remote ) {
                     continue;
                 }
@@ -3215,7 +3231,7 @@ class Vigilante_Admin {
         $public = array();
 
         foreach ( explode( ',', $chain ) as $entry ) {
-            $address = Vigilante_IP_Utils::unmap_ipv4( trim( $entry ) );
+            $address = Vigilante_IP_Utils::unmap_ipv4( Vigilante_IP_Utils::strip_port( $entry ) );
 
             if ( filter_var( $address, FILTER_VALIDATE_IP ) && ! Vigilante_IP_Utils::is_own_network( $address ) ) {
                 $public[] = $address;
@@ -8713,7 +8729,7 @@ class Vigilante_Admin {
         <?php if ( ! empty( $ignored_files ) ) : ?>
         <div id="vigilante-section-fi-ignored" class="vigilante-settings-section">
             <h2><?php esc_html_e( 'Ignored Files', 'vigilante' ); ?></h2>
-            <p class="description"><?php esc_html_e( 'These files are excluded from scan results and email notifications. They will still be scanned but any findings will be hidden. To leave a whole folder out, add it to Excluded Paths instead.', 'vigilante' ); ?></p>
+            <p class="description"><?php esc_html_e( 'Each file is ignored as it was when you ignored it: its findings are hidden from scan results and email notifications, and they come back if the file changes, goes away or comes back, and the next scan takes it off this list. Files ignored with an earlier version of Vigilant show once more, to be ignored again. To stop watching a file or a folder for good, add it to Excluded Paths instead.', 'vigilante' ); ?></p>
             <div class="vigilante-paginated-section" data-bulk-mode="unignore">
                 <div class="vigilante-fi-bulk-bar">
                     <button type="button" class="button vigilante-bulk-unignore" disabled><?php esc_html_e( 'Stop ignoring selected', 'vigilante' ); ?></button>
@@ -9944,6 +9960,23 @@ class Vigilante_Admin {
         $file_integrity = new Vigilante_File_Integrity( $this->settings, $this->database, $this->activity_log );
         $results = $file_integrity->run_scan();
 
+        // One scan at a time (B111): the one already running saves its result.
+        if ( false === $results ) {
+            $minutes = max( 1, (int) ceil( ( time() - $file_integrity->running_since() ) / MINUTE_IN_SECONDS ) );
+            wp_send_json_error(
+                sprintf(
+                    /* translators: %d: Minutes since the running scan started. */
+                    _n(
+                        'A scan is already running: it started %d minute ago. Its results will show here when it finishes.',
+                        'A scan is already running: it started %d minutes ago. Its results will show here when it finishes.',
+                        $minutes,
+                        'vigilante'
+                    ),
+                    $minutes
+                )
+            );
+        }
+
         // Save new results
         update_option( 'vigilante_last_integrity_scan', time() );
         update_option( 'vigilante_last_integrity_results', $results );
@@ -10080,11 +10113,10 @@ class Vigilante_Admin {
          * Known limits, found by the cross review, that only a file name with a
          * stray < in it reaches. wp_strip_all_tags() shortens such a name at the
          * < instead of refusing it, so the stored entry can match another file
-         * (a.php<b is stored as a.php), and the value ignore_file() returns is
-         * not read, so a refusal of its own is answered as success. The fix, if
-         * a site ever needs it, is to answer with an error when
-         * wp_strip_all_tags() changes what was sent and to check that return
-         * value. An entry the old reader stored for such a name (it wrote the
+         * (a.php<b is stored as a.php). The fix, if a site ever needs it, is to
+         * answer with an error when wp_strip_all_tags() changes what was sent.
+         * Since 3.0.10 the value ignore_file() returns is read: it refuses a
+         * file it cannot read, which could not be ignored as it is. An entry the old reader stored for such a name (it wrote the
          * < as &lt;) is listed but "Stop ignoring" cannot remove it; "Clear all
          * ignored files" does.
          */
@@ -10110,7 +10142,10 @@ class Vigilante_Admin {
         }
 
         $file_integrity = new Vigilante_File_Integrity( $this->settings, $this->database );
-        $file_integrity->ignore_file( $file );
+
+        if ( ! $file_integrity->ignore_file( $file ) ) {
+            wp_send_json_error( __( 'Vigilant cannot read this file, so it cannot be ignored as it is now. To stop watching it, add its path to Excluded Paths.', 'vigilante' ) );
+        }
 
         // Also remove the file from stored scan results so UI updates
         $results = get_option( 'vigilante_last_integrity_results' );
@@ -10191,10 +10226,21 @@ class Vigilante_Admin {
         }
 
         $file_integrity = new Vigilante_File_Integrity( $this->settings, $this->database );
-        $count = 0;
+        $count    = 0;
+        $accepted = array();
         foreach ( $files as $file ) {
-            $file_integrity->ignore_file( $file );
-            $count++;
+            // A file Vigilant cannot read is not ignored (see ajax_ignore_file()).
+            if ( $file_integrity->ignore_file( $file ) ) {
+                $accepted[] = $file;
+                $count++;
+            }
+        }
+        $refused = count( $files ) - $count;
+        $files   = $accepted;
+
+        // None accepted: an error, so the script keeps the rows on screen.
+        if ( 0 === $count ) {
+            wp_send_json_error( __( 'Vigilant cannot read the selected files, so they cannot be ignored as they are now. To stop watching them, add their paths to Excluded Paths.', 'vigilante' ) );
         }
 
         // Also prune the stored scan results so the UI matches the new ignore list.
@@ -10224,7 +10270,11 @@ class Vigilante_Admin {
                     /* translators: %d: number of files added to the ignored list */
                     _n( '%d file added to ignored list.', '%d files added to ignored list.', $count, 'vigilante' ),
                     $count
-                ),
+                ) . ( $refused > 0 ? ' ' . sprintf(
+                    /* translators: %d: number of files that could not be read */
+                    _n( '%d file could not be read and was not ignored: add it to Excluded Paths to stop watching it.', '%d files could not be read and were not ignored: add them to Excluded Paths to stop watching them.', $refused, 'vigilante' ),
+                    $refused
+                ) : '' ),
             )
         );
     }

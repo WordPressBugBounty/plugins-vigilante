@@ -3,7 +3,7 @@
  * Plugin Name: Vigilant - 100% Free Security Suite: Firewall, 2FA, Login, Headers, Scanner…
  * Plugin URI: https://servicios.ayudawp.com
  * Description: Complete security solution for WordPress. Firewall, 2FA, security headers, login protection, file integrity monitoring, activity logging and more.
- * Version: 3.0.9
+ * Version: 3.0.10
  * Author: Fernando Tellado
  * Author URI: https://ayudawp.com
  * Text Domain: vigilante
@@ -24,7 +24,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Plugin constants
  */
-define( 'VIGILANTE_VERSION', '3.0.9' );
+define( 'VIGILANTE_VERSION', '3.0.10' );
 define( 'VIGILANTE_PLUGIN_FILE', __FILE__ );
 define( 'VIGILANTE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'VIGILANTE_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -171,6 +171,10 @@ function vigilante_load_plugin() {
     // One click repair of Vigilant's own files (admin-post action).
     Vigilante_Self_Repair::init();
     add_filter( 'upgrader_post_install', 'vigilante_mark_upgrader_wrote', 10, 3 );
+
+    // Deleting a site of a network drops its tables, ours included. Registered
+    // outside is_admin() because a site can also be deleted from WP-CLI.
+    add_filter( 'wpmu_drop_tables', 'vigilante_drop_site_tables', 10, 2 );
 
     // Initialize core components only - modules will be initialized at init
     add_action( 'init', 'vigilante_init_plugin', 1 );
@@ -1165,6 +1169,25 @@ function vigilante_mark_upgrader_wrote( $response, $hook_extra, $result ) {
         'manifest' => Vigilante_Self_Integrity::manifest_fingerprint_of( (string) $result['destination'] ),
     );
     return $response;
+}
+
+/**
+ * Drop Vigilant's tables along with the site of the network that owns them
+ *
+ * See Vigilante_Database::add_site_tables_to_drop() for what is added and
+ * what is kept.
+ *
+ * @since 3.0.10
+ *
+ * @param string[] $tables  Tables core is about to drop.
+ * @param int      $site_id ID of the site being deleted. Optional: a plugin that
+ *                          applies the filter with the list alone would otherwise
+ *                          end in an ArgumentCountError.
+ * @return string[]
+ */
+function vigilante_drop_site_tables( $tables, $site_id = 0 ) {
+    $database = new Vigilante_Database();
+    return $database->add_site_tables_to_drop( $tables, $site_id );
 }
 
 /**

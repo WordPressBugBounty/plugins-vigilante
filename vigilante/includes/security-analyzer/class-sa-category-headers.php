@@ -1008,11 +1008,32 @@ class Vigilante_SA_Category_Headers {
             return Vigilante_SA_Check_Result::pass( $args );
         }
 
-        $args['detail'] = sprintf(
-            /* translators: %s: comma-separated leaked headers */
-            __( 'Version information leaked through response headers: %s', 'vigilante' ),
-            implode( ' | ', $leaks )
-        );
+        // "Version" only when there is one: PleskLin names the panel and the
+        // system, not a version, and still counts as a leak (B110).
+        $has_version = (bool) preg_match( '#\d#', implode( ' ', $leaks ) );
+
+        $args['detail'] = $has_version
+            ? sprintf(
+                /* translators: %s: comma-separated leaked headers */
+                __( 'Version information leaked through response headers: %s', 'vigilante' ),
+                implode( ' | ', $leaks )
+            )
+            : sprintf(
+                /* translators: %s: comma-separated leaked headers */
+                __( 'Server software revealed through response headers: %s', 'vigilante' ),
+                implode( ' | ', $leaks )
+            );
+
+        // Vigilant's rules are being applied and remove X-Powered-By from both
+        // tables of mod_headers, so one that still arrives is added outside
+        // .htaccess, by the server configuration or by a web server in front.
+        if ( $x_powered && ! $this->block_not_applied && $this->module_on && ! empty( $this->written ) ) {
+            $args['detail'] = rtrim( $args['detail'], " .\t\n" ) . '. ' . __( 'Vigilant removes X-Powered-By in .htaccess and its rules are being applied, so this one is added by the server configuration, outside .htaccess.', 'vigilante' );
+
+            if ( 0 === stripos( $x_powered, 'plesk' ) ) {
+                $args['detail'] .= ' ' . __( 'On Plesk it is turned off in panel.ini, with xPoweredByHeader = off under [webserver]: a change for the server administrator or the hosting.', 'vigilante' );
+            }
+        }
         // The same block that sets the headers removes X-Powered-By: while it
         // is not being applied, that one stays too. Why it is not applied is
         // in the row run() adds for all of them.

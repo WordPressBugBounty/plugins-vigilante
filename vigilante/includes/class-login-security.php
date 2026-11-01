@@ -1185,6 +1185,7 @@ class Vigilante_Login_Security {
      */
     const CONTROLLED_REJECTIONS = array(
         'vigilante_2fa_required',      // Two factor asked for, by app or by email.
+        'vigilante_2fa_locked',        // The account used up its wrong codes (B61).
         'vigilante_lockout',           // This address is already locked out.
         'vigilante_force_reset',       // An administrator forced a password reset.
         'vigilante_password_expired',  // Password expiry policy, over XML-RPC.

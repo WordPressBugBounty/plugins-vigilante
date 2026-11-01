@@ -344,19 +344,17 @@ class Vigilante_Comment_Security {
             return $commentdata;
         }
 
-        $commenter_ip = isset( $_SERVER['REMOTE_ADDR'] ) 
-            ? sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) ) 
-            : '';
-
-        foreach ( $blocked_ips as $blocked_ip ) {
-            $blocked_ip = trim( $blocked_ip );
-            if ( $blocked_ip === $commenter_ip ) {
-                wp_die(
-                    esc_html__( 'Your comment could not be submitted.', 'vigilante' ),
-                    esc_html__( 'Comment Blocked', 'vigilante' ),
-                    array( 'response' => 403, 'back_link' => true )
-                );
-            }
+        // The one resolver of the plugin, so a proxy declared in the Firewall tab
+        // counts here too, and the IP list syntax (CIDR, wildcards, IPv6 in any
+        // spelling) is the same as everywhere else. Until 3.0.9 this compared
+        // REMOTE_ADDR as a string (B114). No screen writes block_ips: only
+        // code that filters vigilante_validate_options reaches this.
+        if ( Vigilante_IP_Utils::in_list( Vigilante_IP_Utils::get_client_ip(), (array) $blocked_ips ) ) {
+            wp_die(
+                esc_html__( 'Your comment could not be submitted.', 'vigilante' ),
+                esc_html__( 'Comment Blocked', 'vigilante' ),
+                array( 'response' => 403, 'back_link' => true )
+            );
         }
 
         return $commentdata;

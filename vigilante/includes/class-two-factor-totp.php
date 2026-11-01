@@ -301,6 +301,12 @@ class Vigilante_Two_Factor_TOTP {
             return $this->api_requires_2fa_error();
         }
 
+        // An account that has used up its wrong codes gets no new session until
+        // the window passes, whatever the address (B61).
+        if ( $this->account_is_locked( $user->ID ) ) {
+            return $this->account_locked_error( $user->ID );
+        }
+
         $this->set_pending_verification( $user->ID );
 
         $this->log_event( 'totp_verification_requested', $user->ID, __( 'TOTP verification requested at login', 'vigilante' ) );
@@ -420,6 +426,13 @@ class Vigilante_Two_Factor_TOTP {
             $this->redirect_to_login_with_notice( 'attempts' );
         }
 
+        // And per account, across sessions and addresses (B61). Taken before the
+        // code is checked, so parallel requests count each other.
+        if ( ! $this->reserve_code_attempt( $user_id ) ) {
+            $this->clear_pending_verification();
+            $this->redirect_to_login_with_notice( 'locked' );
+        }
+
         $code            = isset( $_POST['vigilante_2fa_code'] ) ? sanitize_text_field( wp_unslash( $_POST['vigilante_2fa_code'] ) ) : '';
         $remember_device = ! empty( $_POST['vigilante_2fa_remember'] );
 
@@ -433,6 +446,7 @@ class Vigilante_Two_Factor_TOTP {
             if ( is_wp_error( $backup_result ) ) {
                 // Both failed
                 $this->increment_pending_attempts();
+                $this->note_failed_code( $user_id );
                 set_transient( 'vigilante_2fa_error_' . $user_id, $result->get_error_message(), 60 );
                 wp_safe_redirect( add_query_arg( 'vigilante_2fa', '1', wp_login_url() ) );
                 exit;
@@ -447,6 +461,7 @@ class Vigilante_Two_Factor_TOTP {
         $redirect_to = $this->pending_login_redirect();
 
         $this->clear_pending_verification();
+        $this->clear_account_failures( $user_id );
 
         // Trust device if requested (and if the option allows it, see trust_device)
         if ( $remember_device && $this->trust_device( $user_id ) ) {
@@ -1497,7 +1512,25 @@ class Vigilante_Two_Factor_TOTP {
             return;
         }
 
-        wp_safe_redirect( admin_url( 'profile.php#vigilante-totp-setup' ) );
+        /*
+         * wp_safe_redirect() only knows the home host, so on a site whose
+         * WordPress lives on a host of its own it turned this address into
+         * admin_url(), the dashboard, which ran this check again: a loop until
+         * the browser gave up (B67). The address is built from the site's own
+         * settings and carries nothing from the request, so the fallback of this
+         * one call is the same address, as in
+         * Vigilante_User_Security::redirect_to_profile().
+         */
+        $profile = admin_url( 'profile.php#vigilante-totp-setup' );
+
+        add_filter(
+            'wp_safe_redirect_fallback',
+            static function () use ( $profile ) {
+                return $profile;
+            }
+        );
+
+        wp_safe_redirect( $profile );
         exit;
     }
 

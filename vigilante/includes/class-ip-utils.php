@@ -745,7 +745,7 @@ class Vigilante_IP_Utils {
         $nearest = '';
 
         foreach ( $entries as $entry ) {
-            $address = self::unmap_ipv4( $entry );
+            $address = self::unmap_ipv4( self::strip_port( $entry ) );
 
             if ( ! filter_var( $address, FILTER_VALIDATE_IP ) ) {
                 break;
@@ -842,6 +842,67 @@ class Vigilante_IP_Utils {
         }
 
         return $address;
+    }
+
+    /**
+     * An address written by a proxy with its port, without the port
+     *
+     * Some proxies append the port the connection came from (Azure App
+     * Service, Application Gateway and IIS with ARR write "203.0.113.7:51234"
+     * and "[2001:db8::1]:443"). Until 3.0.9 such an entry stopped the reading
+     * of the header, so on those hosts every visitor was the proxy: one rate
+     * limit and one login lockout for everybody, and the IP lists never
+     * matched. Reported by kta1kri against VigIA, where the same fix shipped
+     * in 2.8.3.
+     *
+     * Only two shapes are taken apart: an IPv4 address with a port, and an
+     * IPv6 address in brackets with or without one. A bare IPv6 address has
+     * colons too, so anything that already is an address comes back as it
+     * was. Anything else comes back as it was as well, and fails the address
+     * check of the caller.
+     *
+     * @since 3.0.10
+     *
+     * @param string $entry One address as written in a proxy header.
+     * @return string
+     */
+    public static function strip_port( $entry ) {
+        $entry = trim( (string) $entry );
+
+        if ( filter_var( $entry, FILTER_VALIDATE_IP ) ) {
+            return $entry;
+        }
+
+        if ( preg_match( '/^\[([0-9a-fA-F:.]+)\](?::(\d{1,5}))?$/', $entry, $m ) ) {
+            $port = isset( $m[2] ) ? $m[2] : '';
+
+            if ( filter_var( $m[1], FILTER_VALIDATE_IP, FILTER_FLAG_IPV6 ) && ( '' === $port || self::is_port( $port ) ) ) {
+                return $m[1];
+            }
+
+            return $entry;
+        }
+
+        if ( preg_match( '/^(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})$/', $entry, $m )
+            && filter_var( $m[1], FILTER_VALIDATE_IP, FILTER_FLAG_IPV4 )
+            && self::is_port( $m[2] )
+        ) {
+            return $m[1];
+        }
+
+        return $entry;
+    }
+
+    /**
+     * Whether a written port is one, 1 to 65535
+     *
+     * @since 3.0.10
+     *
+     * @param string $port Digits after the colon.
+     * @return bool
+     */
+    private static function is_port( $port ) {
+        return ( (int) $port >= 1 && (int) $port <= 65535 );
     }
 
     /**
