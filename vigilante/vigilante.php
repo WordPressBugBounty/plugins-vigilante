@@ -3,7 +3,7 @@
  * Plugin Name: Vigilant - 100% Free Security Suite: Firewall, 2FA, Login, Headers, Scanner…
  * Plugin URI: https://servicios.ayudawp.com
  * Description: Complete security solution for WordPress. Firewall, 2FA, security headers, login protection, file integrity monitoring, activity logging and more.
- * Version: 3.0.11
+ * Version: 3.0.12
  * Author: Fernando Tellado
  * Author URI: https://ayudawp.com
  * Text Domain: vigilante
@@ -23,7 +23,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Plugin constants
  */
-define( 'VIGILANTE_VERSION', '3.0.11' );
+define( 'VIGILANTE_VERSION', '3.0.12' );
 define( 'VIGILANTE_PLUGIN_FILE', __FILE__ );
 define( 'VIGILANTE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'VIGILANTE_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -180,6 +180,15 @@ function vigilante_load_plugin() {
     // too, for WP-CLI.
     add_action( 'delete_user', 'vigilante_delete_user_two_factor' );
     add_action( 'wpmu_delete_user', 'vigilante_delete_network_user_two_factor' );
+
+    // A new password starts the daily count of wrong two factor codes again
+    // (B127). wp_set_password() fires the first action, and so does the reset
+    // screen through it (wp-includes/pluggable.php:3134 in 7.1.4); the profile
+    // and the REST API go through wp_update_user(), which only fires it since
+    // 6.9 (user.php:2769 in 7.1.4), so profile_update covers 6.2 to 6.8
+    // (second blind review of 3.0.12). Outside is_admin(), for WP-CLI.
+    add_action( 'wp_set_password', 'vigilante_two_factor_password_changed', 10, 3 );
+    add_action( 'profile_update', 'vigilante_two_factor_profile_updated', 10, 2 );
 
     // Initialize core components only - modules will be initialized at init
     add_action( 'init', 'vigilante_init_plugin', 1 );
@@ -1196,6 +1205,96 @@ function vigilante_drop_site_tables( $tables, $site_id = 0 ) {
 }
 
 /**
+ * Start the daily count of wrong two factor codes again after a new password (B127)
+ *
+ * An account may send 10 wrong codes in 15 minutes and 20 in a day. Once the
+ * holder changes the password, whoever had the old one cannot send codes any
+ * more, and the daily stop would only keep the holder out for up to a day.
+ * The codes of the last 15 minutes still count, so someone who reads the
+ * account's mail and resets the password again and again gets no more tries
+ * than the short limit gave in 3.0.11. The holder is told again of the next
+ * stop, even within the day.
+ *
+ * WordPress also fires this action at login, when it stores the same password
+ * with a newer hash (wp-includes/user.php:224-226 and :307-309 in 7.1.4), and
+ * there whoever typed the right password is not changing it. Since 6.7 the
+ * action passes the account as it was, and the password still matching the
+ * old hash tells that case apart (found by the first blind review of 3.0.12).
+ * The check passes no user ID, so it cannot start another rehash. Before 6.7,
+ * wp_check_password() rehashes an MD5 hash the same way with two arguments
+ * only, and that counts as a change: once per account stored as MD5, about
+ * 20 more codes once (second blind review).
+ *
+ * @since 3.0.12
+ *
+ * @param string       $password      Plain text password just set.
+ * @param int          $user_id       User ID.
+ * @param WP_User|null $old_user_data The account before the change (WordPress 6.7 and later).
+ */
+function vigilante_two_factor_password_changed( $password, $user_id, $old_user_data = null ) {
+    // The cheap question first: the hash check costs a full bcrypt (about a
+    // quarter of a second at the cost PHP 8.4 sets), and since 6.9 this action
+    // also fires for every new account (third blind review of 3.0.12).
+    if ( ! absint( $user_id ) || ! get_user_meta( absint( $user_id ), 'vigilante_2fa_failed_code', false ) ) {
+        return;
+    }
+
+    if ( $old_user_data instanceof WP_User && is_string( $password ) && '' !== $password && wp_check_password( $password, $old_user_data->user_pass ) ) {
+        return;
+    }
+
+    vigilante_two_factor_restart_day( $user_id );
+}
+
+/**
+ * The same, for a password changed with wp_update_user() before WordPress 6.9
+ *
+ * The profile, the user editor and the REST API change it there, and before
+ * 6.9 that fires no wp_set_password. The stored hash changing is the change.
+ * On 6.9 and later both actions run, and the second one finds nothing new.
+ *
+ * @since 3.0.12
+ *
+ * @param int     $user_id       User ID.
+ * @param WP_User $old_user_data The account before the update.
+ */
+function vigilante_two_factor_profile_updated( $user_id, $old_user_data ) {
+    if ( ! $old_user_data instanceof WP_User ) {
+        return;
+    }
+
+    $user = get_userdata( absint( $user_id ) );
+    if ( $user && ! hash_equals( (string) $old_user_data->user_pass, (string) $user->user_pass ) ) {
+        vigilante_two_factor_restart_day( $user_id );
+    }
+}
+
+/**
+ * Let the daily count of wrong codes start now
+ *
+ * @since 3.0.12
+ *
+ * @param int $user_id User ID.
+ */
+function vigilante_two_factor_restart_day( $user_id ) {
+    $user_id = absint( $user_id );
+
+    if ( ! $user_id || ! get_user_meta( $user_id, 'vigilante_2fa_failed_code', false ) ) {
+        return;
+    }
+
+    // The holder is told again of a stop after this, even within the day.
+    update_user_meta(
+        $user_id,
+        'vigilante_2fa_lock',
+        array(
+            'noticed' => 0,
+            'since'   => time(),
+        )
+    );
+}
+
+/**
  * Remove a deleted account's two factor rows (single site)
  *
  * On a network delete_user only means the account left one site, and it
@@ -1224,7 +1323,8 @@ function vigilante_delete_user_two_factor( $user_id ) {
  * of the main site, of the sites it belonged to and of the site that holds its
  * TOTP enrolment (the vigilante_totp_site user meta), which is where a login
  * leaves them; all of those are looked at, and nothing else, so a network with
- * thousands of sites is not walked for one account.
+ * thousands of sites is not walked for one account. The marked site may have
+ * been deleted with its TOTP table kept: that table is reached by its prefix.
  *
  * @since 3.0.11
  *
@@ -1249,6 +1349,14 @@ function vigilante_delete_network_user_two_factor( $user_id ) {
 
     foreach ( array_unique( array_filter( $blog_ids ) ) as $blog_id ) {
         if ( ! get_site( $blog_id ) ) {
+            // A deleted subsite keeps its TOTP table while it holds
+            // enrolments, so the enrolment of this account may still be there
+            // (B129). Reached by its prefix: switch_to_blog() needs the site.
+            if ( $blog_id === $marked ) {
+                global $wpdb;
+                $database = new Vigilante_Database();
+                $database->delete_user_two_factor_rows( $user_id, $wpdb->get_blog_prefix( $blog_id ) );
+            }
             continue;
         }
         switch_to_blog( $blog_id );

@@ -114,6 +114,40 @@ class Vigilante_Database {
     }
 
     /**
+     * Whether a table exists, whatever case MySQL gives its name in
+     *
+     * MySQL looks table names up without regard to case when
+     * lower_case_table_names is 1 or 2, so WordPress works with a prefix
+     * written in another case than its tables. But SHOW TABLES answers with
+     * the name as stored: in lower case at 1, in the case the table was
+     * created with at 2. Until 3.0.12 four checks of this class compared that
+     * answer strictly, and on those servers the login attempts were never
+     * recorded, so the lockout by address never started, while the activity
+     * log and the file hashes stayed empty (B128). Measured in Testing with
+     * the prefix in capitals: SHOW TABLES gave the lower case name.
+     *
+     * @since 3.0.12
+     *
+     * @param string $table Full table name.
+     * @return bool
+     */
+    public function table_present( $table ) {
+        $table = (string) $table;
+        if ( '' === $table ) {
+            return false;
+        }
+
+        // The global, not $this->wpdb, so the PreparedSQL sniff can see the
+        // prepare() call (see delete_user_two_factor_rows()).
+        global $wpdb;
+
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- Table check; the table may not exist yet on this site, and a cached answer would hide a table created or dropped in this request.
+        $found = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) );
+
+        return is_string( $found ) && 0 === strcasecmp( $found, $table );
+    }
+
+    /**
      * Get activity log table name
      *
      * @return string
@@ -632,10 +666,7 @@ class Vigilante_Database {
      * @return bool
      */
     private function activity_log_table_exists() {
-        $table = $this->get_activity_log_table();
-        // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, PluginCheck.Security.DirectDB.UnescapedDBParameter
-        $result = $this->wpdb->get_var( $this->wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) );
-        return $result === $table;
+        return $this->table_present( $this->get_activity_log_table() );
     }
 
     /**
@@ -824,10 +855,7 @@ class Vigilante_Database {
      * @return bool
      */
     private function login_attempts_table_exists() {
-        $table = $this->get_login_attempts_table();
-        // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, PluginCheck.Security.DirectDB.UnescapedDBParameter
-        $result = $this->wpdb->get_var( $this->wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) );
-        return $result === $table;
+        return $this->table_present( $this->get_login_attempts_table() );
     }
 
     /**
@@ -1082,10 +1110,7 @@ class Vigilante_Database {
      * @return bool
      */
     private function file_integrity_table_exists() {
-        $table = $this->get_file_integrity_table();
-        // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, PluginCheck.Security.DirectDB.UnescapedDBParameter
-        $result = $this->wpdb->get_var( $this->wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) );
-        return $result === $table;
+        return $this->table_present( $this->get_file_integrity_table() );
     }
 
     /**
@@ -1395,34 +1420,49 @@ class Vigilante_Database {
      * data of an account that no longer exists. A table this site does not
      * have yet is skipped.
      *
+     * With a prefix, the tables of that prefix instead (3.0.12, B129): a
+     * deleted subsite keeps its TOTP table while it holds enrolments
+     * (add_site_tables_to_drop()), and switch_to_blog() cannot reach a site
+     * that no longer exists. Only the names of this class are built on it.
+     *
      * @since 3.0.11
      *
-     * @param int $user_id User ID.
+     * @param int         $user_id User ID.
+     * @param string|null $prefix  Table prefix of another site, or null for the current one.
      * @return int Rows removed.
      */
-    public function delete_user_two_factor_rows( $user_id ) {
+    public function delete_user_two_factor_rows( $user_id, $prefix = null ) {
         $user_id = absint( $user_id );
         if ( ! $user_id ) {
             return 0;
         }
 
-        // The global, not $this->wpdb, so the PreparedSQL sniff can see the
-        // prepare() call: it does not follow the property (measured with Plugin
-        // Check 2.2.0, seven errors on the SHOW TABLES line).
+        // The global, not $this->wpdb, so the PreparedSQL sniff can follow the
+        // queries: it does not follow the property (measured with Plugin Check
+        // 2.2.0, seven errors when the SHOW TABLES lived here).
         global $wpdb;
 
         $removed = 0;
-        $tables  = array(
-            $this->get_2fa_codes_table(),
-            $this->get_2fa_devices_table(),
-            $this->get_2fa_notifications_table(),
-            $this->get_totp_table(),
-        );
+        if ( is_string( $prefix ) && '' !== $prefix ) {
+            $tables = array(
+                $prefix . $this->two_factor_codes_table,
+                $prefix . $this->two_factor_devices_table,
+                $prefix . $this->two_factor_notifications_table,
+                $prefix . $this->two_factor_totp_table,
+            );
+        } else {
+            $tables = array(
+                $this->get_2fa_codes_table(),
+                $this->get_2fa_devices_table(),
+                $this->get_2fa_notifications_table(),
+                $this->get_totp_table(),
+            );
+        }
 
         foreach ( $tables as $table ) {
-            // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- One-off check on user deletion; the table may not exist on this site yet.
-            $exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) );
-            if ( $exists !== $table ) {
+            // Without regard to case (B128): a strict comparison read the
+            // tables as missing on a server that answers in lower case.
+            if ( ! $this->table_present( $table ) ) {
                 continue;
             }
 

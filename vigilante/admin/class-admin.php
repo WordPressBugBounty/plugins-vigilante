@@ -1999,13 +1999,31 @@ class Vigilante_Admin {
                 'ignoring'            => __( 'Ignoring...', 'vigilante' ),
                 'fileIgnored'         => __( 'File ignored as it is now. If it changes, it will show again.', 'vigilante' ),
                 'fileUnignored'       => __( 'File removed from ignored list.', 'vigilante' ),
-                'confirmClearIgnored' => __( 'Remove all files from the ignored list? They will appear in scan results again.', 'vigilante' ),
+                'confirmClearIgnored' => self::clear_ignored_confirm(),
+                'confirmClearIgnoredOne'  => __( 'Stop ignoring the only file on the list? Its findings will appear in scan results again.', 'vigilante' ),
+                /* translators: %d: number of files on the ignore list, two or more. */
+                'confirmClearIgnoredMany' => __( 'Stop ignoring all %d files on the list, not only the selected ones? Their findings will appear in scan results again.', 'vigilante' ),
+                'clearIgnoredOne'     => __( 'Stop ignoring the only file', 'vigilante' ),
+                /* translators: %d: number of files on the ignore list, two or more. */
+                'clearIgnoredMany'    => __( 'Stop ignoring all %d files', 'vigilante' ),
+                'ignoredSummaryNone'  => __( 'None', 'vigilante' ),
+                'ignoredReloadToSee'  => __( 'Reload the page to see the files ignored since it was opened.', 'vigilante' ),
+                'ignoredSummaryOne'   => __( '1 file', 'vigilante' ),
+                /* translators: %d: number of files being ignored, two or more. */
+                'ignoredSummaryMany'  => __( '%d files', 'vigilante' ),
                 'ignoredCleared'      => __( 'Ignored files list cleared. Page will reload...', 'vigilante' ),
                 'selectAll'           => __( 'Select all', 'vigilante' ),
                 'bulkIgnoreSelected'  => __( 'Ignore selected', 'vigilante' ),
                 'bulkNoSelection'     => __( 'Select at least one file first.', 'vigilante' ),
                 'bulkConfirmIgnore'   => __( 'Ignore the selected files as they are now? They will be hidden from scan results until they change or you remove them from the ignored list.', 'vigilante' ),
                 'bulkConfirmUnignore' => __( 'Remove the selected files from the ignored list? They will appear in scan results again.', 'vigilante' ),
+                // With the count, which takes in what is selected on other pages.
+                'bulkConfirmIgnoreOne'    => __( 'Ignore the selected file as it is now? It will be hidden from scan results until it changes or you remove it from the ignored list.', 'vigilante' ),
+                /* translators: %d: number of files selected, on every page of the table, two or more. */
+                'bulkConfirmIgnoreMany'   => __( 'Ignore the %d selected files as they are now? They will be hidden from scan results until they change or you remove them from the ignored list.', 'vigilante' ),
+                'bulkConfirmUnignoreOne'  => __( 'Stop ignoring the selected file? It will appear in scan results again.', 'vigilante' ),
+                /* translators: %d: number of files selected, on every page of the table, two or more. */
+                'bulkConfirmUnignoreMany' => __( 'Stop ignoring the %d selected files? They will appear in scan results again.', 'vigilante' ),
                 'bulkProcessing'      => __( 'Processing...', 'vigilante' ),
                 /* translators: %d: number of files selected for bulk action. */
                 'bulkSelectedCount'   => __( '%d selected', 'vigilante' ),
@@ -4276,12 +4294,20 @@ class Vigilante_Admin {
                 'tab'    => 'tools',
             ),
         );
-        $vg_notices_on = count( array_filter( wp_list_pluck( $notifications, 'active' ) ) );
+        // Only those that can be switched off: Under Attack mode always sends
+        // its email, so counting it made the heading say more than the table.
+        $vg_notices_set = array_filter(
+            $notifications,
+            function ( $notif ) {
+                return ! empty( $notif['tab'] );
+            }
+        );
+        $vg_notices_on = count( array_filter( wp_list_pluck( $vg_notices_set, 'active' ) ) );
         $vg_notices_summary = sprintf(
-            /* translators: 1: notifications that are active, 2: notifications listed. */
+            /* translators: 1: notifications that are active, 2: notifications that can be switched on or off. */
             __( '%1$d of %2$d notifications active', 'vigilante' ),
             $vg_notices_on,
-            count( $notifications )
+            count( $vg_notices_set )
         );
         ?>
 
@@ -5603,7 +5629,7 @@ class Vigilante_Admin {
                                 <option value="SAMEORIGIN" <?php selected( $options['x_frame_options'] ?? '', 'SAMEORIGIN' ); ?>>SAMEORIGIN</option>
                                 <option value="DENY" <?php selected( $options['x_frame_options'] ?? '', 'DENY' ); ?>>DENY</option>
                             </select>
-                            <p class="description"><?php esc_html_e( '&#9432; Prevents clickjacking attacks. Also sets CSP frame-ancestors automatically.', 'vigilante' ); ?></p>
+                            <p class="description"><?php esc_html_e( '&#9432; Prevents clickjacking attacks. Also sets CSP frame-ancestors automatically. SAMEORIGIN is enough: the attack frames your site from another one. DENY also blocks the frames of your own dashboard, such as plugin details, update progress and the Customizer preview.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
                     <tr>
@@ -8451,7 +8477,7 @@ class Vigilante_Admin {
                         <table class="wp-list-table widefat fixed striped vigilante-fi-paginated">
                             <thead>
                                 <tr>
-                                    <td class="manage-column column-cb check-column"><input type="checkbox" class="vigilante-fi-cb-all" aria-label="<?php esc_attr_e( 'Select all', 'vigilante' ); ?>"></td>
+                                    <td class="manage-column column-cb check-column"><input type="checkbox" class="vigilante-fi-cb-all" autocomplete="off" aria-label="<?php esc_attr_e( 'Select all', 'vigilante' ); ?>"></td>
                                     <th><?php esc_html_e( 'File', 'vigilante' ); ?></th>
                                     <th style="width: 250px;"><?php esc_html_e( 'Reason', 'vigilante' ); ?></th>
                                     <th style="width: 120px;"><?php esc_html_e( 'Type', 'vigilante' ); ?></th>
@@ -8486,7 +8512,7 @@ class Vigilante_Admin {
                                     }
                                     ?>
                                     <tr>
-                                        <th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" value="<?php echo esc_attr( $file_path ); ?>"></th>
+                                        <th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" autocomplete="off" value="<?php echo esc_attr( $file_path ); ?>"></th>
                                         <td><code style="color: #d63638;"><?php echo esc_html( $file_path ); ?></code></td>
                                         <td><?php echo esc_html( $file_reason ); ?></td>
                                         <td><?php echo esc_html( $file_type ); ?></td>
@@ -8513,7 +8539,7 @@ class Vigilante_Admin {
                         <table class="wp-list-table widefat fixed striped vigilante-fi-paginated">
                             <thead>
                                 <tr>
-                                    <td class="manage-column column-cb check-column"><input type="checkbox" class="vigilante-fi-cb-all" aria-label="<?php esc_attr_e( 'Select all', 'vigilante' ); ?>"></td>
+                                    <td class="manage-column column-cb check-column"><input type="checkbox" class="vigilante-fi-cb-all" autocomplete="off" aria-label="<?php esc_attr_e( 'Select all', 'vigilante' ); ?>"></td>
                                     <th><?php esc_html_e( 'File', 'vigilante' ); ?></th>
                                     <th style="width: 250px;"><?php esc_html_e( 'Reason', 'vigilante' ); ?></th>
                                     <th style="width: 120px;"><?php esc_html_e( 'Type', 'vigilante' ); ?></th>
@@ -8534,7 +8560,7 @@ class Vigilante_Admin {
                                     }
                                     ?>
                                     <tr>
-                                        <th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" value="<?php echo esc_attr( $file_path ); ?>"></th>
+                                        <th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" autocomplete="off" value="<?php echo esc_attr( $file_path ); ?>"></th>
                                         <td><code style="color: #b32d2e;"><?php echo esc_html( $file_path ); ?></code></td>
                                         <td><?php echo esc_html( $file_reason ); ?></td>
                                         <td><?php echo esc_html( $file_type ); ?></td>
@@ -8754,7 +8780,7 @@ class Vigilante_Admin {
                         <table class="wp-list-table widefat fixed striped vigilante-fi-paginated">
                             <thead>
                                 <tr>
-                                    <td class="manage-column column-cb check-column"><input type="checkbox" class="vigilante-fi-cb-all" aria-label="<?php esc_attr_e( 'Select all', 'vigilante' ); ?>"></td>
+                                    <td class="manage-column column-cb check-column"><input type="checkbox" class="vigilante-fi-cb-all" autocomplete="off" aria-label="<?php esc_attr_e( 'Select all', 'vigilante' ); ?>"></td>
                                     <th><?php esc_html_e( 'File', 'vigilante' ); ?></th>
                                     <th style="width: 100px;"><?php esc_html_e( 'Type', 'vigilante' ); ?></th>
                                     <th style="width: 80px;"><?php esc_html_e( 'Actions', 'vigilante' ); ?></th>
@@ -8784,7 +8810,7 @@ class Vigilante_Admin {
                                     }
                                     ?>
                                     <tr>
-                                        <th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" value="<?php echo esc_attr( $file_path ); ?>"></th>
+                                        <th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" autocomplete="off" value="<?php echo esc_attr( $file_path ); ?>"></th>
                                         <td><code><?php echo esc_html( $file_path ); ?></code></td>
                                         <td><?php echo esc_html( $file_type ); ?></td>
                                         <td><button type="button" class="button button-small vigilante-ignore-file" data-file="<?php echo esc_attr( $file_path ); ?>"><?php esc_html_e( 'Ignore', 'vigilante' ); ?></button></td>
@@ -8858,14 +8884,20 @@ class Vigilante_Admin {
         </div>
         <?php endif; ?>
 
-        <?php if ( ! empty( $ignored_files ) ) : ?>
         <?php
-        /* translators: %s: number of files being ignored. */
-        $vg_ign_files_summary = sprintf( _n( '%s file', '%s files', count( $ignored_files ), 'vigilante' ), number_format_i18n( count( $ignored_files ) ) );
+        // Always shown, empty included (3.0.11): a section that vanished when the
+        // list emptied read as the list being lost.
+        $vg_ign_count = is_array( $ignored_files ) ? count( $ignored_files ) : 0;
+        $vg_ign_files_summary = $vg_ign_count > 0
+            /* translators: %s: number of files being ignored. */
+            ? sprintf( _n( '%s file', '%s files', $vg_ign_count, 'vigilante' ), number_format_i18n( $vg_ign_count ) )
+            : __( 'None', 'vigilante' );
         ?>
         <div id="vigilante-section-fi-ignored" class="vigilante-settings-section" data-vigilante-summary="<?php echo esc_attr( $vg_ign_files_summary ); ?>">
             <h2><?php esc_html_e( 'Ignored Files', 'vigilante' ); ?></h2>
             <p class="description"><?php esc_html_e( 'Each file is ignored as it was when you ignored it: its findings are hidden from scan results and email notifications, and they come back if the file changes, goes away or comes back, and the next scan takes it off this list. Files ignored with an earlier version of Vigilant show once more, to be ignored again. To stop watching a file or a folder for good, add it to Excluded Paths instead.', 'vigilante' ); ?></p>
+            <p class="vigilante-ignored-empty"<?php echo $vg_ign_count > 0 ? ' hidden' : ''; ?>><?php esc_html_e( 'No files are ignored.', 'vigilante' ); ?></p>
+            <?php if ( $vg_ign_count > 0 ) : ?>
             <div class="vigilante-paginated-section" data-bulk-mode="unignore">
                 <div class="vigilante-fi-bulk-bar">
                     <button type="button" class="button vigilante-bulk-unignore" disabled><?php esc_html_e( 'Stop ignoring selected', 'vigilante' ); ?></button>
@@ -8875,7 +8907,7 @@ class Vigilante_Admin {
                 <table class="wp-list-table widefat fixed striped vigilante-fi-paginated">
                 <thead>
                     <tr>
-                        <td class="manage-column column-cb check-column"><input type="checkbox" class="vigilante-fi-cb-all" aria-label="<?php esc_attr_e( 'Select all', 'vigilante' ); ?>"></td>
+                        <td class="manage-column column-cb check-column"><input type="checkbox" class="vigilante-fi-cb-all" autocomplete="off" aria-label="<?php esc_attr_e( 'Select all', 'vigilante' ); ?>"></td>
                         <th><?php esc_html_e( 'File', 'vigilante' ); ?></th>
                         <th style="width: 120px;"><?php esc_html_e( 'Actions', 'vigilante' ); ?></th>
                     </tr>
@@ -8883,7 +8915,7 @@ class Vigilante_Admin {
                 <tbody>
                     <?php foreach ( $ignored_files as $file ) : ?>
                     <tr>
-                        <th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" value="<?php echo esc_attr( $file ); ?>"></th>
+                        <th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" autocomplete="off" value="<?php echo esc_attr( $file ); ?>"></th>
                         <td><code><?php echo esc_html( $file ); ?></code></td>
                         <td><button type="button" class="button button-small vigilante-unignore-file" data-file="<?php echo esc_attr( $file ); ?>"><?php esc_html_e( 'Stop ignoring', 'vigilante' ); ?></button></td>
                     </tr>
@@ -8892,11 +8924,83 @@ class Vigilante_Admin {
             </table>
             </div>
             <p style="margin-top: 10px;">
-                <button type="button" class="button vigilante-clear-ignored"><?php esc_html_e( 'Clear All Ignored Files', 'vigilante' ); ?></button>
+                <button type="button" class="button vigilante-clear-ignored"><?php echo esc_html( self::clear_ignored_label( $vg_ign_count ) ); ?></button>
             </p>
+            <?php endif; ?>
         </div>
-        <?php endif; ?>
         <?php
+    }
+
+    /**
+     * The label of the button that empties the whole ignore list, with how
+     * many files it takes off: the selection bar sits right above it, and an
+     * unnamed "Clear All" was easy to press for "the selected ones".
+     *
+     * @param int $count Files on the list.
+     * @return string
+     */
+    private static function clear_ignored_label( $count ) {
+        $count = (int) $count;
+        return 1 === $count
+            ? __( 'Stop ignoring the only file', 'vigilante' )
+            /* translators: %s: number of files on the ignore list. */
+            : sprintf( _n( 'Stop ignoring all %s file', 'Stop ignoring all %s files', $count, 'vigilante' ), number_format_i18n( $count ) );
+    }
+
+    /**
+     * The confirmation of that button, with the count. Read by the admin
+     * script as it is: a copy of the script cached from before 3.0.11 still
+     * shows it right.
+     *
+     * @return string
+     */
+    private static function clear_ignored_confirm() {
+        $count = get_option( 'vigilante_ignored_files', array() );
+        $count = is_array( $count ) ? count( $count ) : 0;
+        return 1 === $count
+            ? __( 'Stop ignoring the only file on the list? Its findings will appear in scan results again.', 'vigilante' )
+            /* translators: %s: number of files on the ignore list. */
+            : sprintf( _n( 'Stop ignoring all %s file on the list, not only the selected ones? Their findings will appear in scan results again.', 'Stop ignoring all %s files on the list, not only the selected ones? Their findings will appear in scan results again.', $count, 'vigilante' ), number_format_i18n( $count ) );
+    }
+
+    /**
+     * Leave a line in the activity log for every change to the ignore list,
+     * with how many files and which: until 3.0.11 nothing recorded it, and an
+     * emptied list could not be told from a lost one.
+     *
+     * @param string $event   ignored, unignored or cleared.
+     * @param array  $files   The paths.
+     */
+    private function log_ignore_list_change( $event, $files ) {
+        if ( ! $this->activity_log ) {
+            return;
+        }
+        $files = array_values( array_filter( array_map( 'strval', (array) $files ) ) );
+        $count = count( $files );
+        if ( 0 === $count ) {
+            return;
+        }
+        $shown = implode( ', ', array_slice( $files, 0, 10 ) ) . ( $count > 10 ? ', …' : '' );
+        if ( 'ignored' === $event ) {
+            /* translators: 1: number of files, 2: comma separated paths. */
+            $message = _n( 'File Integrity: %1$s file ignored as it is now: %2$s', 'File Integrity: %1$s files ignored as they are now: %2$s', $count, 'vigilante' );
+        } elseif ( 'cleared' === $event ) {
+            /* translators: 1: number of files, 2: comma separated paths. */
+            $message = _n( 'File Integrity: the whole ignore list was emptied (%1$s file): %2$s', 'File Integrity: the whole ignore list was emptied (%1$s files): %2$s', $count, 'vigilante' );
+        } else {
+            /* translators: 1: number of files, 2: comma separated paths. */
+            $message = _n( 'File Integrity: %1$s file taken off the ignore list: %2$s', 'File Integrity: %1$s files taken off the ignore list: %2$s', $count, 'vigilante' );
+        }
+        $this->activity_log->log(
+            'settings',
+            'file_ignore_list_' . $event,
+            sprintf( $message, number_format_i18n( $count ), $shown ),
+            array(
+                'count' => $count,
+                'files' => array_slice( $files, 0, 50 ),
+            ),
+            'info'
+        );
     }
 
     /**
@@ -10501,6 +10605,8 @@ class Vigilante_Admin {
             update_option( 'vigilante_last_integrity_results', $results );
         }
 
+        $this->log_ignore_list_change( 'ignored', array( $file ) );
+
         wp_send_json_success( __( 'File added to ignored list.', 'vigilante' ) );
     }
 
@@ -10521,7 +10627,11 @@ class Vigilante_Admin {
         }
 
         $file_integrity = new Vigilante_File_Integrity( $this->settings, $this->database );
+        $vg_was = (array) $file_integrity->get_ignored_files();
         $file_integrity->unignore_file( $file );
+        if ( in_array( $file, $vg_was, true ) ) {
+            $this->log_ignore_list_change( 'unignored', array( $file ) );
+        }
 
         wp_send_json_success( __( 'File removed from ignored list.', 'vigilante' ) );
     }
@@ -10599,6 +10709,8 @@ class Vigilante_Admin {
             update_option( 'vigilante_last_integrity_results', $results );
         }
 
+        $this->log_ignore_list_change( 'ignored', $files );
+
         wp_send_json_success(
             array(
                 'count'   => $count,
@@ -10644,11 +10756,13 @@ class Vigilante_Admin {
         }
 
         $file_integrity = new Vigilante_File_Integrity( $this->settings, $this->database );
+        $vg_was = (array) $file_integrity->get_ignored_files();
         $count = 0;
         foreach ( $files as $file ) {
             $file_integrity->unignore_file( $file );
             $count++;
         }
+        $this->log_ignore_list_change( 'unignored', array_values( array_intersect( $files, $vg_was ) ) );
 
         wp_send_json_success(
             array(
@@ -10673,7 +10787,9 @@ class Vigilante_Admin {
         }
 
         $file_integrity = new Vigilante_File_Integrity( $this->settings, $this->database );
+        $vg_was = (array) $file_integrity->get_ignored_files();
         $file_integrity->clear_ignored_files();
+        $this->log_ignore_list_change( 'cleared', $vg_was );
 
         wp_send_json_success( __( 'Ignored files list cleared.', 'vigilante' ) );
     }

@@ -841,6 +841,8 @@
                             Vigilante_Admin.refreshFilePagination($container);
                         });
                         Vigilante_Admin.showNotice('success', strings.fileIgnored || 'File added to ignored list.');
+                        Vigilante_Admin.ignoredAdded = (Vigilante_Admin.ignoredAdded || 0) + 1;
+                        Vigilante_Admin.ignoredListChanged();
                     } else {
                         Vigilante_Admin.showNotice('error', response.data || 'Failed to ignore file');
                         $btn.prop('disabled', false).text(strings.ignore || 'Ignore');
@@ -875,6 +877,7 @@
                         $btn.closest('tr').fadeOut(300, function() {
                             $(this).remove();
                             Vigilante_Admin.refreshFilePagination($container);
+                            Vigilante_Admin.ignoredListChanged();
                         });
                         Vigilante_Admin.showNotice('success', strings.fileUnignored || 'File removed from ignored list.');
                     } else {
@@ -891,7 +894,10 @@
             e.preventDefault();
             var strings = vigilanteAdmin.strings;
 
-            if (!confirm(strings.confirmClearIgnored || 'Remove all files from the ignored list?')) {
+            var total = this.ignoredTotal();
+            var ask = 1 === total ? strings.confirmClearIgnoredOne
+                : (strings.confirmClearIgnoredMany ? strings.confirmClearIgnoredMany.replace('%d', total) : '');
+            if (!confirm(ask || strings.confirmClearIgnored || 'Remove all files from the ignored list?')) {
                 return;
             }
 
@@ -1072,6 +1078,63 @@
         },
 
         /**
+         * A confirmation that names how many files a bulk action takes, which
+         * includes what is selected on other pages of the table (3.0.11).
+         */
+        countedConfirm: function(count, oneKey, manyKey) {
+            var strings = vigilanteAdmin.strings || {};
+            if (1 === count) {
+                return strings[oneKey] || '';
+            }
+            return strings[manyKey] ? strings[manyKey].replace('%d', count) : '';
+        },
+
+        /**
+         * After rows leave the ignored table: its heading count, the label of
+         * the button that empties it, and, once empty, the empty state in place
+         * of the table. The section itself never goes (3.0.11).
+         */
+        /**
+         * Files on the ignore list right now: the rows of its table plus what
+         * was ignored from the results since the page loaded, which only shows
+         * in the table after a reload.
+         */
+        ignoredTotal: function() {
+            return $('#vigilante-section-fi-ignored table.vigilante-fi-paginated tbody tr').length + (this.ignoredAdded || 0);
+        },
+
+        ignoredListChanged: function() {
+            var strings = vigilanteAdmin.strings || {};
+            var $box = $('#vigilante-section-fi-ignored');
+            if (!$box.length) {
+                return;
+            }
+            var rows = $box.find('table.vigilante-fi-paginated tbody tr').length;
+            var n = this.ignoredTotal();
+            if (0 === rows) {
+                $box.find('.vigilante-paginated-section').remove();
+            }
+            if (this.ignoredAdded && !$box.find('.vigilante-ignored-reload').length) {
+                $('<p class="description vigilante-ignored-reload"></p>')
+                    .text(strings.ignoredReloadToSee || 'Reload the page to see the files ignored since it was opened.')
+                    .insertAfter($box.find('.vigilante-ignored-empty'));
+            }
+            if (0 === n) {
+                $box.find('.vigilante-clear-ignored').closest('p').remove();
+                $box.find('.vigilante-ignored-empty').prop('hidden', false);
+                $box.attr('data-vigilante-summary', strings.ignoredSummaryNone || 'None');
+            } else {
+                $box.find('.vigilante-ignored-empty').prop('hidden', true);
+                $box.attr('data-vigilante-summary', 1 === n ? (strings.ignoredSummaryOne || '1 file') : (strings.ignoredSummaryMany || '%d files').replace('%d', n));
+                var label = 1 === n ? strings.clearIgnoredOne : (strings.clearIgnoredMany ? strings.clearIgnoredMany.replace('%d', n) : '');
+                if (label) {
+                    $box.find('.vigilante-clear-ignored').text(label);
+                }
+            }
+            VigilanteFold.schedulePaint();
+        },
+
+        /**
          * Bulk add to ignored list.
          */
         handleBulkIgnore: function(e) {
@@ -1087,7 +1150,7 @@
                 return;
             }
 
-            if (!confirm(strings.bulkConfirmIgnore || 'Ignore the selected files?')) {
+            if (!confirm(this.countedConfirm(files.length, 'bulkConfirmIgnoreOne', 'bulkConfirmIgnoreMany') || strings.bulkConfirmIgnore || 'Ignore the selected files?')) {
                 return;
             }
 
@@ -1114,6 +1177,8 @@
                         Vigilante_Admin.refreshFilePagination($section);
                         self.refreshBulkBar($section);
                         Vigilante_Admin.showNotice('success', (response.data && response.data.message) || strings.fileIgnored);
+                        Vigilante_Admin.ignoredAdded = (Vigilante_Admin.ignoredAdded || 0) + ((response.data && parseInt(response.data.count, 10)) || files.length);
+                        Vigilante_Admin.ignoredListChanged();
                     } else {
                         Vigilante_Admin.showNotice('error', (response.data && response.data.message) || response.data || 'Failed to ignore files');
                         $btn.prop('disabled', false).text(originalText);
@@ -1147,7 +1212,7 @@
                 return;
             }
 
-            if (!confirm(strings.bulkConfirmUnignore || 'Remove the selected files from ignored list?')) {
+            if (!confirm(this.countedConfirm(files.length, 'bulkConfirmUnignoreOne', 'bulkConfirmUnignoreMany') || strings.bulkConfirmUnignore || 'Remove the selected files from ignored list?')) {
                 return;
             }
 
@@ -1174,10 +1239,8 @@
                         self.refreshBulkBar($section);
                         Vigilante_Admin.showNotice('success', (response.data && response.data.message) || strings.fileUnignored);
 
-                        // If the ignored table is now empty, hide its section.
-                        if ($section.find('table.vigilante-fi-paginated tbody tr').length === 0) {
-                            $('#vigilante-section-fi-ignored').fadeOut(300, function() { $(this).remove(); });
-                        }
+                        // The section stays, empty included (3.0.11).
+                        Vigilante_Admin.ignoredListChanged();
                     } else {
                         Vigilante_Admin.showNotice('error', (response.data && response.data.message) || response.data || 'Failed');
                         $btn.prop('disabled', false).text(originalText);
@@ -1243,7 +1306,7 @@
                 + '<button type="button" class="button vigilante-bulk-ignore" disabled>' + (strings.bulkIgnoreSelected || 'Ignore selected') + '</button>'
                 + '<span class="vigilante-fi-bulk-count" aria-live="polite"></span>'
                 + '</div>';
-            var selectAllCell = '<td class="manage-column column-cb check-column"><input type="checkbox" class="vigilante-fi-cb-all" aria-label="' + (strings.selectAll || 'Select all') + '"></td>';
+            var selectAllCell = '<td class="manage-column column-cb check-column"><input type="checkbox" class="vigilante-fi-cb-all" autocomplete="off" aria-label="' + (strings.selectAll || 'Select all') + '"></td>';
 
             // Suspicious files table
             if (results.suspicious.length > 0) {
@@ -1257,7 +1320,7 @@
                 html += '<tbody>';
                 results.suspicious.forEach(function(file) {
                     html += '<tr>';
-                    html += '<th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" value="' + esc(file.file) + '"></th>';
+                    html += '<th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" autocomplete="off" value="' + esc(file.file) + '"></th>';
                     html += '<td><code style="color: #d63638;">' + esc(file.file) + '</code></td>';
                     html += '<td>' + esc(file.reason || strings.unknown) + '</td>';
                     html += '<td>' + esc(file.type === 'vigilante_self' ? (strings.selfType || 'Vigilant (self)') : (file.type || strings.unknown)) + '</td>';
@@ -1280,7 +1343,7 @@
                 html += '<tbody>';
                 results.extra.forEach(function(file) {
                     html += '<tr>';
-                    html += '<th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" value="' + esc(file.file) + '"></th>';
+                    html += '<th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" autocomplete="off" value="' + esc(file.file) + '"></th>';
                     html += '<td><code style="color: #b32d2e;">' + esc(file.file) + '</code></td>';
                     html += '<td>' + esc(file.reason || strings.unknown) + '</td>';
                     html += '<td>' + esc(file.type === 'vigilante_self' ? (strings.selfType || 'Vigilant (self)') : (file.type || strings.unknown)) + '</td>';
@@ -1407,7 +1470,7 @@
                 html += '<tbody>';
                 regularModified.forEach(function(file) {
                     html += '<tr>';
-                    html += '<th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" value="' + esc(file.file) + '"></th>';
+                    html += '<th scope="row" class="check-column"><input type="checkbox" class="vigilante-fi-cb" autocomplete="off" value="' + esc(file.file) + '"></th>';
                     html += '<td><code>' + esc(file.file) + '</code></td>';
                     html += '<td>' + esc(file.type === 'vigilante_self' ? (strings.selfType || 'Vigilant (self)') : (file.type || strings.unknown)) + '</td>';
                     html += '<td><button type="button" class="button button-small vigilante-ignore-file" data-file="' + esc(file.file) + '">' + (strings.ignore || 'Ignore') + '</button></td>';

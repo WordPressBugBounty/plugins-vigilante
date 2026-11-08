@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.0.11
+Stable tag: 3.0.12
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -544,6 +544,18 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 3.0.12 =
+Fixes the IP login lockout and the activity log on servers that report table names in lower case, adds a daily limit to wrong two factor codes, saves old browser versions in the User-Agent blacklist again and uses SAMEORIGIN in the Maximum preset.
+
+* Improved: an account now also stops for up to a day after 20 wrong two-factor codes in 24 hours, besides 10 in 15 minutes, so someone who has the password can no longer keep sending codes just under the limit: 600 in a month at most, where 28,800 got through before. A correct code ends the stop, and a new password starts the day again. The login screen and the email say how long the wait is. Reported by @calzbert.
+* Improved: the Maximum Security preset now sets X-Frame-Options to SAMEORIGIN instead of DENY, and frame-ancestors to self. DENY also blocked the frames of the dashboard itself, such as plugin details, the progress of updates and the Customizer preview, and SAMEORIGIN protects from clickjacking just the same. Sites that applied the preset keep what they have: choose SAMEORIGIN in Security Headers to change it.
+* Improved: User-Agent blacklist lines with an old browser or system version, such as Chrome/49.0.2623, Firefox/3.6 or Android 4.4, are saved again and no longer flagged: they only block that old version, a common sign of a bot. A version cut short that matches browsers in use, such as Chrome/15, is still left out. Reported by @calzbert.
+* Improved: code that writes the settings, such as a network sync, can now learn which blacklist lines were left out through the vigilante_firewall_lines_dropped action. Requested by @calzbert.
+* Fix: on servers that report table names in lower case, such as MySQL with lower_case_table_names set to 1, and with a table prefix in capitals, Vigilant took its own tables for missing. Failed logins were not counted, so the login lockout by IP never started, and the activity log and the file hashes stayed empty. Reported by @calzbert.
+* Fix: some lines that normal browsers send could still be saved to the User-Agent blacklist and blocked the people using them: a piece cut in the middle of a browser name, such as rome/120.0.0.0, or of the Android device or the Linux processor, the whole User-Agent of a newer Firefox for Android, and lines of browsers Vigilant had no example of: Edge and Opera on Mac, Opera on Android and Opera Mini, Yandex, Huawei, UC, Xiaomi, Amazon Silk, DuckDuckGo, the browsers inside the Facebook, Messenger, Instagram, Google, WeChat, TikTok, LinkedIn, Pinterest, Telegram, Snapchat and LINE apps, including the fields they fill with the language or the network of each person, KaiOS phones, LG and Samsung TVs, PlayStation and Xbox. Windows 7 and 8.1 lines, such as Windows NT 6.1, are no longer saved either, because Chrome 109, Firefox ESR and newer Chromium forks still run there; Windows XP and Vista lines still are. A line that names a bot or a testing tool, such as LinkedInBot, Lighthouse or GTmetrix, is still saved, and so is a combination no browser sends, such as a current Chrome on an old macOS. A very long line no longer slows down the Dashboard and the Firewall tab.
+* Fix: on a network, the email about a two-factor stop could be sent again from each subsite for the same run of wrong codes. It is now sent once a day at most for the whole network while the codes keep coming, and again after a new password. Reported by @calzbert.
+* Fix: on a network, deleting a user could leave their authenticator secret and backup codes in the table kept from a deleted subsite. Reported by @calzbert.
+
 = 3.0.11 =
 The User-Agent blacklist no longer saves lines that normal browsers or WordPress also send, which locked people out; saved ones keep working and are flagged. Sections now fold, with summaries and an index. Also fixes the author scan block with NextGEN Gallery and a percent sign in headers.
 
@@ -558,6 +570,7 @@ The User-Agent blacklist no longer saves lines that normal browsers or WordPress
 * Improved: tabs with three or more sections get an index on the left with Open all and Close all, which marks the section you are reading. Links to a setting, from the settings search, Security Check or the Dashboard, open a folded section first.
 * Improved: in File Integrity, Run Scan Now and Clear Previous Results are now in the results block, which always shows, also before the first scan. Save buttons that only save one section fold with it.
 * Improved: the rows of the self-protection box and of the Security Check breakdown remember whether you left them open, except a critical self-protection row, which always opens. Pending registrations show their count in the heading instead of an orange badge.
+* Improved: File Integrity keeps the Ignored Files section on screen when the list is empty, and says so. Ignoring files, taking them off the list and emptying it are now recorded in the activity log, with how many files and which ones. The confirmations say how many files they take, selections on other pages of the table included, and the button that empties the whole list says how many it removes.
 * Fix: in .htaccess, a User-Agent whitelist entry also exempted requests from the rules against malicious query strings and unused HTTP methods. Any client can send any User-Agent, so it now only exempts from the bad bots rule, as it already did in PHP.
 * Fix: a percent sign in a security header value reached .htaccess as a format of the server, which could stop the whole site with an error or put a server variable in a public header. It is now written as a plain percent sign.
 * Fix: with NextGEN Gallery active, ?author=N still redirected to the author page and showed the username, with nothing in the log. The block now runs before any plugin can redirect.
@@ -632,25 +645,12 @@ Scheduled tasks run again when a cron job calls wp-cron.php by its address. Savi
 * Fix: each time Vigilant wrote its .htaccess rules it deleted the blocks named # BEGIN SECURITY HEADERS, # BEGIN 8G FIREWALL and # BEGIN ADDITIONAL PROTECTIONS, taking them for leftovers of an old version. No version of Vigilant wrote them: they are usually rules pasted from a guide or written by another plugin, and they now stay.
 * Fix: switching Under Attack on or off showed in File Integrity as a change to .htaccess, and its block was not checked for a missing marker before Vigilant wrote that file.
 
-= 3.0.6 =
-Vigilant now tells you when it cannot write wp-config.php or .htaccess. Until now, saving said that the settings were saved while the constants or the server rules never reached the file.
-
-* Improved: the wp-config.php section of the WP Hardening tab says when that file is not writable, or is kept one folder above WordPress, where Vigilant does not write it, for as long as that lasts. In amber while everything those settings ask for is already in force, and in red, naming the constants that are missing or left over, when it is not. The notice is brought up to date after each save, without reloading the page.
-* Improved: the Server Protection section of the Firewall tab and the Security Headers tab say when .htaccess is not writable on a server that uses that file.
-* Improved: while wp-config.php cannot be changed and some of the WP Hardening settings are not in force because of it, the Dashboard recommends looking at it and names the constants that are not applied.
-* Improved: the notice about users awaiting approval no longer loads every one of them on each admin screen just to count them.
-* Improved: a site that keeps wp-config.php or .htaccess read-only on purpose will see these notices too, in those sections and after saving those tabs. They are true there as well: no change made in those tabs reaches the file until it can be written.
-* Fix: when wp-config.php could not be written, saving the WP Hardening tab or moving a module switch answered that the settings were saved, the constants never reached the file and nothing said so. Activating the plugin with the file not writable left it the same way. The save now shows a second notice next to the usual one, which stays on screen and names the constants that were not applied. Saving that tab with nothing left to write still says that the file is not writable. And when moving a module switch leaves something unwritten, the page is no longer reloaded, so the notice can be read.
-* Fix: the same happened with .htaccess. Saving the Firewall or the Security Headers tab, or switching one of those two modules on or off, with a .htaccess that is not writable now says that the server rules were not updated. It also says so, with the reason, when Vigilant leaves the file as it is for another cause, such as one of its blocks having lost a marker.
-* Fix: the description of the Maximum preset said that its Content Security Policy was set to report-only mode. The preset enforces it, and the description now says so.
-* Fix: the Test Headers button said nothing when its request failed outright. It now shows an error.
-
 For older changelog entries, please check the [changelog.txt](https://plugins.svn.wordpress.org/vigilante/trunk/changelog.txt) file
 
 == Upgrade Notice ==
 
-= 3.0.11 =
-The User-Agent blacklist no longer saves lines that normal browsers or WordPress also send, which locked people out; saved ones keep working and are flagged. Sections now fold, with summaries and an index. Also fixes the author scan block with NextGEN Gallery and a percent sign in headers.
+= 3.0.12 =
+Fixes the IP login lockout and the activity log on servers that report table names in lower case, adds a daily limit to wrong two factor codes, saves old browser versions in the User-Agent blacklist again and uses SAMEORIGIN in the Maximum preset.
 
 == Support ==
 

@@ -1580,7 +1580,14 @@ class Vigilante_Settings {
                     ),
                 ),
                 'security_headers' => array(
-                    'x_frame_options' => 'DENY',
+                    // SAMEORIGIN and not DENY since 3.0.12 (B124): DENY also stops
+                    // the frames WordPress uses inside its own dashboard (plugin
+                    // details, the progress of updates, the Customizer preview),
+                    // while a clickjacking attack frames the site from another
+                    // origin, which SAMEORIGIN blocks the same. It is what core
+                    // sends in wp-admin. Sites that applied the preset before keep
+                    // what they have: nothing stored is changed.
+                    'x_frame_options' => 'SAMEORIGIN',
                     // HSTS is intentionally NOT enabled by Maximum: forcing HSTS on a site
                     // that doesn't have a healthy HTTPS setup (or temporarily falls back to
                     // HTTP) locks visitors out for the full max_age. Leaving HSTS off keeps
@@ -1596,7 +1603,7 @@ class Vigilante_Settings {
                             'font-src'        => "'self' data:",
                             'connect-src'     => "'self' https: blob:",
                             'frame-src'       => "'self' blob:",
-                            'frame-ancestors' => "'none'",
+                            'frame-ancestors' => "'self'",
                             'worker-src'      => "'self' blob:",
                             'object-src'      => "'none'",
                             'base-uri'        => "'self'",
@@ -1967,6 +1974,7 @@ class Vigilante_Settings {
         if ( isset( $validated['firewall'] ) && is_array( $validated['firewall'] ) ) {
             $stored_all      = get_option( self::OPTION_NAME, array() );
             $stored_firewall = ( is_array( $stored_all ) && isset( $stored_all['firewall'] ) && is_array( $stored_all['firewall'] ) ) ? $stored_all['firewall'] : array();
+            $dropped         = array();
 
             if ( isset( $validated['firewall']['ua_blacklist'] ) && is_array( $validated['firewall']['ua_blacklist'] ) ) {
                 if ( ! class_exists( 'Vigilante_UA_Utils' ) ) {
@@ -1978,6 +1986,9 @@ class Vigilante_Settings {
                     Vigilante_UA_Utils::current_user_agent()
                 );
                 $validated['firewall']['ua_blacklist'] = $split['kept'];
+                if ( ! empty( $split['rejected'] ) ) {
+                    $dropped['ua_blacklist'] = $split['rejected'];
+                }
             }
 
             if ( ! empty( $validated['firewall']['ip_blacklist'] ) && is_array( $validated['firewall']['ip_blacklist'] ) && class_exists( 'Vigilante_IP_Utils' ) ) {
@@ -1988,8 +1999,36 @@ class Vigilante_Settings {
                     $own_site = Vigilante_IP_Utils::entries_matching( $new_ips, Vigilante_IP_Utils::own_site_addresses() );
                     if ( ! empty( $own_site ) ) {
                         $validated['firewall']['ip_blacklist'] = array_values( array_diff( $validated['firewall']['ip_blacklist'], $own_site ) );
+                        $dropped['ip_blacklist']               = array_values( $own_site );
                     }
                 }
+            }
+
+            if ( ! empty( $dropped ) ) {
+                /**
+                 * Fires when a write of the settings leaves out lines of the firewall blacklists.
+                 *
+                 * The Firewall tab and the import filter the lists before
+                 * writing and tell the person what they left out. This is for
+                 * any other write of the option, such as a network sync,
+                 * which had no way to know but to compare what it sent with
+                 * what was stored (B130). Only new lines are left out here.
+                 *
+                 * Once per write. When the option does not exist yet,
+                 * update_option() sanitizes the value and add_option()
+                 * sanitizes it again, but by then the lines are gone.
+                 *
+                 * @since 3.0.12
+                 *
+                 * @param array $dropped {
+                 *     Only the keys with lines.
+                 *
+                 *     @type array[]  $ua_blacklist User-Agent lines, each with `line`, `verdict` (own, site
+                 *                                  or browser) and `labels` (the browsers it would block).
+                 *     @type string[] $ip_blacklist Addresses or ranges of the site itself.
+                 * }
+                 */
+                do_action( 'vigilante_firewall_lines_dropped', $dropped );
             }
         }
 

@@ -190,7 +190,7 @@ trait Vigilante_Two_Factor_Session {
         $texts = array(
             'attempts' => __( 'Too many incorrect verification codes. The verification session was closed for security. Log in again to start a new one.', 'vigilante' ),
             'expired'  => __( 'The verification session expired. Log in again to start a new one.', 'vigilante' ),
-            'locked'   => __( 'Too many wrong verification codes for this account. Verification is stopped for a few minutes; try again later.', 'vigilante' ),
+            'locked'   => __( 'Too many wrong verification codes for this account. Verification is stopped for a while; try again later.', 'vigilante' ),
         );
 
         if ( ! isset( $texts[ $notice ] ) ) {
@@ -513,7 +513,7 @@ trait Vigilante_Two_Factor_Session {
     }
 
     /**
-     * Seconds a wrong code counts against the account.
+     * Seconds a wrong code counts against the account for the short limit.
      *
      * @since 3.0.10
      *
@@ -524,22 +524,71 @@ trait Vigilante_Two_Factor_Session {
     }
 
     /**
-     * Tries counted against the account inside the window, oldest first.
+     * Wrong codes an account may send in a day.
+     *
+     * The short limit alone let whoever had the password send nine codes every
+     * 15 minutes for good, about 860 a day: with the three TOTP codes that are
+     * valid at any moment, a 7.5 % chance in a month, and never a stop, so no
+     * email either (B127, reported by Albert Calzada). The first fix doubled
+     * the window at each stop in a row, and the first blind review of 3.0.12
+     * showed that staying one code under the limit never stops. With 20 a day,
+     * 600 in a month at most, a 0.18 % chance, and each day that ends in a stop
+     * sends its email. Cell E4 of poc/2fa-tope-cuenta.sh runs this code with
+     * a clock of its own.
+     *
+     * @since 3.0.12
+     *
+     * @return int
+     */
+    private function account_daily_limit() {
+        return max( $this->account_failure_limit(), absint( apply_filters( 'vigilante_2fa_account_max_daily_failures', 20 ) ) );
+    }
+
+    /**
+     * When the holder of the account was last told of a stop, and when its
+     * password last changed.
+     *
+     * One user meta row, shared by a network like the count.
+     *
+     * @since 3.0.12
+     *
+     * @param int $user_id User ID.
+     * @return array{noticed: int, since: int}
+     */
+    private function account_lock_state( $user_id ) {
+        $state = get_user_meta( absint( $user_id ), 'vigilante_2fa_lock', true );
+
+        return array(
+            'noticed' => is_array( $state ) && isset( $state['noticed'] ) ? absint( $state['noticed'] ) : 0,
+            'since'   => is_array( $state ) && isset( $state['since'] ) ? absint( $state['since'] ) : 0,
+        );
+    }
+
+    /**
+     * Tries counted against the account, oldest first.
      *
      * One meta row per try, holding its time. Rows are only ever added, never
      * rewritten, so two requests that arrive together cannot overwrite each
      * other's count the way a single counter read and written back would. The
      * cache is dropped first so the count includes what other requests added.
      *
+     * The tries of the short window, or of the last day. The day starts again
+     * when the password changes: whoever had the old one cannot send codes.
+     *
      * @since 3.0.10
      *
-     * @param int $user_id User ID.
+     * @param int  $user_id User ID.
+     * @param bool $day     The last day instead of the short window (3.0.12).
      * @return int[]
      */
-    private function account_failures( $user_id ) {
+    private function account_failures( $user_id, $day = false ) {
         wp_cache_delete( absint( $user_id ), 'user_meta' );
 
-        $since  = time() - $this->account_failure_window();
+        $since = time() - ( $day ? DAY_IN_SECONDS : $this->account_failure_window() );
+        if ( $day ) {
+            $since = max( $since, $this->account_lock_state( $user_id )['since'] );
+        }
+
         $stamps = array();
 
         foreach ( (array) get_user_meta( absint( $user_id ), 'vigilante_2fa_failed_code', false ) as $stamp ) {
@@ -564,7 +613,8 @@ trait Vigilante_Two_Factor_Session {
      * @return bool
      */
     protected function account_is_locked( $user_id ) {
-        return count( $this->account_failures( $user_id ) ) >= $this->account_failure_limit();
+        return count( $this->account_failures( $user_id ) ) >= $this->account_failure_limit()
+            || count( $this->account_failures( $user_id, true ) ) >= $this->account_daily_limit();
     }
 
     /**
@@ -573,8 +623,8 @@ trait Vigilante_Two_Factor_Session {
      * Counted before the check and not after it, so that requests sent in
      * parallel each see the tries of the others: with the count written after
      * the check, all of them would pass the test at once. A correct code clears
-     * the count afterwards (clear_account_failures()). Rows older than the
-     * window are removed here, so an account never holds more than the limit
+     * the count afterwards (clear_account_failures()). Rows older than a day
+     * are removed here, so an account never holds more than the daily limit
      * plus the requests that arrived at the same time.
      *
      * @since 3.0.10
@@ -589,7 +639,7 @@ trait Vigilante_Two_Factor_Session {
             return false;
         }
 
-        $since = time() - $this->account_failure_window();
+        $since = time() - DAY_IN_SECONDS;
 
         foreach ( (array) get_user_meta( $user_id, 'vigilante_2fa_failed_code', false ) as $stamp ) {
             if ( absint( $stamp ) <= $since ) {
@@ -599,11 +649,15 @@ trait Vigilante_Two_Factor_Session {
 
         add_user_meta( $user_id, 'vigilante_2fa_failed_code', (string) time() );
 
-        return count( $this->account_failures( $user_id ) ) <= $this->account_failure_limit();
+        return count( $this->account_failures( $user_id ) ) <= $this->account_failure_limit()
+            && count( $this->account_failures( $user_id, true ) ) <= $this->account_daily_limit();
     }
 
     /**
      * Forget the tries of an account once it got a code right.
+     *
+     * The state of its stops goes with them: whoever sent the right code
+     * holds the second factor.
      *
      * @since 3.0.10
      *
@@ -611,27 +665,37 @@ trait Vigilante_Two_Factor_Session {
      */
     protected function clear_account_failures( $user_id ) {
         delete_user_meta( absint( $user_id ), 'vigilante_2fa_failed_code' );
+        delete_user_meta( absint( $user_id ), 'vigilante_2fa_lock' );
     }
 
     /**
-     * Minutes until the account may send a code again.
+     * Seconds until the account may send a code again.
      *
-     * @since 3.0.10
+     * The longer of the two waits: until the short window lets one code
+     * through, and until the day does.
+     *
+     * @since 3.0.12 (minutes, as account_wait_minutes(), since 3.0.10)
      *
      * @param int $user_id User ID.
-     * @return int At least 1.
+     * @return int At least one minute.
      */
-    private function account_wait_minutes( $user_id ) {
-        $stamps = $this->account_failures( $user_id );
-        $over   = count( $stamps ) - $this->account_failure_limit();
+    private function account_wait_seconds( $user_id ) {
+        $wait   = 0;
+        $limits = array(
+            array( false, $this->account_failure_window(), $this->account_failure_limit() ),
+            array( true, DAY_IN_SECONDS, $this->account_daily_limit() ),
+        );
 
-        if ( $over < 0 ) {
-            return 1;
+        foreach ( $limits as $limit ) {
+            $stamps = $this->account_failures( $user_id, $limit[0] );
+            $over   = count( $stamps ) - $limit[2];
+
+            if ( $over >= 0 ) {
+                $wait = max( $wait, $stamps[ $over ] + $limit[1] - time() );
+            }
         }
 
-        $until = $stamps[ $over ] + $this->account_failure_window();
-
-        return max( 1, (int) ceil( ( $until - time() ) / MINUTE_IN_SECONDS ) );
+        return max( MINUTE_IN_SECONDS, $wait );
     }
 
     /**
@@ -646,19 +710,12 @@ trait Vigilante_Two_Factor_Session {
      * @return WP_Error
      */
     protected function account_locked_error( $user_id ) {
-        $minutes = $this->account_wait_minutes( $user_id );
-
         return new WP_Error(
             'vigilante_2fa_locked',
             sprintf(
-                /* translators: %d: Minutes to wait. */
-                _n(
-                    'Too many wrong verification codes for this account. Try again in %d minute.',
-                    'Too many wrong verification codes for this account. Try again in %d minutes.',
-                    $minutes,
-                    'vigilante'
-                ),
-                $minutes
+                /* translators: %s: Time to wait, such as "15 mins" or "2 hours". */
+                __( 'Too many wrong verification codes for this account. Try again in %s.', 'vigilante' ),
+                human_time_diff( time(), time() + $this->account_wait_seconds( $user_id ) )
             )
         );
     }
@@ -668,8 +725,12 @@ trait Vigilante_Two_Factor_Session {
      *
      * Every one of those codes came after the right password, so this is the
      * clearest sign the plugin gets that a password is in someone else's
-     * hands. The account holder and the site recipients are told once per
-     * window.
+     * hands. The account holder and the site recipients are told once a day
+     * at most while the codes keep coming, and again after a new password.
+     * The mark lives in user meta with the count, so it holds for the whole
+     * network: until 3.0.12 it was a transient of each site, and on a network
+     * every subsite could send the mail again for the same run of codes (B126,
+     * reported by Albert Calzada).
      *
      * @since 3.0.10
      *
@@ -678,11 +739,21 @@ trait Vigilante_Two_Factor_Session {
     protected function note_failed_code( $user_id ) {
         $user_id = absint( $user_id );
 
-        if ( ! $this->account_is_locked( $user_id ) || get_transient( 'vigilante_2fa_locked_' . $user_id ) ) {
+        if ( ! $user_id || ! $this->account_is_locked( $user_id ) ) {
             return;
         }
 
-        set_transient( 'vigilante_2fa_locked_' . $user_id, 1, $this->account_failure_window() );
+        // Once a day at most. With the daily limit, every try the day frees
+        // opens a new stop, and telling each one was some 20 mails a day
+        // (cell E4 of poc/2fa-tope-cuenta.sh, first version of this fix).
+        $state = $this->account_lock_state( $user_id );
+
+        if ( $state['noticed'] > time() - DAY_IN_SECONDS ) {
+            return;
+        }
+
+        $state['noticed'] = time();
+        update_user_meta( $user_id, 'vigilante_2fa_lock', $state );
 
         $user = get_userdata( $user_id );
 
@@ -690,17 +761,18 @@ trait Vigilante_Two_Factor_Session {
             return;
         }
 
-        $limit   = $this->account_failure_limit();
-        $minutes = (int) ceil( $this->account_failure_window() / MINUTE_IN_SECONDS );
+        // The short limit, or the daily one when the codes came slower.
+        $limit = count( $this->account_failures( $user_id ) ) >= $this->account_failure_limit() ? $this->account_failure_limit() : $this->account_daily_limit();
+        $wait  = human_time_diff( time(), time() + $this->account_wait_seconds( $user_id ) );
 
         $this->log_event(
             '2fa_account_locked',
             $user_id,
             sprintf(
-                /* translators: 1: Number of wrong codes, 2: Minutes. */
-                __( 'Two-factor verification stopped for this account after %1$d wrong codes sent with the right password, for %2$d minutes', 'vigilante' ),
+                /* translators: 1: Number of wrong codes, 2: Time, such as "15 mins" or "2 hours". */
+                __( 'Two-factor verification stopped for this account after %1$d wrong codes sent with the right password, for %2$s', 'vigilante' ),
                 $limit,
-                $minutes
+                $wait
             ),
             'critical'
         );
@@ -717,13 +789,22 @@ trait Vigilante_Two_Factor_Session {
 
         $body  = Vigilante_Email_Template::alert_box(
             sprintf(
-                /* translators: 1: Number of wrong codes, 2: Minutes. */
-                __( 'Someone entered the right password for this account and then %1$d wrong verification codes. Vigilant stopped verification for this account for %2$d minutes.', 'vigilante' ),
+                /* translators: 1: Number of wrong codes, 2: Time, such as "15 mins" or "2 hours". */
+                __( 'Someone entered the right password for this account and then %1$d wrong verification codes. Vigilant stopped verification for this account for %2$s.', 'vigilante' ),
                 $limit,
-                $minutes
+                $wait
             )
         );
         $body .= Vigilante_Email_Template::p( __( 'If it was not the account holder, the password is known to someone else: change it now.', 'vigilante' ), '#1d2327', true );
+        $body .= Vigilante_Email_Template::p(
+            sprintf(
+                /* translators: 1: Number of wrong codes, 2: Time, such as "15 mins", 3: Number of wrong codes in a day. */
+                __( 'Verification stops after %1$d wrong codes in %2$s, and after %3$d in a day. A new password ends the stop for the day.', 'vigilante' ),
+                $this->account_failure_limit(),
+                human_time_diff( 0, $this->account_failure_window() ),
+                $this->account_daily_limit()
+            )
+        );
         $body .= Vigilante_Email_Template::data_table(
             array(
                 __( 'Username', 'vigilante' )   => $user->user_login,
