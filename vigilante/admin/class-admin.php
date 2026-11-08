@@ -1326,6 +1326,7 @@ class Vigilante_Admin {
                     'icon'     => 'warning',
                     'priority' => 'critical',
                     'tab'      => 'firewall',
+                    'anchor'   => 'field-ip-blacklist',
                     'message'  => sprintf(
                         /* translators: %s: comma separated list of blacklist entries */
                         _n(
@@ -1335,6 +1336,36 @@ class Vigilante_Admin {
                             'vigilante'
                         ),
                         implode( ', ', $vg_own )
+                    ),
+                );
+            }
+        }
+
+        // A User-Agent blacklist line that normal browsers also send blocks the
+        // people who use them (B123). Saving the tab keeps a new one out, but a
+        // line stored before 3.0.11 keeps applying until somebody saves the tab,
+        // which is the decision: a stored setting is not changed by an update.
+        $vg_ua_blacklist = isset( $options['firewall']['ua_blacklist'] ) ? (array) $options['firewall']['ua_blacklist'] : array();
+        if ( ! empty( $options['modules']['firewall'] ) && ! empty( $vg_ua_blacklist ) ) {
+            if ( ! class_exists( 'Vigilante_UA_Utils' ) ) {
+                require_once VIGILANTE_INCLUDES_DIR . 'class-ua-utils.php';
+            }
+            $vg_ua_people = Vigilante_UA_Utils::stored_lines_blocking_people( $vg_ua_blacklist );
+            if ( ! empty( $vg_ua_people ) ) {
+                $recommendations[] = array(
+                    'icon'     => 'warning',
+                    'priority' => 'critical',
+                    'tab'      => 'firewall',
+                    'anchor'   => 'field-ua-blacklist',
+                    'message'  => sprintf(
+                        /* translators: %s: comma separated list of User-Agent blacklist lines */
+                        _n(
+                            'The User-Agent blacklist has a line that normal browsers or WordPress itself also send (%s), so it blocks real visitors or the site. Review it in the Firewall tab, and block the IP of the bot you meant to stop.',
+                            'The User-Agent blacklist has lines that normal browsers or WordPress itself also send (%s), so they block real visitors or the site. Review them in the Firewall tab, and block the IP of the bots you meant to stop.',
+                            count( $vg_ua_people ),
+                            'vigilante'
+                        ),
+                        implode( ', ', array_map( array( 'Vigilante_UA_Utils', 'short' ), wp_list_pluck( $vg_ua_people, 'line' ) ) )
                     ),
                 );
             }
@@ -1691,7 +1722,7 @@ class Vigilante_Admin {
             array( 'tab' => 'firewall', 'tab_label' => __( 'Firewall', 'vigilante' ), 'section' => __( 'Firewall Protection', 'vigilante' ), 'anchor' => 'vigilante-section-firewall-main', 'label' => __( 'Brute force protection', 'vigilante' ), 'label_en' => 'Brute force protection', 'keywords' => _x( 'brute force protection bruteforce login', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'firewall', 'tab_label' => __( 'Firewall', 'vigilante' ), 'section' => __( 'Firewall Protection', 'vigilante' ), 'anchor' => 'vigilante-section-firewall-main', 'label' => __( 'IP Whitelist', 'vigilante' ), 'label_en' => 'IP Whitelist', 'keywords' => _x( 'ip whitelist ips address addresses cidr ipv4 ipv6 allowlist allowed trusted', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'firewall', 'tab_label' => __( 'Firewall', 'vigilante' ), 'section' => __( 'Firewall Protection', 'vigilante' ), 'anchor' => 'vigilante-section-firewall-main', 'label' => __( 'IP Blacklist', 'vigilante' ), 'label_en' => 'IP Blacklist', 'keywords' => _x( 'ip blacklist ips address addresses cidr ipv4 ipv6 blocklist denylist banned', 'settings search keywords', 'vigilante' ) ),
-            array( 'tab' => 'firewall', 'tab_label' => __( 'Firewall', 'vigilante' ), 'section' => __( 'Firewall Protection', 'vigilante' ), 'anchor' => 'vigilante-section-firewall-main', 'label' => __( 'User-Agent Whitelist', 'vigilante' ), 'label_en' => 'User-Agent Whitelist', 'keywords' => _x( 'user-agent whitelist ua useragent browser allowlist allowed trusted user', 'settings search keywords', 'vigilante' ) ),
+            array( 'tab' => 'firewall', 'tab_label' => __( 'Firewall', 'vigilante' ), 'section' => __( 'Firewall Protection', 'vigilante' ), 'anchor' => 'vigilante-section-firewall-main', 'label' => __( 'User-Agents not treated as bots', 'vigilante' ), 'label_en' => 'User-Agents not treated as bots', 'keywords' => _x( 'user-agent whitelist ua useragent browser allowlist allowed trusted user', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'firewall', 'tab_label' => __( 'Firewall', 'vigilante' ), 'section' => __( 'Firewall Protection', 'vigilante' ), 'anchor' => 'vigilante-section-firewall-main', 'label' => __( 'User-Agent Blacklist', 'vigilante' ), 'label_en' => 'User-Agent Blacklist', 'keywords' => _x( 'user-agent blacklist ua useragent browser blocklist denylist banned user', 'settings search keywords', 'vigilante' ) ),
             // Firewall - Server Protection
             array( 'tab' => 'firewall', 'tab_label' => __( 'Firewall', 'vigilante' ), 'section' => __( 'Server Protection', 'vigilante' ), 'anchor' => 'vigilante-section-firewall-server', 'label' => __( 'Directory Browsing', 'vigilante' ), 'label_en' => 'Directory Browsing', 'keywords' => _x( 'directory browsing folder folders listing indexing index', 'settings search keywords', 'vigilante' ) ),
@@ -2060,9 +2091,45 @@ class Vigilante_Admin {
                 'logWhitelistIp'               => __( 'Whitelist this IP', 'vigilante' ),
                 'logBlacklistIp'               => __( 'Blacklist this IP', 'vigilante' ),
                 'logWhitelistUa'               => __( 'Whitelist this User Agent', 'vigilante' ),
-                'logBlacklistUa'               => __( 'Blacklist this User Agent', 'vigilante' ),
                 'logInWhitelist'               => __( 'In whitelist', 'vigilante' ),
                 'logInBlacklist'               => __( 'In blacklist', 'vigilante' ),
+                // Since 3.0.11 the User-Agent group has no blacklist button: a
+                // line taken from a bot that copies a browser blocked everybody
+                // who uses that browser (B123). The lists are matched as the
+                // firewall matches them, and the line that matched is named.
+                /* translators: %s: the list line that matches, e.g. "Macintosh". */
+                'logInWhitelistLine'           => __( 'In whitelist, by the line %s', 'vigilante' ),
+                /* translators: %s: the list line that matches, e.g. "Macintosh". */
+                'logInBlacklistLine'           => __( 'In blacklist, by the line %s', 'vigilante' ),
+                'logMatchedLine'               => __( 'Matching line', 'vigilante' ),
+                'logMatchedLineList'           => __( 'from the User-Agent blacklist', 'vigilante' ),
+                'logUaNoBlacklist'             => __( 'To block whoever sent this request, blacklist its IP. The name of a bot that says who it is can go in the User-Agent blacklist of the Firewall tab.', 'vigilante' ),
+                // Collapsible sections (3.0.12, #87).
+                'foldToggle'                   => __( 'Show or hide this section', 'vigilante' ),
+                /* translators: 1: switches that are enabled, 2: switches in the section. */
+                'foldOnOf'                     => __( '%1$d of %2$d enabled', 'vigilante' ),
+                'foldAllOff'                   => __( 'All disabled', 'vigilante' ),
+                'foldEntriesNone'              => __( 'No entries', 'vigilante' ),
+                'foldEntriesOne'               => __( '1 entry', 'vigilante' ),
+                /* translators: %d: number of lines in the lists of a section, two or more. */
+                'foldEntriesMany'              => __( '%d entries', 'vigilante' ),
+                'foldPendingNone'              => __( 'None pending', 'vigilante' ),
+                'foldPendingOne'               => __( '1 pending', 'vigilante' ),
+                /* translators: %d: number of registrations waiting for approval. */
+                'foldPendingMany'              => __( '%d pending', 'vigilante' ),
+                'foldWarningOne'               => __( '1 warning', 'vigilante' ),
+                /* translators: %d: number of warnings, two or more. */
+                'foldWarningMany'              => __( '%d warnings', 'vigilante' ),
+                'foldErrorOne'                 => __( '1 error', 'vigilante' ),
+                /* translators: %d: number of errors, two or more. */
+                'foldErrorMany'                => __( '%d errors', 'vigilante' ),
+                // Same strings as the section index of Visibility (native-aeo-pack),
+                // so the plugins of the family read alike.
+                'foldIndexTitle'               => __( 'Sections', 'vigilante' ),
+                'foldOpenAll'                  => __( 'Open all', 'vigilante' ),
+                'foldCloseAll'                 => __( 'Close all', 'vigilante' ),
+                'foldGoTo'                     => __( 'Go to a section', 'vigilante' ),
+                'foldSectionOff'               => __( 'Switched off', 'vigilante' ),
                 'logAdded'                     => __( 'Added!', 'vigilante' ),
                 'logErrorAddingToList'         => __( 'Error adding to list', 'vigilante' ),
                 'logRequestFailed'             => __( 'Request failed', 'vigilante' ),
@@ -3927,7 +3994,12 @@ class Vigilante_Admin {
                             <span class="dashicons dashicons-<?php echo esc_attr( $rec['icon'] ); ?> vigilante-priority-<?php echo esc_attr( $rec['priority'] ); ?>"></span>
                             <?php echo esc_html( $rec['message'] ); ?>
                             <?php if ( ! empty( $rec['tab'] ) ) : ?>
-                                <a href="<?php echo esc_url( admin_url( 'admin.php?page=vigilante&tab=' . $rec['tab'] ) ); ?>" class="vigilante-rec-link" title="<?php esc_attr_e( 'Go to settings', 'vigilante' ); ?>"><span class="dashicons dashicons-arrow-right-alt2"></span></a>
+                                <?php
+                                // The anchor takes the link to the setting itself, where the
+                                // tab scrolls and flashes it (hashFocusFlash in admin.js).
+                                $vg_rec_url = admin_url( 'admin.php?page=vigilante&tab=' . $rec['tab'] ) . ( ! empty( $rec['anchor'] ) ? '#' . sanitize_html_class( $rec['anchor'] ) : '' );
+                                ?>
+                                <a href="<?php echo esc_url( $vg_rec_url ); ?>" class="vigilante-rec-link" title="<?php esc_attr_e( 'Go to settings', 'vigilante' ); ?>"><span class="dashicons dashicons-arrow-right-alt2"></span></a>
                             <?php endif; ?>
                         </li>
                         <?php endforeach; ?>
@@ -4131,10 +4203,90 @@ class Vigilante_Admin {
         $send_to_admin     = ! isset( $email_options['send_to_admin_email'] ) || ! empty( $email_options['send_to_admin_email'] );
         $additional_raw    = $email_options['additional_recipients'] ?? array();
         $additional        = is_array( $additional_raw ) ? implode( "\n", $additional_raw ) : trim( $additional_raw );
+
+        // Built here and not inside the table, so the heading can say how many
+        // are active (the folded summary of 3.0.12, #87).
+        $notifications = array(
+            array(
+                'label'  => __( 'Login lockout', 'vigilante' ),
+                'active' => ! empty( $login_options['notify_on_lockout'] ),
+                'tab'    => 'login',
+            ),
+            array(
+                'label'  => __( 'Administrator login', 'vigilante' ),
+                'active' => ! empty( $login_options['notify_on_admin_login'] ),
+                'tab'    => 'login',
+            ),
+            array(
+                'label'  => __( 'New administrator created', 'vigilante' ),
+                'active' => ! empty( $monitoring['alert_new_admin'] ),
+                'tab'    => 'users',
+            ),
+            array(
+                'label'  => __( 'Administrator email changed', 'vigilante' ),
+                'active' => ! empty( $monitoring['alert_admin_email_change'] ),
+                'tab'    => 'users',
+            ),
+            array(
+                'label'  => __( 'Permission elevation', 'vigilante' ),
+                'active' => ! empty( $monitoring['alert_permission_elevation'] ),
+                'tab'    => 'users',
+            ),
+            array(
+                'label'  => __( 'Admin password changed', 'vigilante' ),
+                'active' => ! empty( $monitoring['alert_admin_password_change'] ),
+                'tab'    => 'users',
+            ),
+            array(
+                'label'  => __( 'Registration pending approval', 'vigilante' ),
+                'active' => ! empty( $registration['enabled'] ) && ! empty( $registration['notify_admin'] ),
+                'tab'    => 'users',
+            ),
+            array(
+                'label'  => __( 'File integrity scan report', 'vigilante' ),
+                'active' => ( $fi_options['notify_level'] ?? 'disabled' ) !== 'disabled',
+                'tab'    => 'file-integrity',
+            ),
+            array(
+                'label'  => __( 'File integrity instant alert', 'vigilante' ),
+                'active' => ! empty( $fi_options['instant_alert'] ),
+                'tab'    => 'file-integrity',
+            ),
+            array(
+                'label'  => __( 'Audit alert: immediate', 'vigilante' ),
+                'active' => Vigilante_Audit_Alerts::immediate_is_active( $alerts_options ),
+                'tab'    => 'activity-log',
+                'anchor' => 'vigilante-section-audit-alerts',
+            ),
+            array(
+                'label'  => __( 'Audit alert: threshold', 'vigilante' ),
+                'active' => Vigilante_Audit_Alerts::threshold_is_active( $alerts_options ),
+                'tab'    => 'activity-log',
+                'anchor' => 'vigilante-section-audit-alerts',
+            ),
+            array(
+                'label'  => __( 'Under Attack mode', 'vigilante' ),
+                'active' => true,
+                'tab'    => '',
+                'note'   => __( 'Always active', 'vigilante' ),
+            ),
+            array(
+                'label'  => __( 'Plugin deactivation', 'vigilante' ),
+                'active' => ! empty( $email_options['send_deactivation_email'] ),
+                'tab'    => 'tools',
+            ),
+        );
+        $vg_notices_on = count( array_filter( wp_list_pluck( $notifications, 'active' ) ) );
+        $vg_notices_summary = sprintf(
+            /* translators: 1: notifications that are active, 2: notifications listed. */
+            __( '%1$d of %2$d notifications active', 'vigilante' ),
+            $vg_notices_on,
+            count( $notifications )
+        );
         ?>
 
         <!-- Notification Settings -->
-        <div id="vigilante-section-tools-notifications" class="vigilante-settings-section vigilante-notification-section">
+        <div id="vigilante-section-tools-notifications" class="vigilante-settings-section vigilante-notification-section" data-vigilante-summary="<?php echo esc_attr( $vg_notices_summary ); ?>">
             <h2><?php esc_html_e( 'Notification settings', 'vigilante' ); ?></h2>
             <p><?php esc_html_e( 'Configure who receives all administrative email notifications from Vigilant. Individual notifications are enabled in their respective tabs.', 'vigilante' ); ?></p>
 
@@ -4206,77 +4358,6 @@ class Vigilante_Admin {
                         </thead>
                         <tbody>
                             <?php
-                            $notifications = array(
-                                array(
-                                    'label'  => __( 'Login lockout', 'vigilante' ),
-                                    'active' => ! empty( $login_options['notify_on_lockout'] ),
-                                    'tab'    => 'login',
-                                ),
-                                array(
-                                    'label'  => __( 'Administrator login', 'vigilante' ),
-                                    'active' => ! empty( $login_options['notify_on_admin_login'] ),
-                                    'tab'    => 'login',
-                                ),
-                                array(
-                                    'label'  => __( 'New administrator created', 'vigilante' ),
-                                    'active' => ! empty( $monitoring['alert_new_admin'] ),
-                                    'tab'    => 'users',
-                                ),
-                                array(
-                                    'label'  => __( 'Administrator email changed', 'vigilante' ),
-                                    'active' => ! empty( $monitoring['alert_admin_email_change'] ),
-                                    'tab'    => 'users',
-                                ),
-                                array(
-                                    'label'  => __( 'Permission elevation', 'vigilante' ),
-                                    'active' => ! empty( $monitoring['alert_permission_elevation'] ),
-                                    'tab'    => 'users',
-                                ),
-                                array(
-                                    'label'  => __( 'Admin password changed', 'vigilante' ),
-                                    'active' => ! empty( $monitoring['alert_admin_password_change'] ),
-                                    'tab'    => 'users',
-                                ),
-                                array(
-                                    'label'  => __( 'Registration pending approval', 'vigilante' ),
-                                    'active' => ! empty( $registration['enabled'] ) && ! empty( $registration['notify_admin'] ),
-                                    'tab'    => 'users',
-                                ),
-                                array(
-                                    'label'  => __( 'File integrity scan report', 'vigilante' ),
-                                    'active' => ( $fi_options['notify_level'] ?? 'disabled' ) !== 'disabled',
-                                    'tab'    => 'file-integrity',
-                                ),
-                                array(
-                                    'label'  => __( 'File integrity instant alert', 'vigilante' ),
-                                    'active' => ! empty( $fi_options['instant_alert'] ),
-                                    'tab'    => 'file-integrity',
-                                ),
-                                array(
-                                    'label'  => __( 'Audit alert: immediate', 'vigilante' ),
-                                    'active' => Vigilante_Audit_Alerts::immediate_is_active( $alerts_options ),
-                                    'tab'    => 'activity-log',
-                                    'anchor' => 'vigilante-section-audit-alerts',
-                                ),
-                                array(
-                                    'label'  => __( 'Audit alert: threshold', 'vigilante' ),
-                                    'active' => Vigilante_Audit_Alerts::threshold_is_active( $alerts_options ),
-                                    'tab'    => 'activity-log',
-                                    'anchor' => 'vigilante-section-audit-alerts',
-                                ),
-                                array(
-                                    'label'  => __( 'Under Attack mode', 'vigilante' ),
-                                    'active' => true,
-                                    'tab'    => '',
-                                    'note'   => __( 'Always active', 'vigilante' ),
-                                ),
-                                array(
-                                    'label'  => __( 'Plugin deactivation', 'vigilante' ),
-                                    'active' => ! empty( $email_options['send_deactivation_email'] ),
-                                    'tab'    => 'tools',
-                                ),
-                            );
-
                             foreach ( $notifications as $notif ) :
                                 $status_class = $notif['active'] ? 'vigilante-status-active' : 'vigilante-status-inactive';
                                 $status_label = $notif['active'] ? __( 'Active', 'vigilante' ) : __( 'Inactive', 'vigilante' );
@@ -4307,7 +4388,8 @@ class Vigilante_Admin {
             </div>
         </div>
 
-        <h2 id="vigilante-section-tools-main" class="vigilante-tools-heading"><?php esc_html_e( 'Tools', 'vigilante' ); ?></h2>
+        <div class="vigilante-settings-section vigilante-tools-block">
+        <h2 id="vigilante-section-tools-main"><?php esc_html_e( 'Tools', 'vigilante' ); ?></h2>
 
         <?php
         // Warn that during Under Attack mode the export/import operate against
@@ -4416,6 +4498,7 @@ class Vigilante_Admin {
             </div>
             <?php endif; ?>
         </div>
+        </div>
         <?php
     }
 
@@ -4499,7 +4582,7 @@ class Vigilante_Admin {
                                 <input type="checkbox" name="firewall[block_bad_bots]" value="1" <?php disabled( $vg_main_locked ); ?> <?php checked( ! empty( $options['block_bad_bots'] ) ); ?>>
                                 <?php esc_html_e( 'Block known malicious bots and scanners', 'vigilante' ); ?>
                             </label>
-                            <p class="description"><?php esc_html_e( 'The list also stops SEO crawlers such as Ahrefs, Semrush, Majestic and Screaming Frog, and command line clients such as curl, wget and python-requests. To let one of them through, add its name to the User-Agent Whitelist below. On Apache part of the list is applied in .htaccess, before WordPress loads, so those requests get a 403 and do not appear in the Security Audit.', 'vigilante' ); ?></p>
+                            <p class="description"><?php esc_html_e( 'The list also stops SEO crawlers such as Ahrefs, Semrush, Majestic and Screaming Frog, and command line clients such as curl, wget and python-requests. To let one of them through, add its name to User-Agents not treated as bots, below. On Apache part of the list is applied in .htaccess, before WordPress loads, so those requests get a 403 and do not appear in the Security Audit.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
                 </table>
@@ -4690,7 +4773,7 @@ class Vigilante_Admin {
                             </p>
                         </td>
                     </tr>
-                    <tr>
+                    <tr id="field-ip-blacklist">
                         <th scope="row"><label for="vigilante-f-firewall-ip-blacklist"><?php esc_html_e( 'IP Blacklist', 'vigilante' ); ?></label></th>
                         <td>
                             <textarea id="vigilante-f-firewall-ip-blacklist" name="firewall[ip_blacklist]" rows="4" class="large-text code" placeholder="203.0.113.42&#10;203.0.113.0/24&#10;203.0.113.*"><?php echo esc_textarea( implode( "\n", $options['ip_blacklist'] ?? array() ) ); ?></textarea>
@@ -4714,17 +4797,23 @@ class Vigilante_Admin {
                 <p><?php esc_html_e( 'Partial matching: enter a keyword and any User-Agent containing it will be matched.', 'vigilante' ); ?></p>
                 <table class="form-table">
                     <tr>
-                        <th scope="row"><label for="vigilante-f-firewall-ua-whitelist"><?php esc_html_e( 'User-Agent Whitelist', 'vigilante' ); ?></label></th>
+                        <th scope="row"><label for="vigilante-f-firewall-ua-whitelist"><?php esc_html_e( 'User-Agents not treated as bots', 'vigilante' ); ?></label></th>
                         <td>
                             <textarea id="vigilante-f-firewall-ua-whitelist" name="firewall[ua_whitelist]" <?php disabled( $vg_main_locked ); ?> rows="4" class="large-text code"><?php echo esc_textarea( implode( "\n", $options['ua_whitelist'] ?? array() ) ); ?></textarea>
-                            <p class="description"><?php esc_html_e( 'One User-Agent per line. These will bypass all firewall checks. Example: ManageWP, MainWP, UptimeRobot.', 'vigilante' ); ?></p>
+                            <?php
+                            // Until 3.0.11 this said the entries bypassed every
+                            // firewall check, which stopped being true in PHP in
+                            // 2.11.2 and in .htaccess in 3.0.11 (B109, point 2).
+                            ?>
+                            <p class="description"><?php esc_html_e( 'One User-Agent, or part of one, per line. It only exempts them from Block Bad Bots and from the rule against an empty User-Agent: every other firewall rule still applies to them. Example: ManageWP, MainWP, UptimeRobot.', 'vigilante' ); ?></p>
                         </td>
                     </tr>
-                    <tr>
+                    <tr id="field-ua-blacklist">
                         <th scope="row"><label for="vigilante-f-firewall-ua-blacklist"><?php esc_html_e( 'User-Agent Blacklist', 'vigilante' ); ?></label></th>
                         <td>
                             <textarea id="vigilante-f-firewall-ua-blacklist" name="firewall[ua_blacklist]" rows="4" class="large-text code"><?php echo esc_textarea( implode( "\n", $options['ua_blacklist'] ?? array() ) ); ?></textarea>
-                            <p class="description"><?php esc_html_e( 'One User-Agent per line. These will be blocked immediately.', 'vigilante' ); ?></p>
+                            <p class="description"><?php esc_html_e( 'One User-Agent, or part of one, per line. Any visit whose User-Agent contains it is blocked. Lines that normal browsers or WordPress itself also send are not saved, because they would block people: to stop a bot that pretends to be a browser, block its IP.', 'vigilante' ); ?></p>
+                            <div class="vigilante-ua-blacklist-status"><?php echo wp_kses_post( $this->ua_blacklist_status_html( $options['ua_blacklist'] ?? array() ) ); ?></div>
                         </td>
                     </tr>
                 </table>
@@ -4993,7 +5082,14 @@ class Vigilante_Admin {
         $two_factor        = $options['two_factor'] ?? array();
         $two_factor_enabled = ! empty( $two_factor['enabled'] );
         ?>
-        <div class="vigilante-settings-section vigilante-lockout-section">
+        <?php
+        $vg_blocked = is_array( $lockouts ) ? count( $lockouts ) : 0;
+        $vg_blocked_summary = $vg_blocked > 0
+            /* translators: %s: number of IP addresses blocked right now. */
+            ? sprintf( _n( '%s IP blocked', '%s IPs blocked', $vg_blocked, 'vigilante' ), number_format_i18n( $vg_blocked ) )
+            : __( 'No IPs blocked', 'vigilante' );
+        ?>
+        <div class="vigilante-settings-section vigilante-lockout-section" data-vigilante-summary="<?php echo esc_attr( $vg_blocked_summary ); ?>">
             <h2 id="vigilante-section-login-status"><?php esc_html_e( 'Login Protection Status', 'vigilante' ); ?></h2>
             
             <table class="form-table">
@@ -5604,7 +5700,7 @@ class Vigilante_Admin {
                 <?php $vig_home_https = ( 0 === strpos( (string) get_option( 'home' ), 'https://' ) ); ?>
                 <p class="description"><?php esc_html_e( 'Tells browsers to reach this site over HTTPS and never over HTTP, for as long as the max age below.', 'vigilante' ); ?></p>
                 <?php if ( ! $vig_home_https ) : ?>
-                    <p class="description" style="color:#b32d2e"><strong><?php esc_html_e( 'Unavailable: the site address still starts with http://. Enabling HSTS on a site not published over HTTPS would make it unreachable in any browser that honours it.', 'vigilante' ); ?></strong></p>
+                    <p class="description vigilante-inline-warning" style="color:#b32d2e"><strong><?php esc_html_e( 'Unavailable: the site address still starts with http://. Enabling HSTS on a site not published over HTTPS would make it unreachable in any browser that honours it.', 'vigilante' ); ?></strong></p>
                 <?php endif; ?>
                 <table class="form-table">
                     <tr>
@@ -6393,13 +6489,15 @@ class Vigilante_Admin {
             $user_security = new Vigilante_User_Security( $this->settings, $this->activity_log, true );
             $pending_users = $user_security->get_pending_users();
             ?>
-            <div id="vigilante-section-users-pending" class="vigilante-tool-box vigilante-pending-users-section">
-                <h3>
-                    <?php esc_html_e( 'Pending registrations', 'vigilante' ); ?>
-                    <?php if ( count( $pending_users ) > 0 ) : ?>
-                        <span class="vigilante-badge vigilante-badge-warning"><?php echo esc_html( count( $pending_users ) ); ?></span>
-                    <?php endif; ?>
-                </h3>
+            <?php
+            $vg_pending = count( $pending_users );
+            $vg_pending_summary = $vg_pending > 0
+                /* translators: %s: number of registrations waiting for approval. */
+                ? sprintf( _n( '%s pending', '%s pending', $vg_pending, 'vigilante' ), number_format_i18n( $vg_pending ) )
+                : __( 'None pending', 'vigilante' );
+            ?>
+            <div id="vigilante-section-users-pending" class="vigilante-tool-box vigilante-pending-users-section" data-vigilante-summary="<?php echo esc_attr( $vg_pending_summary ); ?>">
+                <h3><?php esc_html_e( 'Pending registrations', 'vigilante' ); ?></h3>
 
                 <?php
                 /*
@@ -6469,18 +6567,21 @@ class Vigilante_Admin {
             </div>
 
             <!-- Active Sessions Management -->
-            <div class="vigilante-tool-box vigilante-session-management-section">
+            <?php
+            $current_user_id = get_current_user_id();
+            $my_sessions = $user_security->get_user_sessions( $current_user_id );
+            $has_corrupted = $user_security->has_corrupted_sessions( $current_user_id );
+            $raw_count = $user_security->get_raw_session_count( $current_user_id );
+            $vg_my_sessions = count( $my_sessions );
+            /* translators: %s: number of sessions open with the account of whoever is looking. */
+            $vg_sessions_summary = sprintf( _n( 'Yours: %s open session', 'Yours: %s open sessions', $vg_my_sessions, 'vigilante' ), number_format_i18n( $vg_my_sessions ) );
+            ?>
+            <div class="vigilante-tool-box vigilante-session-management-section" data-vigilante-summary="<?php echo esc_attr( $vg_sessions_summary ); ?>">
                 <h3><?php esc_html_e( 'Active sessions', 'vigilante' ); ?></h3>
                 <p class="description"><?php esc_html_e( 'View and manage active login sessions. You can revoke sessions to force users to log in again.', 'vigilante' ); ?></p>
 
                 <!-- Current user sessions -->
                 <h4><?php esc_html_e( 'Your sessions', 'vigilante' ); ?></h4>
-                <?php
-                $current_user_id = get_current_user_id();
-                $my_sessions = $user_security->get_user_sessions( $current_user_id );
-                $has_corrupted = $user_security->has_corrupted_sessions( $current_user_id );
-                $raw_count = $user_security->get_raw_session_count( $current_user_id );
-                ?>
                 
                 <?php if ( $has_corrupted && $raw_count > 0 ) : ?>
                     <div class="notice notice-warning inline" style="margin: 10px 0;">
@@ -6598,7 +6699,14 @@ class Vigilante_Admin {
             <!-- Database Hardening (outside form save flow - uses its own AJAX action) -->
             <?php $vg_shared_locked = $this->shared_files_locked(); ?>
             <?php $this->render_shared_files_notice(); ?>
-            <div id="vigilante-section-hardening-database" class="vigilante-settings-section <?php echo $vg_shared_locked ? 'vigilante-form-disabled' : ''; ?>" <?php echo $vg_shared_locked ? 'inert' : ''; ?>>
+            <?php
+            $db_prefix = new Vigilante_Database_Prefix();
+            $current_prefix = $db_prefix->get_current_prefix();
+            $is_default = $db_prefix->is_default_prefix();
+            /* translators: %s: the database table prefix in use, such as wp_. */
+            $vg_prefix_summary = sprintf( __( 'Prefix: %s', 'vigilante' ), $current_prefix );
+            ?>
+            <div id="vigilante-section-hardening-database" class="vigilante-settings-section <?php echo $vg_shared_locked ? 'vigilante-form-disabled' : ''; ?>" <?php echo $vg_shared_locked ? 'inert' : ''; ?> data-vigilante-summary="<?php echo esc_attr( $vg_prefix_summary ); ?>">
                 <h2>
                     <?php esc_html_e( 'Database Hardening', 'vigilante' ); ?>
                     <span class="vigilante-method-badge database"><?php esc_html_e( 'Database', 'vigilante' ); ?></span>
@@ -6606,11 +6714,6 @@ class Vigilante_Admin {
                 </h2>
                 <p><?php esc_html_e( 'Change the database table prefix to prevent SQL injection attacks that target default WordPress tables.', 'vigilante' ); ?></p>
 
-                <?php
-                $db_prefix = new Vigilante_Database_Prefix();
-                $current_prefix = $db_prefix->get_current_prefix();
-                $is_default = $db_prefix->is_default_prefix();
-                ?>
 
                 <?php if ( is_multisite() && ! $vg_shared_locked ) : ?>
                     <div class="notice notice-warning inline" style="margin:10px 0 16px;padding:8px 12px;">
@@ -7170,12 +7273,16 @@ class Vigilante_Admin {
             </p>
         </form>
 
-        <div id="vigilante-section-audit-recent" class="vigilante-settings-section">
+        <?php
+        $logs = $this->activity_log->get_logs( array( 'per_page' => 20 ) );
+        $total_logs = $this->activity_log->get_logs_count();
+        /* translators: %s: number of entries in the activity log. */
+        $vg_log_summary = sprintf( _n( '%s entry', '%s entries', (int) $total_logs, 'vigilante' ), number_format_i18n( (int) $total_logs ) );
+        ?>
+        <div id="vigilante-section-audit-recent" class="vigilante-settings-section" data-vigilante-summary="<?php echo esc_attr( $vg_log_summary ); ?>">
             <h2><?php esc_html_e( 'Recent Activity', 'vigilante' ); ?></h2>
 
             <?php
-            $logs = $this->activity_log->get_logs( array( 'per_page' => 20 ) );
-            $total_logs = $this->activity_log->get_logs_count();
 
             // Label maps for translated display
             $type_labels = array(
@@ -7200,10 +7307,6 @@ class Vigilante_Admin {
             );
 
             $firewall_options = $this->settings->get_section( 'firewall' );
-            $ip_whitelist = $firewall_options['ip_whitelist'] ?? array();
-            $ip_blacklist = $firewall_options['ip_blacklist'] ?? array();
-            $ua_whitelist = $firewall_options['ua_whitelist'] ?? array();
-            $ua_blacklist = $firewall_options['ua_blacklist'] ?? array();
             ?>
 
             <div class="vigilante-log-filters">
@@ -7302,11 +7405,8 @@ class Vigilante_Admin {
                                 'request_uri'        => Vigilante_Activity_Log::extract_request_uri( $log->extra_data ?? '' ),
                                 'date'               => (string) ( $log->created_at ?? '' ),
                                 'severity'           => (string) ( $log->severity ?? 'info' ),
-                                'is_ip_whitelisted'  => ( '' !== $ip_val && in_array( $ip_val, $ip_whitelist, true ) ),
-                                'is_ip_blacklisted'  => ( '' !== $ip_val && in_array( $ip_val, $ip_blacklist, true ) ),
-                                'is_ua_whitelisted'  => ( '' !== $ua_val && in_array( $ua_val, $ua_whitelist, true ) ),
-                                'is_ua_blacklisted'  => ( '' !== $ua_val && in_array( $ua_val, $ua_blacklist, true ) ),
                             );
+                            $details = array_merge( $details, Vigilante_Activity_Log::list_flags( $ip_val, $ua_val, $log->extra_data ?? '', $firewall_options ) );
                             // Self-protection entries carry what happened, what
                             // it means and what to do, from the same catalogue
                             // the File Integrity box uses.
@@ -7727,7 +7827,10 @@ class Vigilante_Admin {
      * One case of the self-protection box, as a row that opens: what it is, how
      * many files, its severity, and inside, the files, what it means and what to
      * do. Plain HTML details, so there is no JavaScript between a finding about
-     * the security plugin and the person reading it.
+     * the security plugin and the person reading it. Since 3.0.12 the admin
+     * script remembers in the browser whether a row was left open, except for
+     * a critical row, which always starts as it is printed here
+     * (VigilanteRemember in assets/js/admin.js).
      *
      * @param array  $guidance Guidance entry (title, meaning, steps).
      * @param array  $files    Paths this case was found in.
@@ -8063,13 +8166,6 @@ class Vigilante_Admin {
                 <button type="button" class="button vigilante-reset-section-btn" data-original-text="<?php esc_attr_e( 'Reset to Defaults', 'vigilante' ); ?>">
                     <?php esc_html_e( 'Reset to Defaults', 'vigilante' ); ?>
                 </button>
-                <span class="vigilante-buttons-separator"></span>
-                <button type="button" class="button button-primary vigilante-run-scan">
-                    <?php esc_html_e( 'Run Scan Now', 'vigilante' ); ?>
-                </button>
-                <button type="button" class="button vigilante-clear-scan-btn vigilante-clear-scan">
-                    <?php esc_html_e( 'Clear Previous Results', 'vigilante' ); ?>
-                </button>
             </p>
         </form>
 
@@ -8104,9 +8200,41 @@ class Vigilante_Admin {
         </div>
         <?php endif; ?>
 
-        <?php if ( $last_scan || $has_closed || $closed_last_check > 0 || $vg_unfinished ) : ?>
-        <div id="vigilante-section-fi-last-scan" class="vigilante-settings-section">
+        <?php
+        // Scanning and clearing go with what they produce, not with the
+        // settings (#15, 3.0.12): saving does not scan and scanning does not
+        // save, and with the sections folding, the save buttons fold with
+        // their settings. So the results block is always there, with its two
+        // buttons, also before the first scan. Outside the settings form they
+        // no longer go inert with it, so they are disabled here instead when
+        // the module is off.
+        $vg_has_results = ( $last_scan || $has_closed || $closed_last_check > 0 || $vg_unfinished );
+        // Only the date: whether the scan was complete, and what it found, is
+        // said inside, where a partial scan explains itself.
+        if ( ! $vg_has_results ) {
+            $vg_scan_summary = __( 'No results yet', 'vigilante' );
+        } elseif ( $last_scan ) {
+            /* translators: %s: date and time of the last scan that finished. */
+            $vg_scan_summary = sprintf( __( 'Last scan: %s', 'vigilante' ), wp_date( $datetime_format, $last_scan ) );
+        } else {
+            $vg_scan_summary = '';
+        }
+        ?>
+        <div id="vigilante-section-fi-last-scan" class="vigilante-settings-section" data-vigilante-summary="<?php echo esc_attr( $vg_scan_summary ); ?>">
             <h2><?php esc_html_e( 'Last Scan Results', 'vigilante' ); ?></h2>
+            <p class="vigilante-scan-actions">
+                <button type="button" class="button button-primary vigilante-run-scan" <?php disabled( (bool) $is_disabled ); ?>>
+                    <?php esc_html_e( 'Run Scan Now', 'vigilante' ); ?>
+                </button>
+                <?php if ( $vg_has_results ) : ?>
+                <button type="button" class="button vigilante-clear-scan-btn vigilante-clear-scan" <?php disabled( (bool) $is_disabled ); ?>>
+                    <?php esc_html_e( 'Clear Previous Results', 'vigilante' ); ?>
+                </button>
+                <?php endif; ?>
+            </p>
+            <?php if ( ! $vg_has_results ) : ?>
+            <p class="vigilante-scan-empty"><?php esc_html_e( 'No results yet: no scan has finished on this site.', 'vigilante' ); ?></p>
+            <?php else : ?>
             <?php
             // A scan that started and was stopped before saving says so, with
             // its cause when PHP gave it. The same text as Security Check
@@ -8683,11 +8811,15 @@ class Vigilante_Admin {
                     <?php endif; ?>
                 <?php endif; ?>
             </div>
+            <?php endif; ?>
         </div>
-        <?php endif; ?>
 
         <?php if ( ! empty( $ignored_closed_plugins ) ) : ?>
-        <div id="vigilante-section-fi-ignored-closed" class="vigilante-settings-section">
+        <?php
+        /* translators: %s: number of closed or removed plugins being ignored. */
+        $vg_ign_plugins_summary = sprintf( _n( '%s plugin', '%s plugins', count( $ignored_closed_plugins ), 'vigilante' ), number_format_i18n( count( $ignored_closed_plugins ) ) );
+        ?>
+        <div id="vigilante-section-fi-ignored-closed" class="vigilante-settings-section" data-vigilante-summary="<?php echo esc_attr( $vg_ign_plugins_summary ); ?>">
             <h2><?php esc_html_e( 'Ignored Closed + Removed Plugins', 'vigilante' ); ?></h2>
             <p class="description"><?php esc_html_e( 'These plugins remain closed/removed in WordPress.org but you have chosen to hide them from the main list and from email alerts. They are still installed on the site and still running their code &mdash; the silencing is purely cosmetic.', 'vigilante' ); ?></p>
             <table class="wp-list-table widefat fixed striped">
@@ -8727,7 +8859,11 @@ class Vigilante_Admin {
         <?php endif; ?>
 
         <?php if ( ! empty( $ignored_files ) ) : ?>
-        <div id="vigilante-section-fi-ignored" class="vigilante-settings-section">
+        <?php
+        /* translators: %s: number of files being ignored. */
+        $vg_ign_files_summary = sprintf( _n( '%s file', '%s files', count( $ignored_files ), 'vigilante' ), number_format_i18n( count( $ignored_files ) ) );
+        ?>
+        <div id="vigilante-section-fi-ignored" class="vigilante-settings-section" data-vigilante-summary="<?php echo esc_attr( $vg_ign_files_summary ); ?>">
             <h2><?php esc_html_e( 'Ignored Files', 'vigilante' ); ?></h2>
             <p class="description"><?php esc_html_e( 'Each file is ignored as it was when you ignored it: its findings are hidden from scan results and email notifications, and they come back if the file changes, goes away or comes back, and the next scan takes it off this list. Files ignored with an earlier version of Vigilant show once more, to be ignored again. To stop watching a file or a folder for good, add it to Excluded Paths instead.', 'vigilante' ); ?></p>
             <div class="vigilante-paginated-section" data-bulk-mode="unignore">
@@ -8904,6 +9040,8 @@ class Vigilante_Admin {
         $rejected_ips     = array();
         $rejected_proxies = array();
         $own_site_ips     = array();
+        $ua_rejected      = array();
+        $ua_warned        = array();
 
         // Handle modules
         if ( 'modules' === $section && isset( $data['modules'] ) ) {
@@ -8931,6 +9069,25 @@ class Vigilante_Admin {
                 // so the ones that cannot match are dropped and reported back
                 // instead of being stored in silence.
                 $rejected_ips = $this->filter_ip_lists( $section, $processed, $rejected_proxies, $own_site_ips );
+
+                // A User-Agent blacklist line that normal browsers, the person
+                // saving or WordPress itself also send would lock people or the
+                // site out (B123). This is the explicit save of the tab, so a
+                // stored line of that kind goes too, and the notice says so.
+                if ( 'firewall' === $section && isset( $processed['ua_blacklist'] ) && is_array( $processed['ua_blacklist'] ) ) {
+                    if ( ! class_exists( 'Vigilante_UA_Utils' ) ) {
+                        require_once VIGILANTE_INCLUDES_DIR . 'class-ua-utils.php';
+                    }
+                    $ua_split = Vigilante_UA_Utils::filter_blacklist(
+                        $processed['ua_blacklist'],
+                        isset( $stored_options['firewall']['ua_blacklist'] ) ? (array) $stored_options['firewall']['ua_blacklist'] : array(),
+                        Vigilante_UA_Utils::current_user_agent(),
+                        true
+                    );
+                    $processed['ua_blacklist'] = $ua_split['kept'];
+                    $ua_rejected               = $ua_split['rejected'];
+                    $ua_warned                 = $ua_split['warned'];
+                }
 
                 // Save the processed section
                 $saved_options[ $section ] = $processed;
@@ -9044,11 +9201,121 @@ class Vigilante_Admin {
             $file_notices['not_written'] = isset( $file_notices['not_written'] ) ? $file_notices['not_written'] . '<br>' . $own_notice : $own_notice;
         }
 
+        // The User-Agent blacklist lines left out, and the ones stored with a
+        // warning, each with the reason (B123).
+        $ua_notice = $this->ua_blacklist_notice( $ua_rejected, $ua_warned );
+        if ( '' !== $ua_notice ) {
+            $file_notices['not_written'] = isset( $file_notices['not_written'] ) ? $file_notices['not_written'] . '<br>' . $ua_notice : $ua_notice;
+        }
+
+        // The box shows what is stored, not what was typed: the page does not
+        // reload, so the script swaps in the list and its status as saved.
+        if ( 'firewall' === $section && isset( $saved_options['firewall']['ua_blacklist'] ) && is_array( $saved_options['firewall']['ua_blacklist'] ) ) {
+            $file_notices['ua_blacklist']        = array_values( $saved_options['firewall']['ua_blacklist'] );
+            $file_notices['ua_blacklist_status'] = $this->ua_blacklist_status_html( $saved_options['firewall']['ua_blacklist'] );
+        }
+
         if ( ! empty( $file_notices ) ) {
             wp_send_json_success( array_merge( array( 'message' => $message ), $file_notices ) );
         }
 
         wp_send_json_success( $message );
+    }
+
+    /**
+     * The second notice of a Firewall save, for the User-Agent blacklist
+     *
+     * @since 3.0.11
+     *
+     * @param array $rejected Lines not stored, from Vigilante_UA_Utils::filter_blacklist().
+     * @param array $warned   Lines stored with a warning.
+     * @return string HTML, every value escaped here; '' when there is nothing to say.
+     */
+    private function ua_blacklist_notice( $rejected, $warned ) {
+        $parts = array();
+
+        if ( ! empty( $rejected ) ) {
+            $lines = array();
+            foreach ( $rejected as $entry ) {
+                $lines[] = '<code>' . esc_html( Vigilante_UA_Utils::short( $entry['line'] ) ) . '</code> ' . esc_html( Vigilante_UA_Utils::explain( $entry ) );
+            }
+            $parts[] = esc_html(
+                sprintf(
+                    /* translators: %d: number of lines that were not saved. */
+                    _n(
+                        '%d line of the User-Agent blacklist was not saved:',
+                        '%d lines of the User-Agent blacklist were not saved:',
+                        count( $rejected ),
+                        'vigilante'
+                    ),
+                    count( $rejected )
+                )
+            ) . '<br>' . implode( '<br>', $lines );
+        }
+
+        if ( ! empty( $warned ) ) {
+            $lines = array();
+            foreach ( $warned as $entry ) {
+                $lines[] = '<code>' . esc_html( Vigilante_UA_Utils::short( $entry['line'] ) ) . '</code> ' . esc_html( Vigilante_UA_Utils::explain( $entry ) );
+            }
+            $parts[] = esc_html(
+                sprintf(
+                    /* translators: %d: number of lines saved with a warning. */
+                    _n(
+                        '%d line of the User-Agent blacklist was saved with a warning:',
+                        '%d lines of the User-Agent blacklist were saved with a warning:',
+                        count( $warned ),
+                        'vigilante'
+                    ),
+                    count( $warned )
+                )
+            ) . '<br>' . implode( '<br>', $lines );
+        }
+
+        return implode( '<br>', $parts );
+    }
+
+    /**
+     * What the stored User-Agent blacklist blocks, under its box
+     *
+     * Only the stored lines that normal browsers or WordPress itself also
+     * send: they keep applying until the tab is saved (B123).
+     *
+     * @since 3.0.11
+     *
+     * @param array $stored Stored blacklist.
+     * @return string HTML, every value escaped here; '' when no line blocks people.
+     */
+    private function ua_blacklist_status_html( $stored ) {
+        if ( ! class_exists( 'Vigilante_UA_Utils' ) ) {
+            require_once VIGILANTE_INCLUDES_DIR . 'class-ua-utils.php';
+        }
+
+        $found = Vigilante_UA_Utils::stored_lines_blocking_people( $stored );
+        if ( empty( $found ) ) {
+            return '';
+        }
+
+        $html  = '<div class="notice notice-error inline vigilante-ua-blacklist-flag"><p><strong>';
+        $html .= esc_html(
+            sprintf(
+                /* translators: %d: number of saved lines. */
+                _n(
+                    '%d saved line blocks people and still applies:',
+                    '%d saved lines block people and still apply:',
+                    count( $found ),
+                    'vigilante'
+                ),
+                count( $found )
+            )
+        );
+        $html .= '</strong></p><ul>';
+        foreach ( $found as $entry ) {
+            $html .= '<li><code>' . esc_html( Vigilante_UA_Utils::short( $entry['line'] ) ) . '</code> ' . esc_html( Vigilante_UA_Utils::explain( $entry ) ) . '</li>';
+        }
+        $html .= '</ul><p>' . esc_html__( 'Saving this tab again leaves out every line listed here.', 'vigilante' ) . '</p></div>';
+
+        return $html;
     }
 
     /**
@@ -9670,7 +9937,76 @@ class Vigilante_Admin {
             wp_schedule_single_event( time() + 5, 'vigilante_under_attack_post_scan' );
         }
 
-        wp_send_json_success( __( 'Settings imported successfully.', 'vigilante' ) . $this->locked_file_settings_message() );
+        // validate_options() left out the firewall lines that would lock people
+        // or the site out; say which and why, or the file looks imported whole.
+        $dropped = $this->import_dropped_lines_notice( $imported, $validated );
+
+        wp_send_json_success( __( 'Settings imported successfully.', 'vigilante' ) . $this->locked_file_settings_message() . $dropped );
+    }
+
+    /**
+     * What an import left out of the firewall blacklists, and why
+     *
+     * validate_options() drops the new User-Agent blacklist lines that block
+     * people (B123) and the new IP blacklist entries that are addresses of the
+     * site (B104). The script keeps this notice on screen instead of reloading,
+     * which it recognises by the class of the wrapper.
+     *
+     * @since 3.0.11
+     *
+     * @param array $imported  The imported settings, sanitized.
+     * @param array $validated What validate_options() kept.
+     * @return string HTML, every value escaped here; '' when nothing was left out.
+     */
+    private function import_dropped_lines_notice( $imported, $validated ) {
+        $sent_ua = ( isset( $imported['firewall']['ua_blacklist'] ) && is_array( $imported['firewall']['ua_blacklist'] ) ) ? $imported['firewall']['ua_blacklist'] : array();
+        $kept_ua = ( isset( $validated['firewall']['ua_blacklist'] ) && is_array( $validated['firewall']['ua_blacklist'] ) ) ? $validated['firewall']['ua_blacklist'] : array();
+        $sent_ip = ( isset( $imported['firewall']['ip_blacklist'] ) && is_array( $imported['firewall']['ip_blacklist'] ) ) ? $imported['firewall']['ip_blacklist'] : array();
+        $kept_ip = ( isset( $validated['firewall']['ip_blacklist'] ) && is_array( $validated['firewall']['ip_blacklist'] ) ) ? $validated['firewall']['ip_blacklist'] : array();
+
+        if ( ! class_exists( 'Vigilante_UA_Utils' ) ) {
+            require_once VIGILANTE_INCLUDES_DIR . 'class-ua-utils.php';
+        }
+
+        $parts = array();
+
+        $ua_rejected = array();
+        foreach ( $sent_ua as $line ) {
+            if ( ! is_string( $line ) || '' === trim( $line ) || in_array( trim( $line ), $kept_ua, true ) ) {
+                continue;
+            }
+            $ua_rejected[] = array_merge( array( 'line' => trim( $line ) ), Vigilante_UA_Utils::classify_blacklist_line( $line, Vigilante_UA_Utils::current_user_agent() ) );
+        }
+        if ( ! empty( $ua_rejected ) ) {
+            $parts[] = $this->ua_blacklist_notice( $ua_rejected, array() );
+        }
+
+        // Only the entries left out for being an address of the site: anything
+        // else validate_options() might drop is not this notice's to explain.
+        $ip_dropped = array_values( array_diff( array_map( 'strval', $sent_ip ), array_map( 'strval', $kept_ip ) ) );
+        if ( ! empty( $ip_dropped ) ) {
+            $ip_dropped = Vigilante_IP_Utils::entries_matching( $ip_dropped, Vigilante_IP_Utils::own_site_addresses() );
+        }
+        if ( ! empty( $ip_dropped ) ) {
+            $parts[] = esc_html(
+                sprintf(
+                    /* translators: %s: comma separated list of the blacklist entries that were not saved. */
+                    _n(
+                        'This blacklist entry matches an address of this site, and blocking it would stop WordPress from reaching itself (WP-Cron, the REST API test of Site Health), so it was not saved: %s',
+                        'These blacklist entries match an address of this site, and blocking them would stop WordPress from reaching itself (WP-Cron, the REST API test of Site Health), so they were not saved: %s',
+                        count( $ip_dropped ),
+                        'vigilante'
+                    ),
+                    implode( ', ', $ip_dropped )
+                )
+            );
+        }
+
+        if ( empty( $parts ) ) {
+            return '';
+        }
+
+        return ' <span class="vigilante-import-dropped"><br>' . implode( '<br>', $parts ) . '<br>' . esc_html__( 'Reload the page to see the imported settings.', 'vigilante' ) . '</span>';
     }
 
     /**

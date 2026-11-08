@@ -127,8 +127,14 @@ class Vigilante_Firewall {
         // Check if User-Agent is blacklisted (after gathering request data).
         // An explicitly whitelisted agent still wins over the blacklist, which
         // is what an administrator who wrote it there expects.
-        if ( ! $ua_whitelisted && $this->is_ua_blacklisted() ) {
-            $this->block_request( 'ua_blacklisted', __( 'User-Agent is blacklisted', 'vigilante' ) );
+        // The line that matched travels with the entry, so the activity log can
+        // say which one it was: until 3.0.11 it could not, and finding the line
+        // that locked an administrator out took reading the whole list (B123).
+        if ( ! $ua_whitelisted ) {
+            $ua_blacklist_line = $this->is_ua_blacklisted();
+            if ( '' !== $ua_blacklist_line ) {
+                $this->block_request( 'ua_blacklisted', __( 'User-Agent is blacklisted', 'vigilante' ), 403, array( 'matched_line' => $ua_blacklist_line ) );
+            }
         }
 
         // Run security checks
@@ -1315,19 +1321,23 @@ class Vigilante_Firewall {
      * @param string $reason      Reason code for blocking.
      * @param string $message     Message to log.
      * @param int    $status_code HTTP status code.
+     * @param array  $context     More data for the log entry (since 3.0.11).
      */
-    private function block_request( $reason, $message, $status_code = 403 ) {
+    private function block_request( $reason, $message, $status_code = 403, $context = array() ) {
         // Log the block
         if ( $this->activity_log ) {
             $this->activity_log->log(
                 'firewall',
                 'blocked',
                 $message,
-                array(
-                    'reason'      => $reason,
-                    'request_uri' => $this->loggable_uri(),
-                    'ip'          => $this->get_client_ip(),
-                    'user_agent'  => $this->request_data['user_agent'] ?? '',
+                array_merge(
+                    (array) $context,
+                    array(
+                        'reason'      => $reason,
+                        'request_uri' => $this->loggable_uri(),
+                        'ip'          => $this->get_client_ip(),
+                        'user_agent'  => $this->request_data['user_agent'] ?? '',
+                    )
                 ),
                 'warning'
             );
@@ -1465,35 +1475,32 @@ class Vigilante_Firewall {
     }
 
     /**
-     * Check if current User-Agent is blacklisted
+     * Which line of the User-Agent blacklist the current request matches
      *
      * Partial matching: if the request UA contains any blacklisted string, block it.
+     * Since 3.0.11 it answers with the line instead of true, through the same
+     * matcher the activity log popup uses (Vigilante_UA_Utils::first_match()).
      *
-     * @return bool
+     * @return string The matching line, or '' when none matches.
      */
     private function is_ua_blacklisted() {
         $blacklist = $this->options['ua_blacklist'] ?? array();
 
         if ( empty( $blacklist ) ) {
-            return false;
+            return '';
         }
 
         $user_agent = $this->request_data['user_agent'] ?? '';
 
         if ( empty( $user_agent ) ) {
-            return false;
+            return '';
         }
 
-        $ua_lower = strtolower( $user_agent );
-
-        foreach ( $blacklist as $blocked ) {
-            $blocked = trim( $blocked );
-            if ( ! empty( $blocked ) && false !== strpos( $ua_lower, strtolower( $blocked ) ) ) {
-                return true;
-            }
+        if ( ! class_exists( 'Vigilante_UA_Utils' ) ) {
+            require_once __DIR__ . '/class-ua-utils.php';
         }
 
-        return false;
+        return Vigilante_UA_Utils::first_match( $user_agent, (array) $blacklist );
     }
 
     /**

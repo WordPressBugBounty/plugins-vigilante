@@ -302,11 +302,18 @@ class Vigilante_Security_Headers {
      * rather than at save time so the guard holds however the value reached the
      * option (a crafted request, an imported settings file, a direct write).
      *
+     * And a third, since 3.0.11 (B121): mod_headers reads "%" in a value as the
+     * start of a format. One followed by anything that is not a format makes
+     * the whole .htaccess invalid (a 500 on every page), and "%{NAME}e" is
+     * replaced by an environment variable of the server, in a header anybody
+     * can read. "%%" is how mod_headers writes a literal percent sign, so a
+     * report-uri with "%20" in it still arrives as written.
+     *
      * @param mixed $value Raw settings value.
      * @return string
      */
     private function sanitize_header_value( $value ) {
-        return str_replace( array( '"', "\r", "\n" ), '', (string) $value );
+        return str_replace( '%', '%%', str_replace( array( '"', "\r", "\n" ), '', (string) $value ) );
     }
 
     /**

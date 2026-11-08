@@ -282,6 +282,14 @@
                         if (response.data && typeof response.data.wpconfig_notice === 'string') {
                             $('.vigilante-wpconfig-notice-slot').html(response.data.wpconfig_notice);
                         }
+                        // The User-Agent blacklist as stored, and the lines of it
+                        // that block people, painted by the server (B123).
+                        if (response.data && Array.isArray(response.data.ua_blacklist)) {
+                            $('#vigilante-f-firewall-ua-blacklist').val(response.data.ua_blacklist.join('\n'));
+                        }
+                        if (response.data && typeof response.data.ua_blacklist_status === 'string') {
+                            $('.vigilante-ua-blacklist-status').html(response.data.ua_blacklist_status);
+                        }
                         if (response.data && response.data.not_written) {
                             // Two answers, two notices: what was saved, which
                             // goes away as usual, and what could not be
@@ -637,7 +645,9 @@
 
             var $btn = $(e.currentTarget);
             var $results = $('#vigilante-scan-results');
-            var $lastResults = $('#vigilante-last-scan-results').closest('.vigilante-settings-section');
+            // The buttons live in the results block since 3.0.12 (#15): hide
+            // what it shows, never its heading or the button that is scanning.
+            var $lastResults = $('#vigilante-section-fi-last-scan').children().not('h2, .vigilante-scan-actions');
 
             // Hide previous results section
             $lastResults.hide();
@@ -705,7 +715,7 @@
                     if (response.success) {
                         // Hide all scan results
                         $('#vigilante-scan-results').empty().hide();
-                        $('#vigilante-last-scan-results').closest('.vigilante-settings-section').fadeOut();
+                        $('#vigilante-section-fi-last-scan').children().not('h2, .vigilante-scan-actions').fadeOut();
                         Vigilante_Admin.showNotice('success', vigilanteAdmin.strings.scanResultsCleared || 'Scan results cleared. Page will reload...');
                         // Reload page to reflect changes
                         setTimeout(function() {
@@ -1632,6 +1642,12 @@
                     },
                     success: function(response) {
                         if (response.success) {
+                            // Lines the import left out (B123, B104) are told in
+                            // a notice that stays: reloading would take it away.
+                            if (typeof response.data === 'string' && response.data.indexOf('vigilante-import-dropped') !== -1) {
+                                Vigilante_Admin.showNotice('warning', response.data, true);
+                                return;
+                            }
                             Vigilante_Admin.showNotice('success', response.data);
                             setTimeout(function() {
                                 location.reload();
@@ -1974,6 +1990,11 @@
                     is_ip_blacklisted: !!log.is_ip_blacklisted,
                     is_ua_whitelisted: !!log.is_ua_whitelisted,
                     is_ua_blacklisted: !!log.is_ua_blacklisted,
+                    // The lines that match (3.0.11): without them a popup opened
+                    // after paging said less than the same entry on the first page.
+                    ua_whitelist_line: log.ua_whitelist_line || '',
+                    ua_blacklist_line: log.ua_blacklist_line || '',
+                    matched_line: log.matched_line || '',
                     self: log.self_guidance || null
                 };
 
@@ -2694,6 +2715,10 @@
             if (details.user_agent) {
                 html += '<tr><th>' + this.escapeHtml(s.logUserAgent || 'User Agent') + '</th><td class="vigilante-ua-cell"><code>' + this.escapeHtml(details.user_agent) + '</code></td></tr>';
             }
+            // The blacklist line that blocked this request (since 3.0.11).
+            if (details.matched_line) {
+                html += '<tr><th>' + this.escapeHtml(s.logMatchedLine || 'Matching line') + '</th><td><code>' + this.escapeHtml(details.matched_line) + '</code> ' + this.escapeHtml(s.logMatchedLineList || 'from the User-Agent blacklist') + '</td></tr>';
+            }
             html += '</table>';
 
             // Action buttons, one block for the IP and another one for the User
@@ -2723,16 +2748,19 @@
                 html += '<p class="vigilante-popup-actions-label">' + this.escapeHtml(s.logUserAgent || 'User Agent') + ' <code>' + this.escapeHtml(details.user_agent) + '</code></p>';
                 html += '<div class="vigilante-popup-actions-buttons">';
                 if (details.is_ua_whitelisted) {
-                    html += '<button type="button" class="button button-small vigilante-btn-added" disabled><span class="dashicons dashicons-yes-alt"></span> ' + this.escapeHtml(s.logInWhitelist || 'In whitelist') + '</button> ';
+                    html += '<button type="button" class="button button-small vigilante-btn-added" disabled><span class="dashicons dashicons-yes-alt"></span> ' + this.listLineLabel(s.logInWhitelistLine, s.logInWhitelist || 'In whitelist', details.ua_whitelist_line) + '</button> ';
                 } else {
                     html += '<button type="button" class="button button-small vigilante-add-to-list" data-item-type="ua" data-list-type="whitelist" data-value="' + this.escapeHtml(details.user_agent) + '"><span class="dashicons dashicons-yes-alt"></span> ' + this.escapeHtml(s.logWhitelistUa || 'Whitelist this User Agent') + '</button> ';
                 }
+                // No button to blacklist a User-Agent (since 3.0.11, B123): the
+                // one this request sent may be the one of a browser that many
+                // people use. The state says which line blocks it, if any.
                 if (details.is_ua_blacklisted) {
-                    html += '<button type="button" class="button button-small vigilante-btn-added" disabled><span class="dashicons dashicons-dismiss"></span> ' + this.escapeHtml(s.logInBlacklist || 'In blacklist') + '</button>';
-                } else {
-                    html += '<button type="button" class="button button-small vigilante-add-to-list vigilante-btn-danger" data-item-type="ua" data-list-type="blacklist" data-value="' + this.escapeHtml(details.user_agent) + '"><span class="dashicons dashicons-dismiss"></span> ' + this.escapeHtml(s.logBlacklistUa || 'Blacklist this User Agent') + '</button>';
+                    html += '<span class="vigilante-ua-blacklisted"><span class="dashicons dashicons-dismiss"></span> ' + this.listLineLabel(s.logInBlacklistLine, s.logInBlacklist || 'In blacklist', details.ua_blacklist_line) + '</span>';
                 }
-                html += '</div></div>';
+                html += '</div>';
+                html += '<p class="vigilante-popup-actions-note">' + this.escapeHtml(s.logUaNoBlacklist || '') + '</p>';
+                html += '</div>';
             }
             html += '</div>';
             html += '<div class="vigilante-popup-feedback" style="display:none;"></div>';
@@ -2745,6 +2773,20 @@
 
             $('#vigilante-log-details-content').html(html);
             $('#vigilante-log-details-modal').fadeIn(200);
+        },
+
+        /**
+         * "In blacklist, by the line X", escaped, or the plain label when the
+         * answer carries no line (an older server, or no localized string).
+         */
+        listLineLabel: function(template, fallback, line) {
+            if (!line || !template || template.indexOf('%s') === -1) {
+                return this.escapeHtml(fallback);
+            }
+            var code = '<code>' + this.escapeHtml(line) + '</code>';
+            // A function, not a string: in a replacement string "$&" and "$'"
+            // are patterns, and an escaped apostrophe in the line reads as one.
+            return this.escapeHtml(template).replace('%s', function() { return code; });
         },
 
         /**
@@ -2780,10 +2822,12 @@
                     var $feedback = $('.vigilante-popup-feedback');
                     if (response.success) {
                         $btn.text(vigilanteAdmin.strings.logAdded || 'Added!').addClass('vigilante-btn-added');
-                        $feedback.html('<span class="vigilante-popup-msg vigilante-popup-msg-success">' + response.data + '</span>').slideDown(150);
+                        // Plain text from the server that carries the value
+                        // added, which a request chose: escaped (3.0.11).
+                        $feedback.html('<span class="vigilante-popup-msg vigilante-popup-msg-success">' + self.escapeHtml(response.data) + '</span>').slideDown(150);
                     } else {
                         $btn.prop('disabled', false);
-                        $feedback.html('<span class="vigilante-popup-msg vigilante-popup-msg-warning">' + (response.data || vigilanteAdmin.strings.logErrorAddingToList || 'Error adding to list') + '</span>').slideDown(150);
+                        $feedback.html('<span class="vigilante-popup-msg vigilante-popup-msg-warning">' + self.escapeHtml(response.data || vigilanteAdmin.strings.logErrorAddingToList || 'Error adding to list') + '</span>').slideDown(150);
                     }
                 },
                 error: function() {
@@ -3355,20 +3399,24 @@
          * Update pending users count badge
          */
         updatePendingCount: function() {
-            var $badge = $('.vigilante-pending-users-section .vigilante-badge-warning');
             var $table = $('.vigilante-pending-users-table tbody tr');
             var count = $table.length;
+            var str = vigilanteAdmin.strings || {};
+
+            // Since 3.0.12 the count is the summary of the folding heading
+            // (data-vigilante-summary), not an orange badge in it.
+            $('.vigilante-pending-users-section').attr('data-vigilante-summary',
+                0 === count ? (str.foldPendingNone || 'None pending')
+                    : (1 === count ? (str.foldPendingOne || '1 pending') : (str.foldPendingMany || '%d pending').replace('%d', count)));
+            VigilanteFold.schedulePaint();
 
             if (count === 0) {
-                $badge.remove();
                 $('.vigilante-pending-users-table').replaceWith(
                     '<div class="vigilante-no-lockouts">' +
                     '<span class="dashicons dashicons-yes-alt"></span>' +
                     '<p>' + (vigilanteAdmin.strings.noPending || 'No pending registrations.') + '</p>' +
                     '</div>'
                 );
-            } else {
-                $badge.text(count);
             }
         },
 
@@ -3648,6 +3696,709 @@
     };
 
     /* ---------------------------------------------------------------------
+     * Collapsible sections (3.0.12, #87)
+     *
+     * Every settings section with an <h2> folds from its heading, and so does
+     * every <h3> placed straight inside one, together with the siblings that
+     * follow it up to the next heading. Nothing is moved: a section folds with
+     * a class on itself and a group with a class on each of its members, so the
+     * fields stay where PHP printed them, in the form, and saving is the same.
+     *
+     * Each heading of a settings form says, in grey, how many of its switches
+     * are on. A warning or an error is marked only on the folded heading that
+     * hides it, once, and never in the index: when it is in view, the notice
+     * itself says it. An error opens what holds it on every load, without
+     * remembering that. The state is remembered per tab in this browser.
+     *
+     * From three sections or groups up, the tab gets the section index of
+     * Visibility (native-aeo-pack, assets/js/admin.js, napSidebar()): a column
+     * on the left with Open all and Close all, the section in view marked while
+     * scrolling and, on a phone, a "Go to a section" list. A link to anything
+     * folded (the settings search, the fix links of Security Check, the
+     * Dashboard recommendations, any #field- anchor) opens it first: reveal()
+     * is called from hashFocusFlash().
+     * ------------------------------------------------------------------ */
+    var VigilanteFold = {
+
+        MIN_INDEX: 3,
+        tab: 'dashboard',
+        units: [],
+        timer: null,
+        $nav: null,
+        forced: null,
+
+        s: function(key, fallback) {
+            return (vigilanteAdmin.strings && vigilanteAdmin.strings[key]) || fallback;
+        },
+
+        init: function() {
+            var m = /[?&]tab=([a-z0-9_-]+)/i.exec(window.location.search);
+            this.tab = m ? m[1] : 'dashboard';
+            var self = this;
+
+            var $main = $('.vigilante-main').first();
+
+            // A section: a settings or tools block with an <h2> of its own.
+            $main.find('.vigilante-settings-section, .vigilante-tools-section').each(function() {
+                var $h2 = $(this).children('h2').first();
+                if (!$h2.length) {
+                    return;
+                }
+                var section = self.makeUnit(this, $h2[0], 'section', null, null);
+
+                // A form that saves only this section: its buttons fold with it
+                // (File Integrity, the two forms of Security Audit, Login, REST
+                // API). Where one form saves several sections, they stay.
+                var form = $(this).closest('form')[0];
+                if (form) {
+                    var saved = $(form).find('.vigilante-settings-section').filter(function() {
+                        return $(this).children('h2').length > 0;
+                    }).length;
+                    if (1 === saved) {
+                        section.extra = $(form).children('.vigilante-submit-buttons').toArray();
+                    }
+                }
+
+                // Its groups: an <h3> placed straight inside it, with what
+                // follows up to the next heading...
+                $(this).children('h3').each(function() {
+                    var members = self.until(this, /^H[23]$/);
+                    if (members.length) {
+                        self.makeUnit(this, this, 'group', section, members);
+                    }
+                });
+                // ...or a box that opens with an <h3> (the tools of Users).
+                $(this).children('.vigilante-tool-box').each(function() {
+                    var first = this.firstElementChild;
+                    if (first && 'H3' === first.tagName) {
+                        var members = $(this).children().not(first).toArray();
+                        if (members.length) {
+                            self.makeUnit(this, first, 'group', section, members);
+                        }
+                    }
+                });
+            });
+
+            if (!this.units.length) {
+                return;
+            }
+
+            // Document order, so the index reads like the page.
+            this.units.sort(function(a, b) {
+                return (a.heading.compareDocumentPosition(b.heading) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1;
+            });
+
+            // Counts first, because an error decides what opens.
+            this.paintAll();
+
+            // Remembered state first, then what an error forces open.
+            this.units.forEach(function(u) {
+                if ('closed' === self.stored(u)) {
+                    self.setOpen(u, false, false);
+                }
+            });
+            this.units.forEach(function(u) {
+                if (u.errors > 0) {
+                    self.setOpen(u, true, false);
+                    if (u.parent) {
+                        self.setOpen(u.parent, true, false);
+                    }
+                }
+            });
+
+            if (this.units.length >= this.MIN_INDEX) {
+                this.buildIndex();
+            }
+
+            // The marks depend on what is folded, so paint again.
+            this.paintAll();
+
+            // Repaint when a field changes or when the page swaps markup in
+            // (the save of a tab paints notices and lists back).
+            $(document).on('change', '.vigilante-main input, .vigilante-main select', function() {
+                self.schedulePaint();
+            });
+            if (window.MutationObserver) {
+                var main = document.querySelector('.vigilante-main');
+                if (main) {
+                    new MutationObserver(function(records) {
+                        for (var i = 0; i < records.length; i++) {
+                            var t = records[i].target;
+                            if (!(t.closest && t.closest('.vigilante-fold-summary'))) {
+                                self.schedulePaint();
+                                return;
+                            }
+                        }
+                    }).observe(main, { childList: true, subtree: true });
+                }
+            }
+
+            $(window).on('hashchange', function() {
+                VigilanteAnalyzer.hashFocusFlash();
+            });
+
+            // A field the browser finds invalid on submit stops the save, and
+            // its message cannot show while the field is folded: nothing
+            // happens and nothing is said. Open what holds it first, in the
+            // capture phase, before the browser looks for it.
+            document.addEventListener('invalid', function(e) {
+                self.reveal(e.target);
+            }, true);
+        },
+
+        slug: function(text) {
+            return String(text).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+        },
+
+        /** The siblings after a heading, up to the next heading that matches or the next section. */
+        until: function(heading, stop) {
+            var members = [];
+            var n = heading.nextElementSibling;
+            while (n && !stop.test(n.tagName) && !$(n).is('.vigilante-settings-section, .vigilante-tools-section')) {
+                members.push(n);
+                n = n.nextElementSibling;
+            }
+            return members;
+        },
+
+        makeUnit: function(el, heading, kind, parent, members) {
+            var label = $(heading).clone().find('.vigilante-method-badge, .vigilante-badge, .dashicons').remove().end().text().replace(/\s+/g, ' ').trim();
+            var base = parent ? parent.key + ':' : '';
+            var key = base + (kind === 'section' && el.id ? el.id : this.slug(label));
+            var unit = {
+                el: el,
+                heading: heading,
+                kind: kind,
+                parent: parent,
+                members: members || [],
+                extra: [],
+                key: key,
+                label: label,
+                open: true,
+                off: false,
+                state: '',
+                errors: 0,
+                ownErrors: 0,
+                warnings: 0
+            };
+
+            if (!heading.id) {
+                heading.id = 'vigilante-fold-' + this.slug(key);
+            }
+            unit.anchor = heading.id;
+
+            // The heading text goes inside a real button, unless the heading
+            // holds controls of its own, which cannot live in a button: then a
+            // small button goes at its end. The chevron sits on the right, as
+            // in Visibility.
+            var toggle = document.createElement('button');
+            toggle.type = 'button';
+            toggle.className = 'vigilante-fold-toggle';
+            toggle.setAttribute('aria-expanded', 'true');
+            var chevron = document.createElement('span');
+            chevron.className = 'vigilante-fold-chevron';
+            chevron.setAttribute('aria-hidden', 'true');
+            var summary = document.createElement('span');
+            summary.className = 'vigilante-fold-summary';
+
+            if ($(heading).find('a, button, input, select, textarea, label').length) {
+                toggle.className += ' vigilante-fold-toggle-icon';
+                toggle.setAttribute('aria-label', this.s('foldToggle', 'Show or hide this section') + ': ' + label);
+                toggle.appendChild(chevron);
+                heading.appendChild(summary);
+                heading.appendChild(toggle);
+                $(heading).addClass('vigilante-fold-has-controls');
+            } else {
+                var text = document.createElement('span');
+                text.className = 'vigilante-fold-title';
+                while (heading.firstChild) {
+                    text.appendChild(heading.firstChild);
+                }
+                toggle.appendChild(text);
+                toggle.appendChild(summary);
+                toggle.appendChild(chevron);
+                heading.appendChild(toggle);
+            }
+            $(heading).addClass('vigilante-fold-heading vigilante-fold-' + kind);
+            unit.toggle = toggle;
+            unit.summary = summary;
+
+            var self = this;
+            toggle.addEventListener('click', function() {
+                self.setOpen(unit, !unit.open, true);
+                self.paintAll();
+            });
+
+            this.units.push(unit);
+            return unit;
+        },
+
+        storeKey: function(u) {
+            return 'vigilanteFold:' + this.tab + ':' + u.key;
+        },
+
+        stored: function(u) {
+            try {
+                return window.localStorage.getItem(this.storeKey(u));
+            } catch (e) {
+                return null;
+            }
+        },
+
+        setOpen: function(u, open, remember) {
+            u.open = !!open;
+            u.toggle.setAttribute('aria-expanded', u.open ? 'true' : 'false');
+            $(u.heading).toggleClass('is-folded', !u.open);
+            if (u.members.length) {
+                $(u.members).toggleClass('vigilante-fold-hidden', !u.open);
+            } else {
+                $(u.el).toggleClass('vigilante-fold-closed', !u.open);
+            }
+            $(u.extra).toggleClass('vigilante-fold-hidden', !u.open);
+            if (remember) {
+                try {
+                    window.localStorage.setItem(this.storeKey(u), u.open ? 'open' : 'closed');
+                } catch (e) { /* private mode: it just is not remembered */ }
+            }
+        },
+
+        setAll: function(open) {
+            var self = this;
+            this.units.forEach(function(u) {
+                self.setOpen(u, open, true);
+            });
+            // Opening or folding everything starts the tab over: its first
+            // entry is the one marked, whatever the page scrolled to.
+            this.forced = this.units[0] || null;
+            this.paintAll();
+        },
+
+        /** The elements a unit holds, heading excluded. */
+        scope: function(u) {
+            if (u.members.length) {
+                return $(u.members);
+            }
+            return $(u.el).children().not(u.heading);
+        },
+
+        /** Whether something hides an element on its own, not our fold. */
+        hiddenByPage: function(el, stop) {
+            for (var n = el; n && n !== stop; n = n.parentElement) {
+                if (n.hidden || (n.style && 'none' === n.style.display)) {
+                    return true;
+                }
+            }
+            return false;
+        },
+
+        paintAll: function() {
+            var self = this;
+            this.units.forEach(function(u) {
+                self.measure(u);
+            });
+            // The errors that are a section's own, not those of its groups:
+            // each error is said where it is, once.
+            this.units.forEach(function(u) {
+                u.ownErrors = u.errors;
+                self.units.forEach(function(c) {
+                    if (c.parent === u) {
+                        u.ownErrors -= c.errors;
+                    }
+                });
+            });
+            this.units.forEach(function(u) {
+                self.render(u);
+            });
+            if (this.$nav) {
+                this.paintIndex();
+                this.spy();
+            }
+        },
+
+        schedulePaint: function() {
+            var self = this;
+            clearTimeout(this.timer);
+            this.timer = setTimeout(function() {
+                self.paintAll();
+            }, 120);
+        },
+
+        measure: function(u) {
+            var self = this;
+            var $scope = this.scope(u);
+            // Settings, not tools: inside a settings form, or holding one (the
+            // notification settings of Settings & Tools carry their form inside).
+            var inForm = $(u.el).closest('form.vigilante-settings-form').length > 0 || $scope.find('form.vigilante-settings-form').addBack('form.vigilante-settings-form').length > 0;
+            var state = '';
+
+            u.off = false;
+            // What the page itself declares wins: results, logs, tools and the
+            // notification settings say what they hold (data-vigilante-summary).
+            var declared = u.el.getAttribute ? u.el.getAttribute('data-vigilante-summary') : null;
+            if (null !== declared) {
+                if ('' !== declared) {
+                    state = declared;
+                }
+            } else if (inForm) {
+                var $checks = $scope.find('input[type="checkbox"]').addBack('input[type="checkbox"]').filter(function() {
+                    var name = this.name || '';
+                    return '' !== name && '[]' !== name.slice(-2) && !self.hiddenByPage(this, u.el);
+                });
+                var total = $checks.length;
+                var on = $checks.filter(':checked').length;
+                if (total > 0) {
+                    u.off = 0 === on;
+                    state = u.off ? this.s('foldAllOff', 'All disabled') : this.s('foldOnOf', '%1$d of %2$d enabled').replace('%1$d', on).replace('%2$d', total);
+                } else {
+                    var $lists = $scope.find('textarea').addBack('textarea').filter(function() {
+                        return '' !== (this.name || '') && !self.hiddenByPage(this, u.el);
+                    });
+                    var $selects = $scope.find('select').addBack('select').filter(function() {
+                        return '' !== (this.name || '') && !self.hiddenByPage(this, u.el);
+                    });
+                    if ($lists.length) {
+                        // Lists: how many lines they hold between them.
+                        var lines = 0;
+                        $lists.each(function() {
+                            lines += this.value.split('\n').filter(function(l) { return '' !== $.trim(l); }).length;
+                        });
+                        state = 0 === lines ? this.s('foldEntriesNone', 'No entries') : this.count(lines, 'foldEntriesOne', '1 entry', 'foldEntriesMany', '%d entries');
+                    } else if (1 === $selects.length) {
+                        // One mode: the one chosen, without its "(recommended)".
+                        var picked = $selects.find('option:selected').text().replace(/\s+/g, ' ').replace(/\s*\([^)]*\)\s*$/, '').trim();
+                        if (picked) {
+                            state = picked.slice(0, 60);
+                        }
+                    } else if ($selects.length > 1) {
+                        // Several headers, each a select: how many send something.
+                        var set = $selects.filter(function() {
+                            return -1 === ['', 'unsafe-none', 'disabled', 'off', '0'].indexOf(this.value);
+                        }).length;
+                        u.off = 0 === set;
+                        state = u.off ? this.s('foldAllOff', 'All disabled') : this.s('foldOnOf', '%1$d of %2$d enabled').replace('%1$d', set).replace('%2$d', $selects.length);
+                    }
+                }
+            }
+
+            var visible = function() {
+                return !self.hiddenByPage(this, u.el) && '' !== $.trim($(this).text());
+            };
+            u.errors = $scope.find('.notice-error, .vigilante-notice-error').addBack('.notice-error, .vigilante-notice-error').filter(visible).length;
+            // .vigilante-inline-warning marks a description that warns, painted red
+            // in place (HSTS while the site address is http).
+            u.warnings = $scope.find('.notice-warning, .vigilante-notice-warning, .vigilante-inline-warning').addBack('.notice-warning, .vigilante-notice-warning, .vigilante-inline-warning').filter(visible).length;
+            u.state = state;
+        },
+
+        render: function(u) {
+            // Built node by node with textContent: nothing here is parsed as
+            // HTML, so nothing has to be escaped.
+            var parts = [];
+            if (u.state) {
+                parts.push(['state', u.state]);
+            }
+
+            // Nothing on a group whose section is folded: the section says it.
+            if (!u.parent || u.parent.open) {
+                // An error is something not working: it is said on the heading
+                // of what holds it, open or folded, and on the folded section
+                // that hides its group.
+                var errors = u.open ? u.ownErrors : u.errors;
+                if (errors > 0) {
+                    parts.push(['error', this.count(errors, 'foldErrorOne', '1 error', 'foldErrorMany', '%d errors')]);
+                }
+                // A warning only where folding hides it.
+                if (!u.open && u.warnings > 0) {
+                    parts.push(['warning', this.count(u.warnings, 'foldWarningOne', '1 warning', 'foldWarningMany', '%d warnings')]);
+                }
+            }
+
+            var key = JSON.stringify(parts);
+            if (u.summaryKey === key) {
+                return;
+            }
+            u.summaryKey = key;
+            while (u.summary.firstChild) {
+                u.summary.removeChild(u.summary.firstChild);
+            }
+            parts.forEach(function(part) {
+                var span = document.createElement('span');
+                if ('state' === part[0]) {
+                    span.className = 'vigilante-fold-state';
+                } else {
+                    span.className = 'vigilante-fold-mark vigilante-fold-mark-' + part[0];
+                    var icon = document.createElement('span');
+                    icon.className = 'dashicons dashicons-warning';
+                    icon.setAttribute('aria-hidden', 'true');
+                    span.appendChild(icon);
+                }
+                span.appendChild(document.createTextNode(part[1]));
+                u.summary.appendChild(span);
+            });
+        },
+
+
+        count: function(n, oneKey, oneFallback, manyKey, manyFallback) {
+            return 1 === n ? this.s(oneKey, oneFallback) : this.s(manyKey, manyFallback).replace('%d', n);
+        },
+
+        /** Go to a unit: open it (and its section), scroll and focus its toggle. */
+        go: function(u) {
+            this.reveal(u.heading);
+            // The entry clicked is the one marked, even where the page cannot
+            // scroll its heading up to the top (the last sections of a tab),
+            // until the person scrolls by hand.
+            this.forced = u;
+            this.spy();
+            if (u.heading.scrollIntoView) {
+                u.heading.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+            u.toggle.focus({ preventScroll: true });
+        },
+
+        link: function(u, onDone) {
+            var self = this;
+            var $a = $('<a></a>').attr('href', '#' + u.anchor).text(u.label);
+            if (u.kind === 'group') {
+                $a.addClass('is-group');
+            }
+            $a.append($('<span class="screen-reader-text vigilante-secnav-off"></span>'));
+            $a.append($('<span class="vigilante-secnav-mark"></span>'));
+            $a.on('click', function(e) {
+                e.preventDefault();
+                self.go(u);
+                if (onDone) {
+                    onDone();
+                }
+            });
+            return $a;
+        },
+
+        buildIndex: function() {
+            var self = this;
+            var $content = $('.vigilante-content').first();
+            if (!$content.length) {
+                return;
+            }
+            var title = this.s('foldIndexTitle', 'Sections');
+
+            var $nav = $('<nav class="vigilante-secnav"></nav>').attr('aria-label', title);
+            $nav.append($('<p class="vigilante-secnav-title"></p>').text(title));
+            var $actions = $('<div class="vigilante-secnav-actions"></div>');
+            $('<button type="button" class="vigilante-secnav-action"></button>').text(this.s('foldOpenAll', 'Open all')).on('click', function() { self.setAll(true); }).appendTo($actions);
+            $('<button type="button" class="vigilante-secnav-action"></button>').text(this.s('foldCloseAll', 'Close all')).on('click', function() { self.setAll(false); }).appendTo($actions);
+            $nav.append($actions);
+            this.units.forEach(function(u) {
+                u.$link = self.link(u);
+                $nav.append(u.$link);
+            });
+
+            // The phone form of the same list, as in Visibility.
+            var $details = $('<details class="vigilante-secnav-compact"></details>');
+            $details.append($('<summary></summary>').text(this.s('foldGoTo', 'Go to a section')));
+            var $list = $('<div class="vigilante-secnav-compact-list"></div>');
+            this.units.forEach(function(u) {
+                u.$compactLink = self.link(u, function() { $details.prop('open', false); });
+                $list.append(u.$compactLink);
+            });
+            $details.append($list);
+
+            $content.addClass('has-secnav').prepend($details).prepend($nav);
+            this.$nav = $nav;
+
+            // Scrolling by hand gives the mark back to the spy.
+            $(window).on('wheel touchstart keydown', function() {
+                self.forced = null;
+            });
+
+            var ticking = false;
+            $(window).on('scroll resize', function() {
+                if (!ticking) {
+                    ticking = true;
+                    window.requestAnimationFrame(function() {
+                        ticking = false;
+                        self.spy();
+                    });
+                }
+            });
+        },
+
+        /**
+         * A unit with every switch off is dimmed, as Visibility does with a
+         * section that is off. An error gets a small icon on the entry of what
+         * holds it, once (a warning, nothing).
+         */
+        paintIndex: function() {
+            var self = this;
+            var off = this.s('foldSectionOff', 'Switched off');
+            this.units.forEach(function(u) {
+                var mark = u.ownErrors > 0 ? self.count(u.ownErrors, 'foldErrorOne', '1 error', 'foldErrorMany', '%d errors') : '';
+                [u.$link, u.$compactLink].forEach(function($a) {
+                    if (!$a) {
+                        return;
+                    }
+                    $a.toggleClass('is-off', u.off);
+                    if (u.off) {
+                        $a.attr('title', off);
+                    } else {
+                        $a.removeAttr('title');
+                    }
+                    $a.find('.vigilante-secnav-off').text(u.off ? ' (' + off + ')' : '');
+                    var holder = $a.find('.vigilante-secnav-mark')[0];
+                    if (holder && holder.getAttribute('data-mark') !== mark) {
+                        holder.setAttribute('data-mark', mark);
+                        while (holder.firstChild) {
+                            holder.removeChild(holder.firstChild);
+                        }
+                        if (mark) {
+                            var icon = document.createElement('span');
+                            icon.className = 'dashicons dashicons-warning';
+                            icon.setAttribute('aria-hidden', 'true');
+                            var sr = document.createElement('span');
+                            sr.className = 'screen-reader-text';
+                            sr.textContent = mark;
+                            holder.appendChild(icon);
+                            holder.appendChild(sr);
+                        }
+                    }
+                });
+            });
+        },
+
+        /**
+         * Mark one entry, the section or group being read. The one clicked,
+         * until the person scrolls by hand. At the top of the page, or on a
+         * page too short to scroll (every section folded), the first one,
+         * which is where the tab starts. Scrolling, the last heading that went
+         * past the top of the window; and at the very end of the page, where
+         * the last headings can never get there, the last one in view.
+         */
+        spy: function() {
+            if (!this.$nav) {
+                return;
+            }
+            var here = this.forced || null;
+            if (!here) {
+                var height = window.innerHeight;
+                var doc = document.documentElement;
+                var scrolled = doc.scrollHeight - height > 2 && window.scrollY > 2;
+                var atEnd = scrolled && window.scrollY + height >= doc.scrollHeight - 2;
+                this.units.forEach(function(u) {
+                    if (!u.heading.getClientRects().length) {
+                        return;
+                    }
+                    if (!scrolled) {
+                        here = here || u;
+                        return;
+                    }
+                    var top = u.heading.getBoundingClientRect().top;
+                    if (atEnd ? top < height : (top <= 120 || !here)) {
+                        here = u;
+                    }
+                });
+            }
+            this.units.forEach(function(u) {
+                if (!u.$link) {
+                    return;
+                }
+                var is = u === here;
+                u.$link.toggleClass('is-here', is);
+                if (is) {
+                    u.$link.attr('aria-current', 'true');
+                } else {
+                    u.$link.removeAttr('aria-current');
+                }
+            });
+        },
+
+        /** Open whatever folded unit holds an element, so a link can land on it. */
+        reveal: function(el) {
+            if (!el || !this.units.length) {
+                return;
+            }
+            var self = this;
+            var changed = false;
+            this.units.forEach(function(u) {
+                var holds = u.heading === el || $.contains(u.el, el) || u.members.some(function(m) {
+                    return m === el || $.contains(m, el);
+                });
+                if (holds && !u.open) {
+                    self.setOpen(u, true, true);
+                    changed = true;
+                }
+            });
+            if (changed) {
+                this.paintAll();
+            }
+        }
+    };
+
+    /* ---------------------------------------------------------------------
+     * Disclosures that remember (3.0.12)
+     *
+     * The rows of the self-protection box and Security Check (its detailed
+     * breakdown and each category) open and close as before; this only
+     * remembers it in this browser, like the folding sections. Without
+     * JavaScript they still work, as plain details.
+     *
+     * A critical row of the self-protection box is left as the page sends it,
+     * every time: what needs doing now is never hidden by a choice made
+     * before (the rule of the folding sections for an error). A row is
+     * remembered by what it says (title, count, severity), so a different
+     * finding starts as the page sends it.
+     * ------------------------------------------------------------------ */
+    var VigilanteRemember = {
+
+        get: function(key) {
+            try {
+                return window.localStorage.getItem(key);
+            } catch (e) {
+                return null;
+            }
+        },
+
+        set: function(key, value) {
+            try {
+                window.localStorage.setItem(key, value);
+            } catch (e) { /* private mode: it just is not remembered */ }
+        },
+
+        init: function() {
+            var self = this;
+
+            $('details.vigilante-self-case').each(function() {
+                if ($(this).hasClass('vigilante-self-case--critical')) {
+                    return;
+                }
+                var summary = $(this).children('summary').text().replace(/\s+/g, ' ').trim();
+                var key = 'vigilanteSelfCase:' + VigilanteFold.slug(summary) + ':' + summary.length;
+                var stored = self.get(key);
+                if ('open' === stored) {
+                    this.open = true;
+                } else if ('closed' === stored) {
+                    this.open = false;
+                }
+                $(this).on('toggle', function() {
+                    self.set(key, this.open ? 'open' : 'closed');
+                });
+            });
+
+            $('details.vigilante-analyzer-category[data-category]').each(function() {
+                var key = 'vigilanteAnalyzerCategory:' + $(this).attr('data-category');
+                var stored = self.get(key);
+                if ('open' === stored) {
+                    this.open = true;
+                } else if ('closed' === stored) {
+                    this.open = false;
+                }
+                $(this).on('toggle', function() {
+                    self.set(key, this.open ? 'open' : 'closed');
+                });
+            });
+        }
+    };
+
+    /* ---------------------------------------------------------------------
      * Security Analyzer (Dashboard widget) — v2.1.0
      * ------------------------------------------------------------------ */
 
@@ -3673,6 +4424,11 @@
             $(document).on('change',
                 '.vigilante-analyzer-weekly input[type="checkbox"]',
                 this.handleSettingsChange.bind(this));
+
+            // Open as it was left last time in this browser.
+            if ('open' === VigilanteRemember.get('vigilanteAnalyzerDetails')) {
+                this.expandDetails(true);
+            }
 
             // Pulse the row we landed on if we came from a fix link.
             this.hashFocusFlash();
@@ -4105,6 +4861,8 @@
             var $btn = $(e.currentTarget);
             var expanded = $btn.attr('aria-expanded') === 'true';
             this.expandDetails(!expanded);
+            // Remembered in this browser (3.0.12), like the folding sections.
+            VigilanteRemember.set('vigilanteAnalyzerDetails', expanded ? 'closed' : 'open');
         },
 
         expandDetails: function(expand) {
@@ -4302,6 +5060,10 @@
                     return;
                 }
 
+                // A folded section or group that holds the target opens
+                // first (3.0.12): scrolling to something hidden goes nowhere.
+                VigilanteFold.reveal($target[0]);
+
                 // Scroll to it smoothly.
                 if ('scrollIntoView' in $target[0]) {
                     $target[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -4345,6 +5107,8 @@
     // Initialize on document ready
     $(document).ready(function() {
         Vigilante_Admin.init();
+        VigilanteFold.init();
+        VigilanteRemember.init();
         Vigilante_Admin.initPasswordReset();
         Vigilante_Admin.initUserApproval();
         Vigilante_Admin.initSessionManagement();

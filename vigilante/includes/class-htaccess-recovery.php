@@ -274,8 +274,13 @@ class Vigilante_Htaccess_Recovery {
             return $headers;
         }
 
+        // Since 3.0.11 the block writes a literal percent sign as "%%", which
+        // is how mod_headers reads it (B121). Read back as a single one, or each
+        // recovery would double it again and the header would arrive with "%%"
+        // (second blind review of 3.0.11). A block written before has single
+        // ones, which this leaves as they are.
         foreach ( $matches as $match ) {
-            $headers[ strtolower( $match[1] ) ] = trim( $match[2] );
+            $headers[ strtolower( $match[1] ) ] = str_replace( '%%', '%', trim( $match[2] ) );
         }
 
         return $headers;

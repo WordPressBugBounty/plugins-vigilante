@@ -256,8 +256,14 @@ class Vigilante_Htaccess_Protection {
         // SECTION: Bot and Request Filtering (htaccess-based)
         // =====================================================================
 
-        // Negated exception conditions shared by every blocking rule below.
-        $whitelist_exceptions = $firewall ? $this->generate_whitelist_exceptions() : array();
+        // Negated exception conditions ahead of each blocking rule below. The
+        // User-Agent whitelist only exempts from the bot rule, as it does in
+        // PHP since 2.11.2 (Vigilante_Firewall::run_firewall()): until 3.0.11
+        // it was mixed into the query string and method blocks too, so a
+        // request that set a whitelisted User-Agent, which anybody can, skipped
+        // the Apache filters for SQL injection, XSS and traversal (B109, 2).
+        $whitelist_exceptions     = $firewall ? $this->generate_whitelist_exceptions( false ) : array();
+        $bot_whitelist_exceptions = $firewall ? $this->generate_whitelist_exceptions( true ) : array();
 
         // Option: block_bad_bots
         // UI: "Block Bad Bots" checkbox
@@ -266,7 +272,7 @@ class Vigilante_Htaccess_Protection {
             $rules[] = '# Exception: WooCommerce IPN callbacks (payment gateways use various User-Agents)';
             $rules[] = '<IfModule mod_rewrite.c>';
             $rules[] = '    RewriteEngine On';
-            $rules   = array_merge( $rules, $whitelist_exceptions );
+            $rules   = array_merge( $rules, $bot_whitelist_exceptions );
             $rules[] = '    RewriteCond %{QUERY_STRING} !wc-api= [NC]';
             /*
              * wp-cron.php is let through whatever the User-Agent. A real cron
@@ -545,17 +551,21 @@ class Vigilante_Htaccess_Protection {
     /**
      * Build negated RewriteCond exception lines from the firewall whitelists.
      *
-     * The PHP firewall exempts whitelisted IPs and User-Agents from every
-     * check, but the rules this class writes run inside Apache before PHP
-     * even starts, so the same exemptions must be emitted as negated
-     * conditions ahead of each blocking rule. RewriteCond lines are AND-ed
-     * with a following [OR] chain, so a whitelisted visitor short-circuits
-     * the block while everyone else still hits the filters.
+     * The PHP firewall exempts whitelisted IPs from every check and
+     * whitelisted User-Agents from the User-Agent rules only, but the rules
+     * this class writes run inside Apache before PHP even starts, so the same
+     * exemptions must be emitted as negated conditions ahead of each blocking
+     * rule. RewriteCond lines are AND-ed with a following [OR] chain, so a
+     * whitelisted visitor short-circuits the block while everyone else still
+     * hits the filters.
      *
      * @since 2.9.3
+     * @since 3.0.11 The User-Agent lines only when asked, for the bot rule.
+     *
+     * @param bool $with_user_agents Whether the User-Agent whitelist is added.
      * @return array Lines to insert right after "RewriteEngine On".
      */
-    private function generate_whitelist_exceptions() {
+    private function generate_whitelist_exceptions( $with_user_agents = true ) {
         $lines = array();
 
         // The connection address is always checked. When the site declared a
@@ -724,7 +734,7 @@ class Vigilante_Htaccess_Protection {
             }
         }
 
-        $ua_list = isset( $this->options['ua_whitelist'] ) ? (array) $this->options['ua_whitelist'] : array();
+        $ua_list = ( $with_user_agents && isset( $this->options['ua_whitelist'] ) ) ? (array) $this->options['ua_whitelist'] : array();
 
         foreach ( $ua_list as $ua ) {
             $ua = trim( (string) $ua );
@@ -753,7 +763,12 @@ class Vigilante_Htaccess_Protection {
         }
 
         if ( ! empty( $lines ) ) {
-            array_unshift( $lines, '    # Exceptions: firewall IP / User-Agent whitelist entries bypass these filters' );
+            array_unshift(
+                $lines,
+                $with_user_agents
+                    ? '    # Exceptions: firewall IP / User-Agent whitelist entries bypass this filter'
+                    : '    # Exceptions: firewall IP whitelist entries bypass these filters'
+            );
         }
 
         return $lines;

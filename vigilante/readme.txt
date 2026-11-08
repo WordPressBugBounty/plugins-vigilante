@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.0.10
+Stable tag: 3.0.11
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -313,7 +313,7 @@ Access your site via FTP/SFTP and either rename the plugin folder to disable it 
 
 The firewall is configured to allow normal WordPress operations, including the block editor, REST API, and popular page builders. If you experience issues, you can whitelist specific IPs or adjust rate limiting thresholds.
 
-Block Bad Bots also stops SEO crawlers (Ahrefs, Semrush, Majestic, Screaming Frog) and command line clients (curl, wget, python-requests). To let one of them through, add its name to the User-Agent Whitelist.
+Block Bad Bots also stops SEO crawlers (Ahrefs, Semrush, Majestic, Screaming Frog) and command line clients (curl, wget, python-requests). To let one of them through, add its name to User-Agents not treated as bots, in the same tab.
 
 = Why is a blocked request missing from the Security Audit? =
 
@@ -512,7 +512,7 @@ WordPress uses wp_ as default table prefix. Changing it to a random prefix adds 
 
 = How do I exclude management services like ManageWP from the firewall? =
 
-Go to Vigilant > Firewall > User-Agent Lists and add the service name (e.g., ManageWP, MainWP, UptimeRobot) to the User-Agent Whitelist. Partial matching is used, so entering "ManageWP" will match any User-Agent string containing that keyword.
+Go to Vigilant > Firewall > User-Agent Lists and add the service name (e.g., ManageWP, MainWP, UptimeRobot) to User-Agents not treated as bots. Partial matching is used, so "ManageWP" matches any User-Agent that contains it. This only exempts it from the bad bots rules: any client can send any User-Agent, so every other firewall rule still applies.
 
 If you also use a custom login URL, add the management dashboard's IP address to the firewall IP Whitelist as well. Some operations (for example pushing a plugin update from MainWP) reach wp-admin without a WordPress session and with a generic WordPress user agent rather than the service name, so the User-Agent rule alone would not match them. A whitelisted IP is allowed past the hidden login/wp-admin protection (it still has to authenticate).
 
@@ -543,6 +543,28 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 10. Security Check - On-demand audit widget with score, per-category breakdown, and fix links
 
 == Changelog ==
+
+= 3.0.11 =
+The User-Agent blacklist no longer saves lines that normal browsers or WordPress also send, which locked people out; saved ones keep working and are flagged. Sections now fold, with summaries and an index. Also fixes the author scan block with NextGEN Gallery and a percent sign in headers.
+
+* Improved: the User-Agent blacklist no longer saves a line that normal browsers, your own browser or WordPress itself also send, because it blocks the people who use them or stops the site from reaching itself. Chrome and Safari send the same User-Agent to everybody on the same version and system, and bots copy it, so a line taken from such a bot blocked every visitor with that browser. The notice says what each line would block and suggests blocking the IP instead. A line that blocks Googlebot or Bingbot is saved with a warning.
+* Improved: lines of that kind saved with an earlier version keep applying, and the Dashboard and the Firewall tab now point them out. They are left out the next time the Firewall tab is saved.
+* Improved: importing settings leaves out those User-Agent lines too, and IP blacklist entries that are an address of the site, and says which ones.
+* Improved: the activity log popup no longer offers to blacklist a User-Agent. It checks the lists as the firewall does, IP ranges and part of a User-Agent included, says which line matches, and a request blocked by the User-Agent blacklist now records the line that blocked it.
+* Improved: adding an IP or a User-Agent to a list from the activity log now leaves an entry in the log.
+* Improved: the User-Agent whitelist is now called User-Agents not treated as bots, and its description says what it does: it exempts them from Block Bad Bots and nothing else.
+* Improved: settings sections, and the groups inside them, fold from their heading, and the heading says what they hold even when folded: how many options are enabled, how many entries a list has, the mode chosen, or what the block shows, such as notifications active, IPs blocked or the date of the last scan. The browser remembers what you folded.
+* Improved: an error is marked on the heading of the section that holds it and in the section index, and opens that section on every load. A warning is marked on the folded heading that hides it.
+* Improved: tabs with three or more sections get an index on the left with Open all and Close all, which marks the section you are reading. Links to a setting, from the settings search, Security Check or the Dashboard, open a folded section first.
+* Improved: in File Integrity, Run Scan Now and Clear Previous Results are now in the results block, which always shows, also before the first scan. Save buttons that only save one section fold with it.
+* Improved: the rows of the self-protection box and of the Security Check breakdown remember whether you left them open, except a critical self-protection row, which always opens. Pending registrations show their count in the heading instead of an orange badge.
+* Fix: in .htaccess, a User-Agent whitelist entry also exempted requests from the rules against malicious query strings and unused HTTP methods. Any client can send any User-Agent, so it now only exempts from the bad bots rule, as it already did in PHP.
+* Fix: a percent sign in a security header value reached .htaccess as a format of the server, which could stop the whole site with an error or put a server variable in a public header. It is now written as a plain percent sign.
+* Fix: with NextGEN Gallery active, ?author=N still redirected to the author page and showed the username, with nothing in the log. The block now runs before any plugin can redirect.
+* Fix: when ?author=N still showed the username with the protection on, Security Check blamed a cache without checking. It now asks again past any page cache, tells a cache from something on the site that redirects first, and says so when it cannot tell.
+* Fix: Security Check missed generator meta tags with their attributes in another order, such as the one Divi prints, and now names the tag it finds.
+* Fix: unchecking User changes in the activity log also stopped logging blocked author scans, blocked insecure usernames and the session limit, and their audit alerts.
+* Fix: deleting a user left their two-factor data, the authenticator secret and backup codes included, in the tables of Vigilant.
 
 = 3.0.10 =
 Two factor now stops an account after 10 wrong codes in 15 minutes and emails its holder, Ignore applies to the file as it is when ignored, and the visitor IP is read right behind proxies that add the port, such as Azure.
@@ -627,8 +649,8 @@ For older changelog entries, please check the [changelog.txt](https://plugins.sv
 
 == Upgrade Notice ==
 
-= 3.0.10 =
-Two factor now stops an account after 10 wrong codes in 15 minutes and emails its holder, Ignore applies to the file as it is when ignored, and the visitor IP is read right behind proxies that add the port, such as Azure.
+= 3.0.11 =
+The User-Agent blacklist no longer saves lines that normal browsers or WordPress also send, which locked people out; saved ones keep working and are flagged. Sections now fold, with summaries and an index. Also fixes the author scan block with NextGEN Gallery and a percent sign in headers.
 
 == Support ==
 

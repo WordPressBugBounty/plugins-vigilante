@@ -1131,8 +1131,10 @@
 }
 
 /* Notification settings two-column layout */
+/* No margin of its own since 3.0.12: Tools below is a section too, and the
+   two are separated like every other pair, by the section border. */
 .vigilante-notification-section {
-    margin-bottom: 30px;
+    margin-bottom: 0;
 }
 
 .vigilante-notification-layout {
@@ -1184,12 +1186,6 @@
 .vigilante-notification-summary .widefat th {
     padding: 6px 8px;
     font-size: 13px;
-}
-
-/* Tools heading */
-.vigilante-tools-heading {
-    padding: 0 20px;
-    margin: 10px 0 0;
 }
 
 /* Severity rows in log */
@@ -1520,6 +1516,43 @@
     width: 14px;
     height: 14px;
     vertical-align: text-bottom;
+}
+
+/* User-Agent group of the log popup (3.0.11): the state is not a button. */
+.vigilante-ua-blacklisted {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #8a2424;
+}
+
+.vigilante-ua-blacklisted .dashicons {
+    font-size: 14px;
+    width: 14px;
+    height: 14px;
+}
+
+.vigilante-ua-blacklisted code,
+.vigilante-btn-added code {
+    word-break: break-all;
+}
+
+.vigilante-popup-actions-note {
+    margin: 6px 0 0;
+    font-size: 12px;
+    color: #50575e;
+}
+
+/* Saved User-Agent blacklist lines that block people (3.0.11). */
+.vigilante-ua-blacklist-status .notice ul {
+    margin: 0 0 0 1.5em;
+    list-style: disc;
+}
+
+.vigilante-ua-blacklist-status .notice code {
+    word-break: break-all;
 }
 
 .vigilante-btn-danger {
@@ -4040,4 +4073,398 @@
     font-size: inherit;
     font-weight: inherit;
     padding: 0;
+}
+
+/* ==========================================================================
+   Collapsible sections (3.0.12, #87)
+   The heading of each section and of each group inside it folds what it
+   holds. Folding only hides, so the fields stay in the form. The chevron,
+   the section index and its two buttons follow Visibility (native-aeo-pack,
+   assets/css/admin.css, "In-tab section navigation"), so the plugins of the
+   family look alike, with the greys of wp-admin. The only colour is the icon
+   of what a folded heading hides, a warning or an error, marked once.
+   ========================================================================== */
+/* WordPress already leaves room for its admin bar when it scrolls to an
+   anchor (scroll-padding-top on html), so this is only the breathing room. */
+.vigilante-fold-heading {
+    scroll-margin-top: 12px;
+}
+
+.vigilante-fold-toggle {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    background: none;
+    border: 0;
+    cursor: pointer;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+}
+
+.vigilante-fold-toggle:focus-visible {
+    outline: 2px solid #2271b1;
+    outline-offset: 2px;
+    border-radius: 2px;
+}
+
+.vigilante-fold-title {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.vigilante-fold-has-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.vigilante-fold-toggle-icon {
+    flex: 0 0 auto;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    margin-left: auto;
+}
+
+.vigilante-fold-has-controls > .vigilante-fold-summary:not(:empty) + .vigilante-fold-toggle-icon {
+    margin-left: 0;
+}
+
+/* The chevron of Visibility: two borders turned, down while open and right
+   while folded. */
+.vigilante-fold-chevron {
+    flex: 0 0 auto;
+    width: 7px;
+    height: 7px;
+    margin: 0 4px 3px 2px;
+    border-right: 2px solid #646970;
+    border-bottom: 2px solid #646970;
+    transform: rotate(45deg);
+    transition: transform 0.15s ease;
+}
+
+.vigilante-fold-heading.is-folded .vigilante-fold-chevron {
+    transform: rotate(-45deg);
+    margin-bottom: 0;
+}
+
+.vigilante-fold-summary {
+    display: inline-flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 4px 12px;
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 1.5;
+    letter-spacing: normal;
+    text-transform: none;
+    color: #646970;
+}
+
+.vigilante-fold-has-controls > .vigilante-fold-summary {
+    margin-left: auto;
+}
+
+.vigilante-fold-summary:empty {
+    display: none;
+}
+
+.vigilante-fold-mark {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    white-space: nowrap;
+}
+
+.vigilante-fold-mark .dashicons {
+    width: 16px;
+    height: 16px;
+    font-size: 16px;
+}
+
+.vigilante-fold-mark-warning .dashicons {
+    color: #996800;
+}
+
+.vigilante-fold-mark-error .dashicons {
+    color: #d63638;
+}
+
+/* Only the heading of the section stays: the group headings inside it are
+   folded with it (until the second build they stayed in view, and their
+   chevron turned without showing anything). */
+.vigilante-fold-closed > :not(.vigilante-fold-section) {
+    display: none !important;
+}
+
+.vigilante-fold-hidden {
+    display: none !important;
+}
+
+/* Folded, a heading is one clean row: no rule under it and no gap for the
+   content that is not there. The same in every kind of block. */
+.vigilante-fold-closed > .vigilante-fold-section,
+.vigilante-fold-group.is-folded {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom-color: transparent;
+}
+
+/* Tools, in Settings & Tools: a section like the others since 3.0.12, so
+   its grid loses the padding it had as a block of its own. */
+.vigilante-tools-block .vigilante-tools-grid {
+    padding: 0;
+}
+
+/* Section index: one more child of .vigilante-content, in a column of its own
+   on the left. Nothing else moves in the DOM. */
+.vigilante-content.has-secnav {
+    grid-template-columns: 200px minmax(0, 1fr) 300px;
+}
+
+.vigilante-content.has-secnav > .vigilante-secnav {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+}
+
+.vigilante-content.has-secnav > .vigilante-main {
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 0;
+}
+
+.vigilante-content.has-secnav > .vigilante-sidebar {
+    grid-column: 3;
+    grid-row: 1;
+}
+
+/* Below 1400 the sidebar goes under the settings, so they keep their width. */
+@media screen and (max-width: 1400px) {
+    .vigilante-content.has-secnav {
+        grid-template-columns: 200px minmax(0, 1fr);
+    }
+
+    .vigilante-content.has-secnav > .vigilante-sidebar {
+        grid-column: 2;
+        grid-row: 2;
+    }
+}
+
+.vigilante-secnav {
+    position: sticky;
+    top: 44px;
+    align-self: start;
+    max-height: calc(100vh - 64px);
+    overflow-y: auto;
+    /* overflow-y makes overflow-x auto too: nothing here is wider than the
+       column, so a horizontal bar would only come from a rounding pixel. */
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+    padding-bottom: 8px;
+    border-right: 1px solid #dcdcde;
+}
+
+.vigilante-secnav-title {
+    margin: 0;
+    padding: 0 10px 6px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: #646970;
+}
+
+.vigilante-secnav-actions {
+    display: flex;
+    gap: 12px;
+    padding: 0 10px 10px;
+}
+
+/* Quiet outline buttons, as in Visibility: no fill at rest, a soft border,
+   the brand colour only on hover. No .button-link, which wp-admin repaints
+   as a plain blue link. */
+.vigilante-secnav-action {
+    flex: 0 1 auto;
+    min-width: 0;
+    padding: 2px 8px;
+    background: transparent;
+    border: 1px solid #dcdcde;
+    border-radius: 4px;
+    font-size: 11px;
+    line-height: 1.6;
+    color: #646970;
+    text-decoration: none;
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.vigilante-secnav-action:hover,
+.vigilante-secnav-action:focus {
+    color: #2271b1;
+    border-color: #2271b1;
+    background-color: #f0f6fc;
+}
+
+.vigilante-secnav a {
+    display: block;
+    padding: 6px 9px 6px 8px;
+    border-left: 3px solid transparent;
+    color: #1d2327;
+    text-decoration: none;
+    font-size: 13px;
+    line-height: 1.35;
+}
+
+/* An error inside: a small icon on the entry of what holds it, once. */
+.vigilante-secnav-mark:empty {
+    display: none;
+}
+
+.vigilante-secnav-mark .dashicons {
+    width: 14px;
+    height: 14px;
+    margin-left: 4px;
+    font-size: 14px;
+    vertical-align: -2px;
+    color: #d63638;
+}
+
+/* A group inside a section: indented and a size smaller. */
+.vigilante-secnav a.is-group {
+    padding-left: 20px;
+    font-size: 12px;
+}
+
+/* Hover only colours the text: the white box with the blue rule is the
+   entry being read and nothing else, so two entries never look selected. */
+.vigilante-secnav a:hover,
+.vigilante-secnav a:focus {
+    color: #2271b1;
+    box-shadow: none;
+}
+
+.vigilante-secnav a:focus-visible {
+    outline: 2px solid #2271b1;
+    outline-offset: -2px;
+}
+
+/* Every switch off: only the name dims, as in Visibility, with the state in
+   the title attribute and in screen-reader text. */
+.vigilante-secnav a.is-off,
+.vigilante-secnav-compact a.is-off {
+    color: #646970;
+}
+
+.vigilante-secnav a.is-here {
+    background: #fff;
+    border-left-color: #2271b1;
+    border-top: 1px solid #dcdcde;
+    border-bottom: 1px solid #dcdcde;
+    margin-top: -1px;
+    margin-bottom: -1px;
+    color: #1d2327;
+    font-weight: 600;
+}
+
+/* Phones: the same list as a native disclosure, pinned under the admin bar. */
+.vigilante-secnav-compact {
+    display: none;
+    position: sticky;
+    top: 46px;
+    z-index: 15;
+    margin: 0 0 14px;
+    padding: 8px 0;
+    background: #f0f0f1;
+}
+
+.vigilante-secnav-compact > summary {
+    display: inline-block;
+    padding: 6px 12px;
+    background: #fff;
+    border: 1px solid #c3c4c7;
+    border-radius: 3px;
+    font-weight: 600;
+    color: #1d2327;
+    cursor: pointer;
+}
+
+.vigilante-secnav-compact-list {
+    position: absolute;
+    left: 0;
+    right: 0;
+    z-index: 5;
+    max-height: 60vh;
+    overflow-y: auto;
+    margin-top: 4px;
+    padding: 6px 0;
+    background: #fff;
+    border: 1px solid #c3c4c7;
+    border-radius: 3px;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+}
+
+.vigilante-secnav-compact-list a {
+    display: block;
+    padding: 7px 14px;
+    color: #1d2327;
+    text-decoration: none;
+}
+
+.vigilante-secnav-compact-list a.is-group {
+    padding-left: 28px;
+}
+
+.vigilante-secnav-compact-list a:hover,
+.vigilante-secnav-compact-list a:focus {
+    background: #f0f6fc;
+    color: #2271b1;
+}
+
+@media screen and (max-width: 782px) {
+    .vigilante-content.has-secnav {
+        display: block;
+    }
+
+    .vigilante-content.has-secnav > .vigilante-sidebar {
+        margin-top: 20px;
+    }
+
+    .vigilante-secnav {
+        display: none;
+    }
+
+    .vigilante-secnav-compact {
+        display: block;
+    }
+
+    /* Below the pinned list (48px); the admin bar is WordPress's padding. */
+    .vigilante-content.has-secnav .vigilante-fold-heading {
+        scroll-margin-top: 56px;
+    }
+}
+
+@media screen and (max-width: 600px) {
+    /* Below 600 the admin bar stops being fixed. */
+    .vigilante-secnav-compact {
+        top: 0;
+    }
+}
+
+/* File Integrity: scanning and clearing go with the results (#15, 3.0.12). */
+.vigilante-scan-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0 0 14px;
+}
+
+.vigilante-scan-empty {
+    margin: 0;
+    color: #646970;
 }

@@ -1951,6 +1951,48 @@ class Vigilante_Settings {
             }
         }
 
+        /*
+         * Firewall lists that would lock people or the site itself out (B123
+         * for the User-Agent blacklist, the rest of B104 for the IP one). The
+         * Firewall tab already filtered them, with its message, before saving;
+         * this covers an import and any other admin write of the option.
+         *
+         * Only lines that were not stored before this write are dropped. This
+         * is the sanitize callback of the option, so it runs on every write
+         * made from the admin, the save of any other tab and an update
+         * included: dropping a stored line here would change what the site
+         * has saved without anybody deciding it. A stored line keeps applying
+         * and is flagged on the Firewall tab and the Dashboard instead.
+         */
+        if ( isset( $validated['firewall'] ) && is_array( $validated['firewall'] ) ) {
+            $stored_all      = get_option( self::OPTION_NAME, array() );
+            $stored_firewall = ( is_array( $stored_all ) && isset( $stored_all['firewall'] ) && is_array( $stored_all['firewall'] ) ) ? $stored_all['firewall'] : array();
+
+            if ( isset( $validated['firewall']['ua_blacklist'] ) && is_array( $validated['firewall']['ua_blacklist'] ) ) {
+                if ( ! class_exists( 'Vigilante_UA_Utils' ) ) {
+                    require_once __DIR__ . '/class-ua-utils.php';
+                }
+                $split = Vigilante_UA_Utils::filter_blacklist(
+                    $validated['firewall']['ua_blacklist'],
+                    isset( $stored_firewall['ua_blacklist'] ) ? (array) $stored_firewall['ua_blacklist'] : array(),
+                    Vigilante_UA_Utils::current_user_agent()
+                );
+                $validated['firewall']['ua_blacklist'] = $split['kept'];
+            }
+
+            if ( ! empty( $validated['firewall']['ip_blacklist'] ) && is_array( $validated['firewall']['ip_blacklist'] ) && class_exists( 'Vigilante_IP_Utils' ) ) {
+                $stored_ips = isset( $stored_firewall['ip_blacklist'] ) ? (array) $stored_firewall['ip_blacklist'] : array();
+                $new_ips    = array_values( array_diff( $validated['firewall']['ip_blacklist'], $stored_ips ) );
+
+                if ( ! empty( $new_ips ) ) {
+                    $own_site = Vigilante_IP_Utils::entries_matching( $new_ips, Vigilante_IP_Utils::own_site_addresses() );
+                    if ( ! empty( $own_site ) ) {
+                        $validated['firewall']['ip_blacklist'] = array_values( array_diff( $validated['firewall']['ip_blacklist'], $own_site ) );
+                    }
+                }
+            }
+        }
+
         // The screen asks for 7 days or more and the generic validator only
         // casts, so 0 got stored, from an import or a request that skipped
         // the field limits, and then every password with a date had expired

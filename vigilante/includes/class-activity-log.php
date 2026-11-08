@@ -161,7 +161,14 @@ class Vigilante_Activity_Log {
         // Gate 2: Per-type flag
         $current_options = $this->get_current_options();
 
-        if ( isset( self::$type_flag_map[ $type ] ) && 'login' !== $type ) {
+        // The user type also carries attack traffic, which is not a change to a
+        // user: unchecking "User changes" silenced those blocks and, with them,
+        // the audit alerts, which only fire for stored events (B120, the same
+        // family as the login half fixed in 2.11.10). They answer to no
+        // checkbox, like the firewall blocks.
+        $user_attack = array( 'author_scan_blocked', 'insecure_username_blocked', 'session_limit_blocked' );
+
+        if ( isset( self::$type_flag_map[ $type ] ) && 'login' !== $type && ! ( 'user' === $type && in_array( $action, $user_attack, true ) ) ) {
             $flag = self::$type_flag_map[ $type ];
             if ( empty( $current_options[ $flag ] ) ) {
                 return false;
@@ -969,6 +976,72 @@ class Vigilante_Activity_Log {
      */
     public function get_logs_count( $args = array() ) {
         return $this->database->get_activity_logs_count( $args );
+    }
+
+    /**
+     * What the log popup says about an entry's address and User-Agent
+     *
+     * Matched as the firewall matches: the IP lists with ranges and
+     * wildcards, the User-Agent lists by part of the string. Until 3.0.11 the
+     * popup compared for equality, so a User-Agent blocked by a line that is
+     * only part of it read "not in the blacklist" (B123).
+     *
+     * @since 3.0.11
+     *
+     * @param string $ip         Entry address.
+     * @param string $user_agent Entry User-Agent.
+     * @param mixed  $extra_data Entry extra data.
+     * @param array  $firewall   Firewall settings section.
+     * @return array
+     */
+    public static function list_flags( $ip, $user_agent, $extra_data, $firewall ) {
+        if ( ! class_exists( 'Vigilante_UA_Utils' ) ) {
+            require_once __DIR__ . '/class-ua-utils.php';
+        }
+        if ( ! class_exists( 'Vigilante_IP_Utils' ) ) {
+            require_once __DIR__ . '/class-ip-utils.php';
+        }
+
+        $ip         = (string) $ip;
+        $user_agent = (string) $user_agent;
+        $firewall   = is_array( $firewall ) ? $firewall : array();
+        $list       = function ( $key ) use ( $firewall ) {
+            return ( isset( $firewall[ $key ] ) && is_array( $firewall[ $key ] ) ) ? $firewall[ $key ] : array();
+        };
+
+        $ua_white = '' !== $user_agent ? Vigilante_UA_Utils::first_match( $user_agent, $list( 'ua_whitelist' ) ) : '';
+        $ua_black = '' !== $user_agent ? Vigilante_UA_Utils::first_match( $user_agent, $list( 'ua_blacklist' ) ) : '';
+
+        return array(
+            'is_ip_whitelisted'  => ( '' !== $ip && Vigilante_IP_Utils::in_list( $ip, $list( 'ip_whitelist' ) ) ),
+            'is_ip_blacklisted'  => ( '' !== $ip && Vigilante_IP_Utils::in_list( $ip, $list( 'ip_blacklist' ) ) ),
+            'is_ua_whitelisted'  => ( '' !== $ua_white ),
+            'is_ua_blacklisted'  => ( '' !== $ua_black ),
+            'ua_whitelist_line'  => $ua_white,
+            'ua_blacklist_line'  => $ua_black,
+            'matched_line'       => self::extract_context_value( $extra_data, 'matched_line' ),
+        );
+    }
+
+    /**
+     * One scalar value stored in an entry's extra data, as a string
+     *
+     * @since 3.0.11
+     *
+     * @param mixed  $extra_data The extra_data column, JSON or already decoded.
+     * @param string $key        Key.
+     * @return string The value, or '' when it is missing or not scalar.
+     */
+    public static function extract_context_value( $extra_data, $key ) {
+        if ( is_string( $extra_data ) ) {
+            $extra_data = json_decode( $extra_data, true );
+        }
+
+        if ( ! is_array( $extra_data ) || ! isset( $extra_data[ $key ] ) || ! is_scalar( $extra_data[ $key ] ) ) {
+            return '';
+        }
+
+        return (string) $extra_data[ $key ];
     }
 
     /**

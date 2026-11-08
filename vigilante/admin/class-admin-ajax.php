@@ -169,18 +169,14 @@ trait Vigilante_Admin_Ajax {
         // Attach firewall list flags so the popup can show "In whitelist"/"In blacklist"
         // states when users paginate or filter without reloading the page.
         $firewall_options = $this->settings->get_section( 'firewall' );
-        $ip_whitelist     = $firewall_options['ip_whitelist'] ?? array();
-        $ip_blacklist     = $firewall_options['ip_blacklist'] ?? array();
-        $ua_whitelist     = $firewall_options['ua_whitelist'] ?? array();
-        $ua_blacklist     = $firewall_options['ua_blacklist'] ?? array();
 
         foreach ( $logs as $log ) {
             $ip_val = (string) ( $log->ip_address ?? '' );
             $ua_val = (string) ( $log->user_agent ?? '' );
-            $log->is_ip_whitelisted = ( '' !== $ip_val && in_array( $ip_val, $ip_whitelist, true ) );
-            $log->is_ip_blacklisted = ( '' !== $ip_val && in_array( $ip_val, $ip_blacklist, true ) );
-            $log->is_ua_whitelisted = ( '' !== $ua_val && in_array( $ua_val, $ua_whitelist, true ) );
-            $log->is_ua_blacklisted = ( '' !== $ua_val && in_array( $ua_val, $ua_blacklist, true ) );
+            // Same flags as the first page load, matched as the firewall matches.
+            foreach ( Vigilante_Activity_Log::list_flags( $ip_val, $ua_val, $log->extra_data ?? '', $firewall_options ) as $vg_flag => $vg_value ) {
+                $log->$vg_flag = $vg_value;
+            }
             $log->request_uri       = Vigilante_Activity_Log::extract_request_uri( $log->extra_data ?? '' );
             $log->event_message     = Vigilante_Activity_Log::display_message( (string) ( $log->event_action ?? '' ), (string) ( $log->event_message ?? '' ) );
             // Same explanation as the first page load: without this, an entry
@@ -240,6 +236,22 @@ trait Vigilante_Admin_Ajax {
                     $value
                 )
             );
+        }
+
+        // The popup no longer offers to blacklist a User-Agent (3.0.11), but a
+        // page loaded before the update still runs the script that does, and
+        // the line it sends is the whole User-Agent of the request, which is
+        // the one of a normal browser whenever a bot copies one (B123).
+        if ( 'ua' === $item_type && 'blacklist' === $list_type ) {
+            if ( ! class_exists( 'Vigilante_UA_Utils' ) ) {
+                require_once VIGILANTE_INCLUDES_DIR . 'class-ua-utils.php';
+            }
+            $vg_verdict = Vigilante_UA_Utils::classify_blacklist_line( $value, Vigilante_UA_Utils::current_user_agent() );
+            if ( Vigilante_UA_Utils::blocks_people( $vg_verdict['verdict'] ) ) {
+                wp_send_json_error(
+                    __( 'This User-Agent was not added to the blacklist.', 'vigilante' ) . ' ' . Vigilante_UA_Utils::explain( $vg_verdict )
+                );
+            }
         }
 
         $option_key = $item_type . '_' . $list_type; // ip_whitelist, ip_blacklist, ua_whitelist, ua_blacklist
@@ -311,6 +323,33 @@ trait Vigilante_Admin_Ajax {
                 $htaccess = new Vigilante_Htaccess_Protection( $fresh_settings );
                 $htaccess->apply_rules();
             }
+        }
+
+        // Until 3.0.11 an entry added from here left no trace: the activity log
+        // recorded the save of the Firewall tab, but not this, and nobody could
+        // tell when or by whom a line that locked people out got in (B123).
+        if ( $this->activity_log ) {
+            $vg_list_names = array(
+                'ip_whitelist' => __( 'IP whitelist', 'vigilante' ),
+                'ip_blacklist' => __( 'IP blacklist', 'vigilante' ),
+                'ua_whitelist' => __( 'User-Agent whitelist', 'vigilante' ),
+                'ua_blacklist' => __( 'User-Agent blacklist', 'vigilante' ),
+            );
+            $this->activity_log->log(
+                'settings',
+                'firewall_list_entry_added',
+                sprintf(
+                    /* translators: 1: list name, e.g. "IP blacklist", 2: the value added */
+                    __( 'Added to the firewall %1$s from the activity log: %2$s', 'vigilante' ),
+                    $vg_list_names[ $option_key ],
+                    $value
+                ),
+                array(
+                    'list'                  => $option_key,
+                    'value'                 => $value,
+                    'removed_from_opposite' => $removed_from_opposite ? $opposite_key : '',
+                )
+            );
         }
 
         $list_label = ( 'whitelist' === $list_type )

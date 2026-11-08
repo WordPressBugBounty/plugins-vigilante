@@ -81,19 +81,110 @@ class Vigilante_SA_Category_WP_Exposure {
             return Vigilante_SA_Check_Result::skip( $args );
         }
 
-        $found = (bool) preg_match( '#<meta\s+name=["\']generator["\']#i', $probe['body'] );
-        if ( ! $found ) {
+        // Any attribute order: until 3.0.11 this asked for name to come first,
+        // and Divi prints <meta content="Divi v.5.11.1" name="generator"/>,
+        // so its sites read clean (B118).
+        $generators = self::generator_contents( $probe['body'] );
+        if ( null === $generators ) {
+            $args['detail'] = __( 'Could not finish reading the homepage HTML to look for generator meta tags.', 'vigilante' );
+            return Vigilante_SA_Check_Result::skip( $args );
+        }
+
+        if ( empty( $generators ) ) {
             $args['detail'] = __( 'No <meta name="generator"> tag found in the homepage HTML.', 'vigilante' );
             return Vigilante_SA_Check_Result::pass( $args );
         }
 
+        $args['data']['generators'] = $generators;
+        $named                      = implode( ', ', $generators );
+
+        $wordpress = false;
+        foreach ( $generators as $generator ) {
+            if ( 0 === stripos( $generator, 'WordPress' ) ) {
+                $wordpress = true;
+                break;
+            }
+        }
+
         if ( $remove_generator ) {
-            $args['detail'] = __( 'The "remove generator" setting is on, but a generator meta tag is still rendered — likely from a plugin or theme.', 'vigilante' );
+            $args['detail'] = sprintf(
+                /* translators: %s: content of the generator meta tags found, e.g. "Divi v.5.11.1" */
+                __( 'The "remove generator" setting is on, but the homepage still has generator meta tags (%s): they come from a plugin or the theme, which print them on their own.', 'vigilante' ),
+                $named
+            );
             return Vigilante_SA_Check_Result::warn( $args );
         }
 
-        $args['detail'] = __( 'The homepage exposes the WordPress version through a <meta name="generator"> tag.', 'vigilante' );
+        if ( $wordpress ) {
+            $args['detail'] = sprintf(
+                /* translators: %s: content of the generator meta tags found, e.g. "WordPress 7.1" */
+                __( 'The homepage exposes the WordPress version through a <meta name="generator"> tag (%s).', 'vigilante' ),
+                $named
+            );
+        } else {
+            $args['detail'] = sprintf(
+                /* translators: %s: content of the generator meta tags found, e.g. "Divi v.5.11.1" */
+                __( 'The homepage has generator meta tags (%s) that name the software behind the site and its version.', 'vigilante' ),
+                $named
+            );
+        }
         return Vigilante_SA_Check_Result::fail( $args );
+    }
+
+    /**
+     * The content of every <meta name="generator"> tag of a page
+     *
+     * Attributes in any order, quoted or not. Each content is cut to 80
+     * characters.
+     *
+     * @since 3.0.11
+     *
+     * @param string $html Page HTML.
+     * @return string[]|null The contents, or null when PCRE gave up on the page.
+     */
+    public static function generator_contents( $html ) {
+        // A quoted value may hold ">" (content="a>b"): the tag ends at the first
+        // ">" outside quotes.
+        $count = preg_match_all( '#<meta\b((?:[^>"\']|"[^"]*"|\'[^\']*\')*)>#i', (string) $html, $tags );
+        if ( false === $count ) {
+            return null;
+        }
+
+        $found = array();
+        foreach ( $tags[1] as $attributes ) {
+            // The attributes one by one, so that "name=generator" written
+            // inside the value of another attribute does not count (third
+            // blind review of 3.0.11), and neither does data-name. The first
+            // of a repeated attribute wins, as in a browser.
+            $parsed = preg_match_all( '#([^\s=/>"\']+)(?:\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>"\']+)))?#', $attributes, $pairs, PREG_SET_ORDER );
+            if ( false === $parsed ) {
+                return null;
+            }
+            $attrs = array();
+            foreach ( $pairs as $pair ) {
+                $key = strtolower( $pair[1] );
+                if ( isset( $attrs[ $key ] ) ) {
+                    continue;
+                }
+                if ( isset( $pair[4] ) && '' !== $pair[4] ) {
+                    $attrs[ $key ] = $pair[4];
+                } elseif ( isset( $pair[3] ) && '' !== $pair[3] ) {
+                    $attrs[ $key ] = $pair[3];
+                } else {
+                    $attrs[ $key ] = isset( $pair[2] ) ? $pair[2] : '';
+                }
+            }
+            if ( ! isset( $attrs['name'] ) || 'generator' !== strtolower( trim( $attrs['name'] ) ) ) {
+                continue;
+            }
+            $content = trim( html_entity_decode( isset( $attrs['content'] ) ? $attrs['content'] : '', ENT_QUOTES, 'UTF-8' ) );
+            if ( '' === $content ) {
+                $content = '?';
+            }
+            $found[] = function_exists( 'mb_substr' ) ? mb_substr( $content, 0, 80 ) : substr( $content, 0, 80 );
+        }
+
+        return array_values( array_unique( $found ) );
     }
 
     private function check_rest_users_enum() {
@@ -258,14 +349,34 @@ class Vigilante_SA_Category_WP_Exposure {
                 return Vigilante_SA_Check_Result::fail( $args );
             }
 
-            // Both flags on but the probe still leaks — usually a caching/CDN layer
-            // serving a stale anonymous response, or a server cache bypassing PHP.
+            // Both flags on but the probe still leaks. Until 3.0.11 this always
+            // blamed a cache, without checking, and on the site where it was
+            // seen the redirect was generated by PHP at that moment: a plugin
+            // that called redirect_canonical() before Vigilant (B119, B122).
+            // The request is repeated past any page cache, and the cache is only
+            // named when the answer says it came from one.
             if ( $setting_on ) {
-                $args['detail'] = sprintf(
-                    /* translators: %s: leaked username */
-                    __( 'Author scanning still leaks the username "%s" even though the protection is enabled. A cache or CDN may be serving an old response — purge your page cache and re-scan.', 'vigilante' ),
-                    $m[1]
-                );
+                $args['data']['cause'] = $this->author_leak_cause( $url );
+
+                if ( 'unknown' === $args['data']['cause'] ) {
+                    $args['detail'] = sprintf(
+                        /* translators: %s: leaked username */
+                        __( 'Author scanning still leaks the username "%s" even though the protection is enabled, and the same request past any page cache got no usable answer, so the cause is not known. If you use a page cache or CDN, purge it and re-scan; if it keeps leaking, something on the site sends ?author=N to the author page before Vigilant can block it, usually another plugin or the theme.', 'vigilante' ),
+                        $m[1]
+                    );
+                } elseif ( 'cache' === $args['data']['cause'] ) {
+                    $args['detail'] = sprintf(
+                        /* translators: %s: leaked username */
+                        __( 'Author scanning still leaks the username "%s" even though the protection is enabled. The answer comes from a cache or CDN, and the same request past the cache does not leak: purge your page cache and re-scan.', 'vigilante' ),
+                        $m[1]
+                    );
+                } else {
+                    $args['detail'] = sprintf(
+                        /* translators: %s: leaked username */
+                        __( 'Author scanning still leaks the username "%s" even though the protection is enabled, and not from a cache: the site generates that redirect at the moment. Something on the site sends ?author=N to the author page before Vigilant can block it, usually another plugin or the theme. Deactivate plugins one by one (Health Check troubleshooting mode does it only for you) until ?author=1 goes to the home page.', 'vigilante' ),
+                        $m[1]
+                    );
+                }
                 return Vigilante_SA_Check_Result::warn( $args );
             }
 
@@ -306,6 +417,57 @@ class Vigilante_SA_Category_WP_Exposure {
             $code
         );
         return Vigilante_SA_Check_Result::warn( $args );
+    }
+
+    /**
+     * Why ?author=1 leaks with the protection on: a cache, or the site itself
+     *
+     * @since 3.0.11
+     *
+     * The same request is repeated past any page cache, with a query string
+     * nothing caches. If that one leaks too, the site generates the redirect
+     * now; if it does not, what leaked was a stored page. Cache headers are
+     * not trusted to tell: there are too many names (the first version of
+     * this listed six and missed DietPress, FastCGI, Kinsta and Nginx, second
+     * blind review of 3.0.11). Only a redirect decides: an error, a normal
+     * page, a verification screen or a rate limit says nothing.
+     *
+     * @param string $url The probed address.
+     * @return string 'cache', 'site' or 'unknown'.
+     */
+    private function author_leak_cause( $url ) {
+        $fresh = Vigilante_SA_Helpers::get( add_query_arg( 'vigilante-nocache', (string) time(), $url ), array( 'redirection' => 0 ) );
+        if ( is_wp_error( $fresh ) ) {
+            return 'unknown';
+        }
+
+        $code = (int) wp_remote_retrieve_response_code( $fresh );
+        if ( $code < 300 || $code >= 400 ) {
+            return 'unknown';
+        }
+
+        $location = (string) wp_remote_retrieve_header( $fresh, 'location' );
+        if ( preg_match( '#/author/([^/?]+)#i', $location ) ) {
+            return 'site';
+        }
+
+        // Only the block itself proves that the fresh request reached
+        // WordPress and the protection ran: it sends the visitor to the home
+        // page (block_author_scan()). A redirect anywhere else, a login page or
+        // a CDN rule for unknown query strings, says nothing about a cache
+        // (third blind review of 3.0.11). Cut by hand, not with wp_parse_url().
+        $host_of = function ( $url ) {
+            return preg_match( '#^[a-z][a-z0-9+.-]*://([^/?\#:]*)#i', (string) $url, $m ) ? strtolower( $m[1] ) : '';
+        };
+        $path_of = function ( $url ) {
+            $path = (string) preg_replace( '#^[a-z][a-z0-9+.-]*://[^/?\#]*#i', '', (string) $url );
+            $path = (string) preg_replace( '#[?\#].*$#s', '', $path );
+            return untrailingslashit( '' === $path ? '/' : $path );
+        };
+        $home      = home_url( '/' );
+        $same_host = '' === $host_of( $location ) || $host_of( $location ) === $host_of( $home );
+
+        return ( '' !== $location && $same_host && $path_of( $location ) === $path_of( $home ) ) ? 'cache' : 'unknown';
     }
 
     private function check_wp_version_public() {

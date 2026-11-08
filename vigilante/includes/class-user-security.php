@@ -20,6 +20,13 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Vigilante_User_Security {
 
     /**
+     * Priority of the author scan block on template_redirect (B122).
+     *
+     * Far below 1, where some plugins call redirect_canonical() themselves.
+     */
+    const AUTHOR_SCAN_PRIORITY = -10000;
+
+    /**
      * Settings instance
      *
      * @var Vigilante_Settings
@@ -108,10 +115,18 @@ class Vigilante_User_Security {
 
         // Block author scanning — must run BEFORE WordPress core's redirect_canonical()
         // (also on template_redirect, default priority 10), which would otherwise redirect
-        // /?author=N to /author/USERNAME/ and leak the login. Priority 1 puts our redirect
-        // first so the username never reaches the response.
+        // /?author=N to /author/USERNAME/ and leak the login.
+        //
+        // Until 3.0.11 this was priority 1, and a plugin that calls
+        // redirect_canonical() itself on template_redirect at priority 1 and
+        // registers that before Vigilant does won the tie: NextGEN Gallery
+        // (its Router, restore_request_uri()) sent ?author=1 to the author
+        // page with the protection on and nothing in the log (B122). Hooked far
+        // below 1 now, and the redirect_canonical filter backs it up for a
+        // plugin that calls that function at any priority, even lower.
         if ( ! empty( $this->options['block_author_scanning'] ) ) {
-            add_action( 'template_redirect', array( $this, 'block_author_scan' ), 1 );
+            add_action( 'template_redirect', array( $this, 'block_author_scan' ), self::AUTHOR_SCAN_PRIORITY );
+            add_filter( 'redirect_canonical', array( $this, 'block_author_scan_in_canonical' ), 1 );
         }
 
         // Block user enumeration via REST API
@@ -415,6 +430,25 @@ class Vigilante_User_Security {
         }
 
         return $found;
+    }
+
+    /**
+     * The redirect_canonical filter, as a backup of the template_redirect hook
+     *
+     * redirect_canonical() returns early in the admin and only runs on front
+     * end requests, where the author archive redirect is the leak. Blocking
+     * here covers a plugin that calls redirect_canonical() itself before the
+     * hook above runs. Any other request gets its redirect back untouched.
+     *
+     * @since 3.0.11
+     *
+     * @param string|false $redirect_url The redirect WordPress is about to make.
+     * @return string|false
+     */
+    public function block_author_scan_in_canonical( $redirect_url ) {
+        $this->block_author_scan();
+
+        return $redirect_url;
     }
 
     /**

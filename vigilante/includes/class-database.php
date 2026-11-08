@@ -1387,6 +1387,56 @@ class Vigilante_Database {
     }
 
     /**
+     * Remove an account's two factor rows from the tables of the current site
+     *
+     * Codes, trusted devices, notification marks and the TOTP enrolment
+     * (secret and backup codes). Until 3.0.11 deleting a user left them behind
+     * (B117): of no use to anybody while MySQL keeps the auto increment, but
+     * data of an account that no longer exists. A table this site does not
+     * have yet is skipped.
+     *
+     * @since 3.0.11
+     *
+     * @param int $user_id User ID.
+     * @return int Rows removed.
+     */
+    public function delete_user_two_factor_rows( $user_id ) {
+        $user_id = absint( $user_id );
+        if ( ! $user_id ) {
+            return 0;
+        }
+
+        // The global, not $this->wpdb, so the PreparedSQL sniff can see the
+        // prepare() call: it does not follow the property (measured with Plugin
+        // Check 2.2.0, seven errors on the SHOW TABLES line).
+        global $wpdb;
+
+        $removed = 0;
+        $tables  = array(
+            $this->get_2fa_codes_table(),
+            $this->get_2fa_devices_table(),
+            $this->get_2fa_notifications_table(),
+            $this->get_totp_table(),
+        );
+
+        foreach ( $tables as $table ) {
+            // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- One-off check on user deletion; the table may not exist on this site yet.
+            $exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) );
+            if ( $exists !== $table ) {
+                continue;
+            }
+
+            // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- One-off delete on user deletion; nothing caches these rows.
+            $count = $wpdb->delete( $table, array( 'user_id' => $user_id ), array( '%d' ) );
+            if ( false !== $count ) {
+                $removed += (int) $count;
+            }
+        }
+
+        return $removed;
+    }
+
+    /**
      * Cleanup expired 2FA codes
      *
      * @return int Number of deleted rows.

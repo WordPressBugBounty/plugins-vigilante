@@ -3,12 +3,11 @@
  * Plugin Name: Vigilant - 100% Free Security Suite: Firewall, 2FA, Login, Headers, Scanner…
  * Plugin URI: https://servicios.ayudawp.com
  * Description: Complete security solution for WordPress. Firewall, 2FA, security headers, login protection, file integrity monitoring, activity logging and more.
- * Version: 3.0.10
+ * Version: 3.0.11
  * Author: Fernando Tellado
  * Author URI: https://ayudawp.com
  * Text Domain: vigilante
  * Requires at least: 6.2
- * Tested up to: 7.1
  * Requires PHP: 7.4
  * License: GPL v2 or later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -24,7 +23,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Plugin constants
  */
-define( 'VIGILANTE_VERSION', '3.0.10' );
+define( 'VIGILANTE_VERSION', '3.0.11' );
 define( 'VIGILANTE_PLUGIN_FILE', __FILE__ );
 define( 'VIGILANTE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'VIGILANTE_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -112,6 +111,7 @@ function vigilante_load_plugin() {
     require_once VIGILANTE_INCLUDES_DIR . 'class-database.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-settings.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-ip-utils.php';
+    require_once VIGILANTE_INCLUDES_DIR . 'class-ua-utils.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-backup-manager.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-activator.php';
     require_once VIGILANTE_INCLUDES_DIR . 'class-deactivator.php';
@@ -175,6 +175,11 @@ function vigilante_load_plugin() {
     // Deleting a site of a network drops its tables, ours included. Registered
     // outside is_admin() because a site can also be deleted from WP-CLI.
     add_filter( 'wpmu_drop_tables', 'vigilante_drop_site_tables', 10, 2 );
+
+    // Deleting an account removes its two factor rows (B117). Outside is_admin()
+    // too, for WP-CLI.
+    add_action( 'delete_user', 'vigilante_delete_user_two_factor' );
+    add_action( 'wpmu_delete_user', 'vigilante_delete_network_user_two_factor' );
 
     // Initialize core components only - modules will be initialized at init
     add_action( 'init', 'vigilante_init_plugin', 1 );
@@ -1188,6 +1193,69 @@ function vigilante_mark_upgrader_wrote( $response, $hook_extra, $result ) {
 function vigilante_drop_site_tables( $tables, $site_id = 0 ) {
     $database = new Vigilante_Database();
     return $database->add_site_tables_to_drop( $tables, $site_id );
+}
+
+/**
+ * Remove a deleted account's two factor rows (single site)
+ *
+ * On a network delete_user only means the account left one site, and it
+ * stays out of this: the TOTP enrolment of an account is kept in the table of
+ * the site where it was made and serves every site of the network, so
+ * removing it here would take the second factor away from an account that is
+ * still in use. wpmu_delete_user covers the network.
+ *
+ * @since 3.0.11
+ *
+ * @param int $user_id User ID.
+ */
+function vigilante_delete_user_two_factor( $user_id ) {
+    if ( is_multisite() ) {
+        return;
+    }
+
+    $database = new Vigilante_Database();
+    $database->delete_user_two_factor_rows( $user_id );
+}
+
+/**
+ * Remove a deleted account's two factor rows (network)
+ *
+ * The account is gone from the whole network. Its rows can be in the tables
+ * of the main site, of the sites it belonged to and of the site that holds its
+ * TOTP enrolment (the vigilante_totp_site user meta), which is where a login
+ * leaves them; all of those are looked at, and nothing else, so a network with
+ * thousands of sites is not walked for one account.
+ *
+ * @since 3.0.11
+ *
+ * @param int $user_id User ID.
+ */
+function vigilante_delete_network_user_two_factor( $user_id ) {
+    if ( ! is_multisite() ) {
+        return;
+    }
+
+    $user_id  = absint( $user_id );
+    $blog_ids = array( (int) get_main_site_id() );
+
+    foreach ( (array) get_blogs_of_user( $user_id, true ) as $blog ) {
+        $blog_ids[] = (int) $blog->userblog_id;
+    }
+
+    $marked = (int) get_user_meta( $user_id, 'vigilante_totp_site', true );
+    if ( $marked > 0 ) {
+        $blog_ids[] = $marked;
+    }
+
+    foreach ( array_unique( array_filter( $blog_ids ) ) as $blog_id ) {
+        if ( ! get_site( $blog_id ) ) {
+            continue;
+        }
+        switch_to_blog( $blog_id );
+        $database = new Vigilante_Database();
+        $database->delete_user_two_factor_rows( $user_id );
+        restore_current_blog();
+    }
 }
 
 /**

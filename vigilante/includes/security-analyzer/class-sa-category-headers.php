@@ -369,7 +369,9 @@ class Vigilante_SA_Category_Headers {
         $this->values = array();
         if ( preg_match_all( '/^\s*Header\s+(?:always\s+)?set\s+([A-Za-z-]+)\s+"?([^"\r\n]*)"?/mi', (string) $sender->generate_rules_content(), $found, PREG_SET_ORDER ) ) {
             foreach ( $found as $line ) {
-                $this->values[ strtolower( $line[1] ) ] = trim( $line[2] );
+                // The rules write a literal percent sign as "%%", which is how
+                // mod_headers reads it (since 3.0.11, B121); what arrives has one.
+                $this->values[ strtolower( $line[1] ) ] = str_replace( '%%', '%', trim( $line[2] ) );
             }
             $this->written = array_keys( $this->values );
         }
