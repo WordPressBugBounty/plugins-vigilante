@@ -447,6 +447,11 @@ class Vigilante_Two_Factor_TOTP {
                 // Both failed
                 $this->increment_pending_attempts();
                 $this->note_failed_code( $user_id );
+
+                // So the administrator learns why, not only the user (B101).
+                if ( 'decrypt_failed' === $result->get_error_code() ) {
+                    $this->log_event( 'totp_decrypt_failed', $user_id, __( 'The authenticator secret of this account could not be decrypted, usually because the security keys of wp-config.php (AUTH_KEY) changed after it was set up. The user can sign in with a backup code and set the app up again, or an administrator can reset it from the user profile.', 'vigilante' ), 'warning' );
+                }
                 set_transient( 'vigilante_2fa_error_' . $user_id, $result->get_error_message(), 60 );
                 wp_safe_redirect( add_query_arg( 'vigilante_2fa', '1', wp_login_url() ) );
                 exit;
@@ -693,7 +698,14 @@ class Vigilante_Two_Factor_TOTP {
         $secret = $this->decrypt_secret( $totp_data['secret'] );
 
         if ( ! $secret ) {
-            return new WP_Error( 'decrypt_failed', __( 'Authentication error. Please contact the site administrator.', 'vigilante' ) );
+            /*
+             * Said as it is since 3.0.13 (B101): the key comes from AUTH_KEY,
+             * so replacing the keys and salts of wp-config.php leaves every
+             * authenticator secret unreadable, and "contact the administrator"
+             * told the one person who could fix it nothing. Only somebody who
+             * already typed the right password gets here.
+             */
+            return new WP_Error( 'decrypt_failed', __( 'The codes of your authenticator app can no longer be checked on this site, usually because its security keys were replaced. Sign in with one of your backup codes and set the app up again from your profile, or ask an administrator to reset it.', 'vigilante' ) );
         }
 
         // Check code against current and adjacent time steps (clock skew tolerance)

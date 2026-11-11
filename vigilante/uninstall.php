@@ -72,6 +72,7 @@ function vigilante_uninstall() {
         delete_site_option( 'vigilante_owned_blocks_claim' );
         delete_site_option( 'vigilante_config_copies_sweep' );
         delete_site_option( 'vigilante_results_sweep' );
+        delete_site_option( 'vigilante_secret_prints' );
     }
 
     // Remove backup directory. WP_CONTENT_DIR is shared by the whole network,
@@ -209,6 +210,8 @@ function vigilante_uninstall_site() {
         'vigilante_self_integrity_state',
         'vigilante_hidden_404_copy',
         'vigilante_hidden_404_state',
+        // Fingerprints a secret of the Secrets API had in the last day (3.0.13).
+        'vigilante_secret_prints',
     );
 
     foreach ( $options_to_delete as $option ) {

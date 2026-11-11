@@ -134,6 +134,12 @@ class Vigilante_Activity_Log {
             add_action( 'add_attachment', array( $this, 'log_media_upload' ) );
             add_action( 'delete_attachment', array( $this, 'log_media_delete' ) );
         }
+
+        // Secrets API, WordPress 7.2 and later: the action does not exist
+        // before, so this costs nothing there. It passes fingerprints, never
+        // values. Whatever the checkboxes say, like the firewall blocks: the
+        // security type answers to none.
+        add_action( 'wp_secret_changed', array( $this, 'log_secret_changed' ), 10, 7 );
     }
 
     /**
@@ -771,6 +777,240 @@ class Vigilante_Activity_Log {
             ),
             'info'
         );
+    }
+
+    // =========================================================================
+    // SECRETS API (WordPress 7.2)
+    // =========================================================================
+
+    /**
+     * Fingerprints a secret had, per scope, so a return to one can be seen.
+     */
+    const SECRET_PRINTS_OPTION = 'vigilante_secret_prints';
+
+    /**
+     * How long a value a secret stopped having counts as recent, in seconds.
+     */
+    const SECRET_RETURN_WINDOW = 86400;
+
+    /**
+     * Log a change of a secret of the Secrets API
+     *
+     * The action of core passes the name, what happened and two fingerprints,
+     * never a value (wp-includes/secrets/class-wp-secrets-libsodium-provider.php:433-461
+     * in 7.2-beta5). The fingerprints are keyed by the master key of the site
+     * (WP_Secrets_Cipher::fingerprint()), the same ones core keeps next to each
+     * record, so keeping them reveals nothing the database did not already
+     * hold. A new WP_SECRETS_KEY does not change them: rotating it only wraps
+     * the same master key again (WP_Secrets_Key_Manager::rotate_site_key()).
+     *
+     * A secret that goes back, within a day, to a value it had before and
+     * that was replaced by another is logged as critical, so the audit alerts
+     * send it: a rotated key put back to the old one is what somebody who knew
+     * the old one would do. An administrator undoing a change by hand does the
+     * same, and the message says so. A secret deleted and created again with
+     * the same value is not a return: it is what disconnecting and connecting
+     * an integration again does (the first blind review of 3.0.13). A deleted
+     * value that comes back after the secret had another one is (the second).
+     *
+     * @since 3.0.13
+     *
+     * @param string $name            Namespaced name of the secret.
+     * @param string $action          created, updated, deleted, imported or retired.
+     * @param int    $actor_id        User who made the change, or 0.
+     * @param int    $timestamp       When.
+     * @param string $old_fingerprint Previous fingerprint, or ''.
+     * @param string $new_fingerprint New fingerprint, or '' when deleted.
+     * @param bool   $network         Whether the secret belongs to the network.
+     */
+    public function log_secret_changed( $name, $action, $actor_id = 0, $timestamp = 0, $old_fingerprint = '', $new_fingerprint = '', $network = false ) {
+        if ( ! is_string( $name ) || '' === $name || ! is_string( $action ) ) {
+            return;
+        }
+
+        $name    = substr( $name, 0, 191 );
+        $old     = self::clean_fingerprint( $old_fingerprint );
+        $new     = self::clean_fingerprint( $new_fingerprint );
+        $network = $network && is_multisite();
+        $when    = ( is_numeric( $timestamp ) && (int) $timestamp > 0 ) ? (int) $timestamp : time();
+
+        $returned = false;
+        if ( in_array( $action, array( 'created', 'updated', 'imported' ), true ) && '' !== $new && $new !== $old ) {
+            $returned = $this->secret_had_print( $name, $network, $new, $when, $action );
+        }
+
+        // What the secret stops having, kept for a day, and how: a value that
+        // was replaced by another, or one that went with the secret.
+        if ( in_array( $action, array( 'updated', 'imported', 'deleted' ), true ) && '' !== $old && $old !== $new ) {
+            $this->remember_secret_print( $name, $network, $old, $when, 'deleted' === $action ? 'deleted' : 'replaced' );
+        }
+
+        switch ( $action ) {
+            case 'created':
+                /* translators: %s: name of a secret of the WordPress Secrets API */
+                $message = __( 'Secret created: %s', 'vigilante' );
+                break;
+            case 'updated':
+                /* translators: %s: name of a secret of the WordPress Secrets API */
+                $message = __( 'Secret changed: %s', 'vigilante' );
+                break;
+            case 'deleted':
+                /* translators: %s: name of a secret of the WordPress Secrets API */
+                $message = __( 'Secret deleted: %s', 'vigilante' );
+                break;
+            case 'imported':
+                /* translators: %s: name of a secret of the WordPress Secrets API */
+                $message = __( 'Secret imported: %s', 'vigilante' );
+                break;
+            case 'retired':
+                /* translators: %s: name of a secret of the WordPress Secrets API */
+                $message = __( 'Previous value of a secret discarded after a key change: %s', 'vigilante' );
+                break;
+            default:
+                /* translators: %s: name of a secret of the WordPress Secrets API */
+                $message = __( 'Secret modified: %s', 'vigilante' );
+        }
+
+        $message = sprintf( $message, $name );
+
+        if ( $returned ) {
+            $message .= ' ' . __( 'It went back to a value it had less than a day ago. If nobody here undid a change on purpose, find out which user or plugin made it: whoever knew the old value can use it again.', 'vigilante' );
+        }
+
+        $this->log(
+            'security',
+            $returned ? 'secret_returned' : 'secret_' . sanitize_key( $action ),
+            $message,
+            array(
+                'object_type' => 'secret',
+                'object_name' => $name,
+                'scope'       => $network ? 'network' : 'site',
+                'actor_id'    => (int) $actor_id,
+                // The first eight characters are enough to tell two apart.
+                'old_print'   => substr( $old, 0, 8 ),
+                'new_print'   => substr( $new, 0, 8 ),
+            ),
+            $returned ? 'critical' : 'info'
+        );
+    }
+
+    /**
+     * A fingerprint as core writes it (hexadecimal), or ''
+     *
+     * @param mixed $value Value passed by the action.
+     * @return string
+     */
+    private static function clean_fingerprint( $value ) {
+        if ( ! is_string( $value ) || 1 !== preg_match( '/^[a-f0-9]{8,128}$/i', $value ) ) {
+            return '';
+        }
+
+        return strtolower( $value );
+    }
+
+    /**
+     * Fingerprints a secret stopped having within the window, per scope
+     *
+     * A network secret is the same on every site, so its history is a network
+     * option; a site secret's is an option of its site. Autoload off: it is
+     * only read when a secret changes.
+     *
+     * @param bool $network Network scope.
+     * @return array<string,array<int,array{0:string,1:int}>>
+     */
+    private static function secret_prints( $network ) {
+        $stored = $network ? get_site_option( self::SECRET_PRINTS_OPTION, array() ) : get_option( self::SECRET_PRINTS_OPTION, array() );
+
+        return is_array( $stored ) ? $stored : array();
+    }
+
+    /**
+     * Whether a secret had this fingerprint within the window
+     *
+     * @param string $name    Secret.
+     * @param bool   $network Scope.
+     * @param string $print   Fingerprint it has now.
+     * @param int    $when    Time of the change.
+     * @param string $action  What the change is.
+     * @return bool
+     */
+    private function secret_had_print( $name, $network, $print, $when, $action = 'updated' ) {
+        $prints = self::secret_prints( $network );
+
+        $entries = array_values( (array) ( $prints[ $name ] ?? array() ) );
+        $last    = count( $entries ) - 1;
+
+        foreach ( $entries as $at => $entry ) {
+            // A value that went with the secret is skipped only when this
+            // change is the creation right after that deletion: creating it
+            // again with the same value. Once the secret had another value in
+            // between, getting the deleted one back is a return.
+            $recreated = in_array( $action, array( 'created', 'imported' ), true ) && $at === $last;
+            if ( ! is_array( $entry ) || ! isset( $entry[0], $entry[1] ) || ( 'deleted' === ( $entry[2] ?? '' ) && $recreated ) ) {
+                continue;
+            }
+
+            if ( $print === $entry[0] && $when - (int) $entry[1] <= self::SECRET_RETURN_WINDOW ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Keep a fingerprint a secret has just stopped having
+     *
+     * Entries older than the window are dropped on every write, a value seen
+     * again replaces its older entry, and at most 25 values per secret and 200
+     * secrets are kept, so nothing grows for good. 25 and not 10, the first
+     * figure: with ten, ten changes in a row pushed the old value out and the
+     * return went unseen (the second blind review).
+     *
+     * @param string $name    Secret.
+     * @param bool   $network Scope.
+     * @param string $print   Fingerprint it had.
+     * @param int    $when    When it stopped having it.
+     * @param string $how     replaced or deleted.
+     */
+    private function remember_secret_print( $name, $network, $print, $when, $how = 'replaced' ) {
+        $prints = self::secret_prints( $network );
+        $kept   = array();
+
+        foreach ( $prints as $secret => $entries ) {
+            if ( ! is_string( $secret ) || ! is_array( $entries ) ) {
+                continue;
+            }
+
+            foreach ( $entries as $entry ) {
+                if ( is_array( $entry ) && isset( $entry[0], $entry[1] ) && is_string( $entry[0] ) && $when - (int) $entry[1] <= self::SECRET_RETURN_WINDOW ) {
+                    $kept[ $secret ][] = array( $entry[0], (int) $entry[1], 'deleted' === ( $entry[2] ?? '' ) ? 'deleted' : 'replaced' );
+                }
+            }
+        }
+
+        // The secret that changed goes last, so the cap below drops others.
+        $own = array_values(
+            array_filter(
+                $kept[ $name ] ?? array(),
+                static function ( $entry ) use ( $print ) {
+                    return $entry[0] !== $print;
+                }
+            )
+        );
+        unset( $kept[ $name ] );
+        $own[]         = array( $print, $when, 'deleted' === $how ? 'deleted' : 'replaced' );
+        $kept[ $name ] = array_slice( $own, -25 );
+
+        if ( count( $kept ) > 200 ) {
+            $kept = array_slice( $kept, -200, null, true );
+        }
+
+        if ( $network ) {
+            update_site_option( self::SECRET_PRINTS_OPTION, $kept );
+        } else {
+            update_option( self::SECRET_PRINTS_OPTION, $kept, false );
+        }
     }
 
     // =========================================================================

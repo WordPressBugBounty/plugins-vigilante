@@ -59,6 +59,10 @@ trait Vigilante_Admin_Ajax {
             wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
         }
 
+        if ( ! class_exists( 'Vigilante_File_Integrity' ) ) {
+            require_once VIGILANTE_PLUGIN_DIR . 'includes/class-file-integrity.php';
+        }
+
         // The request carries an opaque key instead of the file name: hosting
         // WAFs (e.g. ModSecurity with OWASP CRS rule 930130) reject any POST
         // whose arguments contain the literal "wp-config.php", which made
@@ -67,23 +71,36 @@ trait Vigilante_Admin_Ajax {
         $file_keys = array(
             'cfg' => 'wp-config.php',
             'hta' => '.htaccess',
+            // The Secrets API drop-in, since 3.0.13. It lives in wp-content,
+            // which the whole network shares, so the same gate applies.
+            'sec' => Vigilante_File_Integrity::SECRETS_DROPIN,
         );
         $file_key = isset( $_POST['file_key'] ) ? sanitize_key( $_POST['file_key'] ) : '';
         $file     = isset( $file_keys[ $file_key ] ) ? $file_keys[ $file_key ] : '';
-        $allowed  = array( 'wp-config.php', '.htaccess' );
-        if ( ! in_array( $file, $allowed, true ) ) {
+        if ( '' === $file ) {
             wp_send_json_error( __( 'Invalid file.', 'vigilante' ) );
-        }
-
-        if ( ! class_exists( 'Vigilante_File_Integrity' ) ) {
-            require_once VIGILANTE_PLUGIN_DIR . 'includes/class-file-integrity.php';
         }
 
         $activity_log = isset( $this->activity_log ) ? $this->activity_log : null;
         $database     = isset( $this->database ) ? $this->database : null;
 
-        $fi     = new Vigilante_File_Integrity( $this->settings, $database, $activity_log );
-        $result = $fi->update_critical_file_baseline( $file );
+        $fi = new Vigilante_File_Integrity( $this->settings, $database, $activity_log );
+
+        if ( Vigilante_File_Integrity::SECRETS_DROPIN === $file ) {
+            // What the screen showed, so a file put there after the scan is not
+            // approved unseen (3.0.13): a fingerprint, or '' for a removed one.
+            // sanitize_key() leaves a lowercase hexadecimal fingerprint as it is,
+            // and the pattern below takes nothing else.
+            $seen = isset( $_POST['seen'] ) ? sanitize_key( wp_unslash( $_POST['seen'] ) ) : null;
+            $seen = ( is_string( $seen ) && 1 === preg_match( '/^(?:[a-f0-9]{64})?\z/', $seen ) ) ? $seen : null;
+            $result = null === $seen ? new WP_Error( 'seen', __( 'Run a new scan and review the file again.', 'vigilante' ) ) : $fi->approve_secrets_dropin_seen( $seen );
+
+            if ( is_wp_error( $result ) ) {
+                wp_send_json_error( $result->get_error_message() );
+            }
+        } else {
+            $result = $fi->update_critical_file_baseline( $file );
+        }
 
         if ( $result ) {
             // Log the approval in the activity log

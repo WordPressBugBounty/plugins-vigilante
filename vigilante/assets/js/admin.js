@@ -771,7 +771,9 @@
             // containing the literal "wp-config.php", which made Approve fail
             // with a generic AJAX error on hardened hostings. The PHP handler
             // maps the key back against its own whitelist.
-            var fileKey = { 'wp-config.php': 'cfg', '.htaccess': 'hta' }[ file ] || '';
+            var fileKey = { 'wp-config.php': 'cfg', '.htaccess': 'hta', 'wp-content/secrets.php': 'sec' }[ file ] || '';
+            // The drop-in is approved only as the scan saw it (3.0.13).
+            var seen = $btn.attr('data-seen') || '';
 
             $btn.prop('disabled', true).text(strings.approving || 'Approving...');
 
@@ -781,17 +783,23 @@
                 data: {
                     action: 'vigilante_approve_critical_file',
                     nonce: vigilanteAdmin.nonce,
-                    file_key: fileKey
+                    file_key: fileKey,
+                    seen: seen
                 },
                 success: function(response) {
                     if (response.success) {
                         // Remove the approved file row and its diff row from the table.
-                        // The diff row carries an id derived from the file name (same as
-                        // sanitize_html_class() on PHP side), so we target it directly
-                        // instead of relying on adjacency in the DOM.
+                        // The diff row is the one the Review changes button of the same
+                        // row opens. Until 3.0.12 its id was rebuilt here from the file
+                        // name, replacing with dashes what sanitize_html_class() removes
+                        // on the PHP side, so on a page painted by PHP the diff row of
+                        // wp-config.php, .htaccess or secrets.php stayed after approving
+                        // and the box never went (seen on 11 Nov 2026).
                         var $row = $btn.closest('tr');
-                        var fileId = String(file).replace(/[^a-z0-9_-]/gi, '-');
-                        $('#vigilante-critical-content-' + fileId).remove();
+                        var target = $row.find('.vigilante-toggle-critical-content').attr('data-target');
+                        if (target) {
+                            $(document.getElementById(target)).remove();
+                        }
                         $row.fadeOut(300, function() {
                             $(this).remove();
                             // If no more critical config rows, remove the entire section
@@ -841,7 +849,7 @@
                             Vigilante_Admin.refreshFilePagination($container);
                         });
                         Vigilante_Admin.showNotice('success', strings.fileIgnored || 'File added to ignored list.');
-                        Vigilante_Admin.ignoredAdded = (Vigilante_Admin.ignoredAdded || 0) + 1;
+                        Vigilante_Admin.addIgnoredRows([ (response.data && response.data.file) || file ]);
                         Vigilante_Admin.ignoredListChanged();
                     } else {
                         Vigilante_Admin.showNotice('error', response.data || 'Failed to ignore file');
@@ -1095,12 +1103,70 @@
          * of the table. The section itself never goes (3.0.11).
          */
         /**
-         * Files on the ignore list right now: the rows of its table plus what
-         * was ignored from the results since the page loaded, which only shows
-         * in the table after a reload.
+         * Files on the ignore list right now: the rows of its table. Until
+         * 3.0.12 a file ignored from the results was only counted, its row came
+         * with a reload, and the summary said 4 over a table that showed 3
+         * (B135, Juan Diez). Its row is added now, by addIgnoredRows().
          */
         ignoredTotal: function() {
-            return $('#vigilante-section-fi-ignored table.vigilante-fi-paginated tbody tr').length + (this.ignoredAdded || 0);
+            return $('#vigilante-section-fi-ignored table.vigilante-fi-paginated tbody tr').length;
+        },
+
+        /**
+         * Add the rows of files just ignored to the table of ignored files,
+         * building the table when the list was empty, as the page does. A path
+         * already in the table is not added twice: ignore_file() does not store
+         * it twice either.
+         *
+         * @param {string[]} files Paths as stored.
+         */
+        addIgnoredRows: function(files) {
+            var strings = vigilanteAdmin.strings || {};
+            var $box = $('#vigilante-section-fi-ignored');
+            if (!$box.length || !files || !files.length) {
+                return;
+            }
+
+            var $section = $box.find('.vigilante-paginated-section');
+            if (!$section.length) {
+                $section = $('<div class="vigilante-paginated-section" data-bulk-mode="unignore"></div>');
+                var $bar = $('<div class="vigilante-fi-bulk-bar"></div>');
+                $bar.append($('<button type="button" class="button vigilante-bulk-unignore" disabled></button>').text(strings.stopIgnoringSelected || 'Stop ignoring selected'));
+                $bar.append('<span class="vigilante-fi-bulk-count" aria-live="polite"></span>');
+                var $table = $('<table class="wp-list-table widefat fixed striped vigilante-fi-paginated"><thead><tr><td class="manage-column column-cb check-column"><input type="checkbox" class="vigilante-fi-cb-all" autocomplete="off"></td><th></th><th style="width: 120px;"></th></tr></thead><tbody></tbody></table>');
+                $table.find('.vigilante-fi-cb-all').attr('aria-label', strings.selectAll || 'Select all');
+                $table.find('thead th').eq(0).text(strings.file || 'File');
+                $table.find('thead th').eq(1).text(strings.actions || 'Actions');
+                $section.append($bar, '<div class="vigilante-fi-pagination-wrap"></div>', $table);
+                $section.insertAfter($box.find('.vigilante-ignored-empty'));
+            }
+
+            if (!$box.find('.vigilante-clear-ignored').length) {
+                $('<p style="margin-top: 10px;"></p>')
+                    .append($('<button type="button" class="button vigilante-clear-ignored"></button>'))
+                    .insertAfter($section);
+            }
+
+            var $tbody = $section.find('tbody');
+            var present = {};
+            $tbody.find('input.vigilante-fi-cb').each(function() {
+                present[String($(this).val())] = true;
+            });
+
+            $.each(files, function(i, file) {
+                file = String(file);
+                if ('' === file || present[file]) {
+                    return;
+                }
+                present[file] = true;
+                var $tr = $('<tr></tr>');
+                $tr.append($('<th scope="row" class="check-column"></th>').append($('<input type="checkbox" class="vigilante-fi-cb" autocomplete="off">').val(file)));
+                $tr.append($('<td></td>').append($('<code></code>').text(file)));
+                $tr.append($('<td></td>').append($('<button type="button" class="button button-small vigilante-unignore-file"></button>').attr('data-file', file).text(strings.stopIgnoring || 'Stop ignoring')));
+                $tbody.append($tr);
+            });
+
+            Vigilante_Admin.refreshFilePagination($section);
         },
 
         ignoredListChanged: function() {
@@ -1113,11 +1179,6 @@
             var n = this.ignoredTotal();
             if (0 === rows) {
                 $box.find('.vigilante-paginated-section').remove();
-            }
-            if (this.ignoredAdded && !$box.find('.vigilante-ignored-reload').length) {
-                $('<p class="description vigilante-ignored-reload"></p>')
-                    .text(strings.ignoredReloadToSee || 'Reload the page to see the files ignored since it was opened.')
-                    .insertAfter($box.find('.vigilante-ignored-empty'));
             }
             if (0 === n) {
                 $box.find('.vigilante-clear-ignored').closest('p').remove();
@@ -1177,7 +1238,7 @@
                         Vigilante_Admin.refreshFilePagination($section);
                         self.refreshBulkBar($section);
                         Vigilante_Admin.showNotice('success', (response.data && response.data.message) || strings.fileIgnored);
-                        Vigilante_Admin.ignoredAdded = (Vigilante_Admin.ignoredAdded || 0) + ((response.data && parseInt(response.data.count, 10)) || files.length);
+                        Vigilante_Admin.addIgnoredRows((response.data && $.isArray(response.data.files)) ? response.data.files : files);
                         Vigilante_Admin.ignoredListChanged();
                     } else {
                         Vigilante_Admin.showNotice('error', (response.data && response.data.message) || response.data || 'Failed to ignore files');
@@ -1422,7 +1483,7 @@
                     if (vigilanteAdmin.approvalLocked) {
                         html += '<span class="description" style="display:block;margin-top:4px;">' + escHtml(strings.approvalLockedNotice || '') + '</span>';
                     } else {
-                        html += '<button type="button" class="button button-small button-primary vigilante-approve-critical-file" data-file="' + esc(file.file) + '">' + (strings.approve || 'Approve') + '</button>';
+                        html += '<button type="button" class="button button-small button-primary vigilante-approve-critical-file" data-file="' + esc(file.file) + '" data-seen="' + esc(file.actual_hash || '') + '">' + (strings.approve || 'Approve') + '</button>';
                     }
                     html += '</td>';
                     html += '</tr>';
@@ -1437,6 +1498,11 @@
                         html += '<p style="color: #50575e; font-style: italic; margin: 0;">' + escHtml(strings.diffRescan || '') + '</p>';
                     } else if (diff.redaction) {
                         html += '<p style="color: #50575e; font-style: italic; margin: 0;">' + escHtml(strings.diffRedaction || '') + '</p>';
+                    } else if (diff.not_kept) {
+                        // The Secrets API drop-in: what happened, what it is, and
+                        // why there are no lines (3.0.13).
+                        var dropinEvent = { appeared: strings.dropinAppeared, changed: strings.dropinChanged, rekeyed: strings.dropinRekeyed, removed: strings.dropinRemoved }[ diff.event ] || strings.dropinChanged || '';
+                        html += '<p style="color: #50575e; font-style: italic; margin: 0;">' + escHtml(dropinEvent) + ' ' + escHtml(diff.loaded ? (strings.dropinLoaded || '') : (strings.dropinNotLoaded || '')) + ' ' + escHtml(strings.dropinNotKept || '') + '</p>';
                     } else if (diffUnavailable) {
                         html += '<p style="color: #50575e; font-style: italic; margin: 0;">' + (strings.diffUnavailable || 'Diff not available.') + '</p>';
                     } else if (added.length === 0 && removed.length === 0) {

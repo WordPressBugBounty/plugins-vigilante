@@ -97,7 +97,8 @@ class Vigilante_Security_Analyzer {
                 'slug'  => 'files',
                 'label' => __( 'Sensitive Files', 'vigilante' ),
                 // 3.0.7: 10 -> 9 (wp_cron_public became informative).
-                'max'   => 9,
+                // 3.0.13: 9 -> 10 (upgrade_folders).
+                'max'   => 10,
             ),
             'internal'    => array(
                 'slug'  => 'internal',

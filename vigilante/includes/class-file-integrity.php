@@ -264,6 +264,22 @@ class Vigilante_File_Integrity {
     const BASELINE_OPTION = 'vigilante_critical_files_baseline';
 
     /**
+     * Key of the Secrets API drop-in in the baseline and in the results
+     *
+     * WordPress loads WP_CONTENT_DIR/secrets.php on every request where it has
+     * the Secrets API (wp_load_secrets_dropin(), wp-includes/load.php:872 in
+     * 7.2-beta5), to keep the secrets of the site somewhere else than the
+     * database. It is code that runs everywhere and it can hold the
+     * credentials of that store, so it is watched like the two configuration
+     * files, with three differences: its lines are never kept, only a hash and
+     * its size; it is reported when it appears and when it goes, not only when
+     * it changes; and it is read from WP_CONTENT_DIR, not from ABSPATH.
+     *
+     * @since 3.0.13
+     */
+    const SECRETS_DROPIN = 'wp-content/secrets.php';
+
+    /**
      * Option that records which version last redacted the stored baseline.
      *
      * @since 2.11.2
@@ -563,6 +579,11 @@ class Vigilante_File_Integrity {
      * @return string Content safe to store, or '' when it cannot be made safe.
      */
     private function baseline_content( $filename, $normalized ) {
+        // Never its lines: it can hold the credentials of a secrets store.
+        if ( self::SECRETS_DROPIN === $filename ) {
+            return '';
+        }
+
         if ( '.htaccess' === $filename ) {
             return $this->redact_server_secrets( $normalized );
         }
@@ -2328,6 +2349,10 @@ class Vigilante_File_Integrity {
         if ( ! empty( $options['scan_critical_config'] ) && ! $this->is_time_exceeded() ) {
             $critical_results = $this->scan_critical_root_files();
             $results['modified'] = array_merge( $results['modified'], $critical_results );
+
+            $dropin_results      = $this->scan_secrets_dropin();
+            $results['modified'] = array_merge( $results['modified'], $dropin_results['modified'] );
+            $results['errors']   = array_merge( $results['errors'], $dropin_results['errors'] );
         } elseif ( ! empty( $options['scan_critical_config'] ) ) {
             $not_checked['areas'][] = 'config';
         }
@@ -4298,6 +4323,12 @@ class Vigilante_File_Integrity {
      * @return string|false Absolute path, or false when it cannot be found.
      */
     private function critical_file_path( $filename ) {
+        if ( self::SECRETS_DROPIN === $filename ) {
+            $path = WP_CONTENT_DIR . '/secrets.php';
+
+            return file_exists( $path ) ? $path : false;
+        }
+
         $root = untrailingslashit( ABSPATH );
         $path = $root . '/' . $filename;
 
@@ -4319,6 +4350,234 @@ class Vigilante_File_Integrity {
         }
 
         return false;
+    }
+
+    /**
+     * Compare the Secrets API drop-in with the state last approved
+     *
+     * Reported when it is there and nothing approved it, when it is not the
+     * copy approved, and when it went after being approved. Most sites never
+     * have one, and then this finds nothing; a site that already had one when
+     * it updated is asked once to approve it, because nothing tells a drop-in
+     * from the host from one written by somebody who got in.
+     *
+     * @since 3.0.13
+     *
+     * @return array{modified:array,errors:array}
+     */
+    private function scan_secrets_dropin() {
+        $found    = array(
+            'modified' => array(),
+            'errors'   => array(),
+        );
+        $baseline = $this->get_critical_files_baseline();
+        $record   = isset( $baseline[ self::SECRETS_DROPIN ] ) && is_array( $baseline[ self::SECRETS_DROPIN ] ) ? $baseline[ self::SECRETS_DROPIN ] : array();
+        $known    = isset( $record['hash'] ) && is_string( $record['hash'] ) && '' !== $record['hash'];
+        $path     = $this->critical_file_path( self::SECRETS_DROPIN );
+
+        if ( false === $path ) {
+            if ( $known ) {
+                $found['modified'][] = $this->secrets_dropin_finding( 'removed', $record, '', 0 );
+            }
+
+            return $found;
+        }
+
+        $content = file_get_contents( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+        if ( false === $content ) {
+            $found['errors'][] = __( 'wp-content/secrets.php could not be read, so whether it changed was not checked.', 'vigilante' );
+
+            return $found;
+        }
+
+        $hash = self::secrets_dropin_hash( $content );
+
+        // Approved under other keys: the two fingerprints cannot be compared,
+        // and saying the file is not the copy approved would not be true. A
+        // different size still proves a change (the second blind review).
+        if ( $known && self::secrets_dropin_key()['id'] !== ( $record['key'] ?? '' ) ) {
+            $resized             = isset( $record['size'] ) && (int) $record['size'] !== strlen( $content );
+            $found['modified'][] = $this->secrets_dropin_finding( $resized ? 'changed' : 'rekeyed', $record, $hash, strlen( $content ) );
+
+            return $found;
+        }
+
+        if ( $known && hash_equals( $record['hash'], $hash ) ) {
+            return $found;
+        }
+
+        $found['modified'][] = $this->secrets_dropin_finding( $known ? 'changed' : 'appeared', $record, $hash, strlen( $content ) );
+
+        return $found;
+    }
+
+    /**
+     * Fingerprint of the drop-in, line endings aside, keyed
+     *
+     * Keyed, because the fingerprint travels in the scan results, which the
+     * administrator of a subsite sees, and sits in the database: a plain
+     * sha256 of a drop-in copied from a public template with a weak
+     * credential inside can be brute forced offline (the first blind review
+     * of 3.0.13). The key comes from wp_salt( 'auth' ): AUTH_KEY and
+     * AUTH_SALT of wp-config.php, which are not in the database, or, where
+     * they are missing, left as the placeholder (in English or translated) or
+     * repeated, the random salt WordPress generates and keeps for the site.
+     * The first version took AUTH_KEY alone and, without it, a fixed string
+     * anybody can read here (the second blind review).
+     *
+     * @since 3.0.13
+     *
+     * @param string $content File content.
+     * @return string
+     */
+    private static function secrets_dropin_hash( $content ) {
+        return hash_hmac( 'sha256', str_replace( array( "\r\n", "\r" ), "\n", (string) $content ), self::secrets_dropin_key()['key'] );
+    }
+
+    /**
+     * Key of the drop-in fingerprints and a short name for it
+     *
+     * The name is kept next to the fingerprint, so a site whose keys were
+     * replaced is told that the fingerprints cannot be compared, rather than
+     * that the file changed.
+     *
+     * @since 3.0.13
+     *
+     * @return array{key:string,id:string}
+     */
+    private static function secrets_dropin_key() {
+        $salt = function_exists( 'wp_salt' ) ? (string) wp_salt( 'auth' ) : '';
+        $key  = 'vigilante-secrets-dropin|' . $salt;
+
+        return array(
+            'key' => $key,
+            'id'  => '' !== $salt ? substr( hash_hmac( 'sha256', 'id', $key ), 0, 12 ) : 'none',
+        );
+    }
+
+    /**
+     * A finding about the drop-in, in the shape of the configuration files
+     *
+     * @since 3.0.13
+     *
+     * @param string $event   appeared, changed, rekeyed or removed.
+     * @param array  $record  What was approved, or an empty array.
+     * @param string $hash    Hash of the file now, or ''.
+     * @param int    $size    Size of the file now.
+     * @return array
+     */
+    private function secrets_dropin_finding( $event, $record, $hash, $size ) {
+        return array(
+            'file'          => self::SECRETS_DROPIN,
+            'type'          => 'critical_config',
+            'expected_hash' => isset( $record['hash'] ) ? (string) $record['hash'] : '',
+            'actual_hash'   => (string) $hash,
+            'baseline_size' => isset( $record['size'] ) ? (int) $record['size'] : 0,
+            'current_size'  => (int) $size,
+            'diff'          => array(
+                'added'       => array(),
+                'removed'     => array(),
+                'unavailable' => true,
+                'not_kept'    => true,
+                'event'       => $event,
+                // Whether this WordPress loads the file at all.
+                'loaded'      => function_exists( 'wp_load_secrets_dropin' ),
+            ),
+        );
+    }
+
+    /**
+     * What the screen says about a finding of the drop-in
+     *
+     * One source for the first render in PHP and for the script, which paints
+     * the results of a new scan, so the two cannot say different things.
+     *
+     * @since 3.0.13
+     *
+     * @return array<string,string>
+     */
+    public static function secrets_dropin_texts() {
+        return array(
+            'appeared'   => __( 'This file appeared, or was already there when nothing had approved it.', 'vigilante' ),
+            'changed'    => __( 'This file is not the copy you approved.', 'vigilante' ),
+            'rekeyed'    => __( 'The security keys of wp-config.php changed since you approved this file, so Vigilant cannot tell whether the file changed too.', 'vigilante' ),
+            'removed'    => __( 'This file was removed after you approved it: secrets the site kept through it can no longer be read through it.', 'vigilante' ),
+            'loaded'     => __( 'WordPress loads it on every request to keep the secrets of the site somewhere else than the database, so any code in it runs everywhere.', 'vigilante' ),
+            'not_loaded' => __( 'This WordPress does not load it, but the versions with the Secrets API load it on every request, so any code in it would run everywhere.', 'vigilante' ),
+            'not_kept'   => __( 'Vigilant does not keep its lines, because it can hold the credentials of a secrets store: open it on the server, and approve it if your host or a plugin you use installed it.', 'vigilante' ),
+        );
+    }
+
+    /**
+     * Approve the drop-in only if it is still what the screen showed
+     *
+     * The Approve button sends the fingerprint of the finding it was painted
+     * with, '' for a drop-in that was gone. Approving records what is on disk
+     * at that moment, so without this a file put there after the scan, for
+     * instance after a "removed" finding, was approved by somebody who never
+     * saw it (the second blind review of 3.0.13).
+     *
+     * @since 3.0.13
+     *
+     * @param string $seen Fingerprint shown, or '' for a removed drop-in.
+     * @return true|WP_Error
+     */
+    public function approve_secrets_dropin_seen( $seen ) {
+        $path = $this->critical_file_path( self::SECRETS_DROPIN );
+        $now  = '';
+
+        if ( false !== $path ) {
+            $content = file_get_contents( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+            if ( false === $content ) {
+                return new WP_Error( 'unreadable', __( 'wp-content/secrets.php could not be read, so it was not approved.', 'vigilante' ) );
+            }
+            $now = self::secrets_dropin_hash( $content );
+        }
+
+        if ( ! is_string( $seen ) || ! hash_equals( $now, $seen ) ) {
+            return new WP_Error( 'changed', __( 'wp-content/secrets.php changed after this scan, so it was not approved. Run a new scan and review it again.', 'vigilante' ) );
+        }
+
+        return $this->approve_secrets_dropin() ? true : new WP_Error( 'failed', __( 'Failed to update baseline.', 'vigilante' ) );
+    }
+
+    /**
+     * Record the drop-in as it is now, or its absence
+     *
+     * Approving a drop-in that is gone removes its record, so a new one that
+     * shows up later is reported again as new.
+     *
+     * @since 3.0.13
+     *
+     * @return bool
+     */
+    private function approve_secrets_dropin() {
+        $baseline = $this->get_critical_files_baseline();
+        $path     = $this->critical_file_path( self::SECRETS_DROPIN );
+
+        if ( false === $path ) {
+            unset( $baseline[ self::SECRETS_DROPIN ] );
+            $this->write_baseline( $baseline );
+
+            return true;
+        }
+
+        $content = file_get_contents( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+        if ( false === $content ) {
+            return false;
+        }
+
+        $baseline[ self::SECRETS_DROPIN ] = array(
+            'hash'    => self::secrets_dropin_hash( $content ),
+            'key'     => self::secrets_dropin_key()['id'],
+            'size'    => strlen( $content ),
+            'content' => '',
+            'updated' => time(),
+        );
+
+        $this->write_baseline( $baseline );
+
+        return true;
     }
 
     private function scan_critical_root_files() {
@@ -5218,6 +5477,10 @@ class Vigilante_File_Integrity {
      * @return bool True on success.
      */
     public function update_critical_file_baseline( $filename ) {
+        if ( self::SECRETS_DROPIN === $filename ) {
+            return $this->approve_secrets_dropin();
+        }
+
         $full_path = $this->critical_file_path( $filename );
 
         if ( false === $full_path ) {

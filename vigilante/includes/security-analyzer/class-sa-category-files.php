@@ -1,10 +1,10 @@
 <?php
 /**
- * Security Analyzer — Sensitive files category (9 pts).
+ * Security Analyzer — Sensitive files category (10 pts).
  *
  * Checks: debug_log_public (2), env_file (2), git_config (1),
- * wp_config_backups (2), uploads_listing (1), phpinfo_adminer (1),
- * wp_cron_public (informative since 3.0.7).
+ * wp_config_backups (2), uploads_listing (1), upgrade_folders (1, since
+ * 3.0.13), phpinfo_adminer (1), wp_cron_public (informative since 3.0.7).
  *
  * @package Vigilante
  * @since   2.1.0
@@ -51,6 +51,7 @@ class Vigilante_SA_Category_Files {
         $results[] = $this->check_git_config();
         $results[] = $this->check_wp_config_backups();
         $results[] = $this->check_uploads_listing();
+        $results[] = $this->check_upgrade_folders();
         $results[] = $this->check_phpinfo_adminer();
         $results[] = $this->check_wp_cron_public();
 
@@ -220,6 +221,183 @@ class Vigilante_SA_Category_Files {
 
         $args['detail'] = __( 'No directory listing markers found in the /uploads/ response.', 'vigilante' );
         return Vigilante_SA_Check_Result::pass( $args );
+    }
+
+    /**
+     * Whether the server refuses requests to the folders where WordPress unpacks updates
+     *
+     * Measured, not read from the setting: it asks for a PHP file that does
+     * not exist inside wp-content/upgrade/ and for one beside it, outside, and
+     * passes only when the first is refused and the second is not. A server
+     * that refuses both could be refusing every unknown file of wp-content, and
+     * then nothing tells whether a real file of an update would be served, so
+     * that is not scored. Neither is an answer that is not about the file (a
+     * verification screen, a rate limit, a server error, a redirect). An
+     * untouched WordPress fails: the folder is served like any other, and a
+     * file of an update can be called by its address while the update lasts
+     * (CVE-2026-119977).
+     *
+     * A PHP file, because that is what the attack asks for. The first version
+     * asked for a .txt, and the first blind review of 3.0.13 measured a server
+     * that hands PHP files to PHP-FPM with ProxyPassMatch: it never reads
+     * .htaccess for them, so the real setup-config.php was served with the
+     * rule in place while the .txt was refused and the row passed.
+     *
+     * The address is built from site_url() and the path of the content folder
+     * inside ABSPATH, which is what the rule covers, and no redirect is
+     * followed, as in the other checks: WP_CONTENT_URL can point to a CDN that
+     * has no such folder, and the row would have measured that host.
+     *
+     * @since 3.0.13
+     *
+     * @return Vigilante_SA_Check_Result
+     */
+    private function check_upgrade_folders() {
+        $args = array(
+            'id'       => 'upgrade_folders',
+            'category' => self::SLUG,
+            'max'      => 1,
+            'label'    => __( 'Web access to the update folders (wp-content/upgrade)', 'vigilante' ),
+            'fix_link' => Vigilante_SA_Helpers::build_fix_url( 'firewall', 'field-protect-upgrade-folders' ),
+        );
+
+        $base = self::upgrade_probe_base();
+        if ( '' === $base ) {
+            $args['detail'] = __( 'The content folder of this site is not inside the WordPress folder, at an address of this site, so whether files of an update can be reached from the web was not checked. Not scored.', 'vigilante' );
+            return Vigilante_SA_Check_Result::skip( $args );
+        }
+
+        $name    = 'vigilante-check-' . substr( md5( (string) wp_rand() ), 0, 12 ) . '.php';
+        $inside  = self::upgrade_probe_code( $base . 'upgrade/' . $name );
+        $outside = null === $inside ? null : self::upgrade_probe_code( $base . $name );
+
+        if ( null === $inside || null === $outside ) {
+            $args['detail'] = Vigilante_SA_Helpers::unreachable_detail( '/wp-content/upgrade/' );
+            return Vigilante_SA_Check_Result::skip( $args );
+        }
+
+        $refused  = static function ( $code ) {
+            return 401 === $code || 403 === $code;
+        };
+        $answered = static function ( $code ) {
+            return 404 === $code || ( $code >= 200 && $code < 300 );
+        };
+
+        if ( $refused( $inside ) && $answered( $outside ) ) {
+            $args['detail'] = __( 'The server refuses requests to wp-content/upgrade/, where WordPress unpacks updates.', 'vigilante' );
+            return Vigilante_SA_Check_Result::pass( $args );
+        }
+
+        if ( ! $answered( $inside ) || ! $answered( $outside ) ) {
+            $args['detail'] = sprintf(
+                /* translators: 1: HTTP status of a request inside wp-content/upgrade/, 2: HTTP status of a request outside it */
+                __( 'The server answered %1$d inside wp-content/upgrade/ and %2$d outside it, so whether files of an update can be reached from the web could not be told. Not scored.', 'vigilante' ),
+                $inside,
+                $outside
+            );
+            return Vigilante_SA_Check_Result::skip( $args );
+        }
+
+        $args['detail'] = __( 'Files in wp-content/upgrade/, where WordPress unpacks updates, can be requested from the web while an update lasts.', 'vigilante' ) . ' ' . $this->upgrade_folders_cause();
+        return Vigilante_SA_Check_Result::fail( $args );
+    }
+
+    /**
+     * Address of the content folder for the probes, with a trailing slash, or ''
+     *
+     * From site_url() and the path of WP_CONTENT_DIR inside ABSPATH, which is
+     * where the .htaccess of Vigilant applies. A content folder outside ABSPATH
+     * is asked at content_url() only while that is on the host of the site.
+     *
+     * @since 3.0.13
+     *
+     * @return string
+     */
+    private static function upgrade_probe_base() {
+        $root    = untrailingslashit( wp_normalize_path( ABSPATH ) );
+        $content = untrailingslashit( wp_normalize_path( WP_CONTENT_DIR ) );
+
+        if ( '' !== $root && 0 === strpos( $content, $root . '/' ) ) {
+            return trailingslashit( trailingslashit( site_url() ) . substr( $content, strlen( $root ) + 1 ) );
+        }
+
+        $site_host    = strtolower( (string) wp_parse_url( site_url(), PHP_URL_HOST ) );
+        $content_host = strtolower( (string) wp_parse_url( content_url(), PHP_URL_HOST ) );
+
+        return ( '' !== $site_host && $site_host === $content_host ) ? trailingslashit( content_url() ) : '';
+    }
+
+    /**
+     * Status of one request of check_upgrade_folders(), or null with no answer
+     *
+     * A query string of its own on every request, so a cache in front of the
+     * site cannot answer with what it kept from the last check. No redirect is
+     * followed: one is not the server refusing or serving the file.
+     *
+     * @since 3.0.13
+     *
+     * @param string $url Address to ask for.
+     * @return int|null
+     */
+    private static function upgrade_probe_code( $url ) {
+        $response = Vigilante_SA_Helpers::get( add_query_arg( 'v', (string) time(), $url ), array( 'redirection' => 0 ) );
+
+        if ( is_wp_error( $response ) ) {
+            return null;
+        }
+
+        return (int) wp_remote_retrieve_response_code( $response );
+    }
+
+    /**
+     * Why the update folders are open, read from the file before the settings
+     *
+     * The rule lives in the .htaccess the whole network shares, so the file
+     * says whether it is written, and the settings only add why not where this
+     * site owns that file. Elsewhere it is the network administrator's call.
+     *
+     * @since 3.0.13
+     *
+     * @return string
+     */
+    private function upgrade_folders_cause() {
+        require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-manager.php';
+        require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-protection.php';
+
+        $manager = Vigilante_Htaccess_Manager::get_instance();
+
+        if ( ! $manager->is_apache() ) {
+            return __( 'This server does not read .htaccess, so Vigilant cannot close them: block /wp-content/upgrade/ and /wp-content/upgrade-temp-backup/ in the server configuration.', 'vigilante' );
+        }
+
+        if ( false !== strpos( (string) $manager->get_content(), '/+upgrade(-temp-backup)?/' ) ) {
+            return __( 'The rule of Update Folders is in .htaccess, but the answer for PHP files does not come from it. The usual causes: a server that hands them to PHP-FPM with ProxyPassMatch, which never reads .htaccess for them, a hosting that does not read that file at all, or a proxy in front that answers for them first. Block the two folders in the server configuration, or ask the hosting how PHP files are passed.', 'vigilante' );
+        }
+
+        // This file is loaded late, from disk, when the analyzer runs. In the
+        // cron run in which WordPress updates Vigilant, the protection class
+        // in memory is still the one of the version being replaced, which has
+        // no such method, and a weekly scan falling due in that run would end
+        // in a fatal error (L2 of poc/tareas-305.sh; vigilante/CLAUDE.md).
+        if ( method_exists( 'Vigilante_Htaccess_Protection', 'upgrade_folders_location' ) && null === Vigilante_Htaccess_Protection::upgrade_folders_location() ) {
+            return __( 'On this site the content folder is outside the WordPress folder, or its address has characters the rule cannot use, so Vigilant does not write it: block those folders in the server configuration.', 'vigilante' );
+        }
+
+        if ( ! Vigilante_Settings::owns_shared_files() ) {
+            return __( 'The network administrator can switch on Update Folders in the Firewall tab of the main site.', 'vigilante' );
+        }
+
+        if ( ! $this->settings->is_module_enabled( 'firewall' ) ) {
+            return Vigilante_SA_Helpers::module_off_detail( $this->settings, 'firewall' );
+        }
+
+        $firewall = $this->settings->get_section( 'firewall' );
+
+        if ( empty( $firewall['protect_upgrade_folders'] ) ) {
+            return __( 'Switch on Update Folders in Firewall, Server Protection.', 'vigilante' );
+        }
+
+        return __( 'Update Folders is on but its rule is not in .htaccess yet: save the Firewall tab once.', 'vigilante' );
     }
 
     private function check_phpinfo_adminer() {

@@ -4,7 +4,7 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.0.12
+Stable tag: 3.0.13
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -76,10 +76,11 @@ Block malicious requests before they reach WordPress:
 * Rate limiting against DDoS and brute force, with optional progressive lockouts
 * IP whitelist and blacklist management (IPv4 and IPv6, with CIDR ranges and wildcards)
 * User-Agent whitelist and blacklist with partial matching
-* Visitor IP detection control - read the real IP directly from the connection (a spoof-proof default) or from a proxy header when behind Cloudflare, a reverse proxy or a load balancer, with an admin notice if a proxy is detected but not configured
+* Visitor IP detection: from the connection by default, which cannot be spoofed, or from a proxy header behind Cloudflare, a reverse proxy or a load balancer, with a notice when a proxy is detected but not set up
 * HTTP method restriction
 * Server-level file protection via .htaccess: block direct access to wp-config.php, .htaccess, wp-includes/ and sensitive files (.log, .sql, .bak, .ini, debug.log, readme.html, etc.)
 * Block PHP execution in /uploads (one of the most common post-exploit vectors)
+* Block web access to the folders where WordPress unpacks updates
 * Disable directory browsing
 
 == Login Security ==
@@ -136,7 +137,7 @@ Detect unauthorized changes to your files and compromised plugins:
 * WordPress core against official checksums, plus files added to wp-admin and wp-includes
 * Plugins against WordPress.org checksums, themes against their WordPress.org package
 * Whatever has no official copy (other plugins and themes, must-use plugins, drop-ins, the rest of wp-content) searched for hidden code
-* Critical config files (wp-config.php, .htaccess) monitored against baseline, detecting code injection even in files with no official checksum
+* Critical config files (wp-config.php, .htaccess, the secrets.php drop-in) monitored against baseline, detecting code injection even in files with no official checksum
 * Closed and removed plugins detection: a daily check against WordPress.org flags any installed plugin that was closed or silently removed, with per-plugin Ignore
 * Line-level diff view of changes, with per-file approval workflow
 * Extra file detection in plugins and themes (files not in original distribution)
@@ -171,6 +172,7 @@ Track everything happening on your site:
 * Content modifications (posts, pages)
 * Plugin and theme activations/deactivations
 * Security events and blocked threats
+* Secrets API changes, by name, never by value
 * HTTP request method tracking and filtering (GET, POST, PUT, DELETE)
 * Enhanced log detail popup with grouped sections and quick actions
 * One-click add IP or User-Agent to firewall whitelist/blacklist from log entries
@@ -180,7 +182,7 @@ Track everything happening on your site:
 **Audit Alerts** - get an email when the audit log points to something worth your attention, off by default and configured under Security Audit:
 
 * Immediate alerts the moment a serious event is logged, by minimum severity (a new administrator, a closed plugin or a privilege escalation are all logged as Critical)
-* Threshold alerts when a category spikes - firewall blocks, login failures, user, plugin, file integrity, security, system and content events - over a 30-minute, 1, 6 or 24 hour window, counting only warning and critical events so routine activity never trips them
+* Threshold alerts when a category of events spikes within 30 minutes, or 1, 6 or 24 hours, counting only warning and critical events so routine activity never trips them
 * A single anti-repeat cooldown keeps a storm of events down to one notice instead of flooding your inbox
 * Active alerts surface in Settings & Tools, the Dashboard, the configuration level and the Security Check
 * "Send test email" button to confirm delivery
@@ -440,7 +442,12 @@ Vigilant writes these blocks when you save its settings and after it updates, no
 
 = I updated from a version that stored wp-config.php in the database. Is there anything else to do? =
 
-Previous versions kept a copy of wp-config.php in an option so the integrity scan could show which lines had changed, and that copy carried the database password and the eight authentication keys and salts. Updating removes the copy, but no update can undo an exposure that already happened. So if your database, or any backup of it, may have been read by somebody else while that copy was stored, replace the eight keys and salts in your wp-config.php with fresh ones from the WordPress.org secret-key service, and change the database password if your host lets you. Replacing the salts signs everybody out, yourself included, which is the whole point of doing it.
+Previous versions kept a copy of wp-config.php in an option, with the database password and the eight authentication keys and salts. Updating removes the copy, but cannot undo an exposure that already happened. If your database, or a backup of it, may have been read by somebody else while that copy was stored:
+
+* Replace the eight keys and salts in wp-config.php with fresh ones from the WordPress.org secret-key service. Everybody is signed out, you included, which is the point. If File Integrity watches a wp-content/secrets.php, approve it once more afterwards.
+* Have a backup code at hand first if you use an authenticator app with Vigilant: new keys stop the app codes from working. A backup code still lets you in, and you can set the app up again from your profile.
+* Do not replace WP_SECRETS_KEY with them, if your wp-config.php has it: it is not one of the eight, and a new one makes every secret kept with the WordPress Secrets API unreadable.
+* Change the database password if your host lets you.
 
 = Does a scan always check the whole site? =
 
@@ -544,6 +551,17 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 
 == Changelog ==
 
+= 3.0.13 =
+Closes wp-content/upgrade, where WordPress unpacks updates, to web requests and checks it in Security Check. Watches the secrets.php drop-in, logs changes to WordPress secrets and explains two factor errors after new security keys.
+
+* Improved: a new Update Folders setting in Firewall, Server Protection, on by default, closes wp-content/upgrade and wp-content/upgrade-temp-backup to web requests. WordPress unpacks every update there before moving it into place, and CVE-2026-119977 was exploited by calling a file of a WordPress update while it was being unpacked; the update to the version that fixes it is still unpacked by the code it replaces, so a firewall inside WordPress cannot see that request. Vigilant writes two rules, so the block holds when a .htaccess further down switches rewriting on, ignores case and repeated slashes, and follows a content folder renamed inside the WordPress folder. Existing sites with the Firewall module on get it when they update, without saving anything. Nginx does not read .htaccess, and a server that hands PHP files to PHP-FPM with ProxyPassMatch does not read it for them: there, block those two folders in the server configuration. The new Security Check row says which case a site is in.
+* Improved: Security Check has a new row in Sensitive files that asks the server for a PHP file that does not exist inside wp-content/upgrade and for one outside it, and passes only when the first is refused and the second is not. A server that refuses both is not scored, because it cannot be told apart. Sensitive files now scores out of 10.
+* Improved: File Integrity watches wp-content/secrets.php, the drop-in WordPress loads on every request where it has the Secrets API, as it watches wp-config.php and .htaccess: it says when the file appears, changes or goes, and asks you to approve it. Its lines are never stored, only a fingerprint keyed with the security keys of wp-config.php and its size, because it can hold the credentials of a secrets store. A site that already has one is asked once, and so is a site whose security keys are replaced, because the fingerprint is keyed with them. Approving takes the file as the scan saw it: if it changed since, scan again. On a network, approving or ignoring it takes a network administrator.
+* Improved: the activity log records every change to a secret of the WordPress Secrets API, with its name and never its value. A secret that goes back within a day to a value it had and that was replaced by another is logged as critical, so the audit alerts can send it: putting back a key that was rotated is what somebody who knew the old one would do. Deleting a secret and creating it again with the same value is not.
+* Improved: when the codes of an authenticator app can no longer be checked because the security keys of wp-config.php were replaced, the two factor screen says so and points to the backup codes, and the activity log says why. It used to say Authentication error.
+* Fix: after ignoring a file in File Integrity, the list of ignored files shows it right away. Until now the count above the list said one more than the table until the page was reloaded. Reported by Juan Díez.
+* Fix: after approving a change to wp-config.php or .htaccess in File Integrity, its line changes no longer stay open on screen until the page is reloaded.
+
 = 3.0.12 =
 Fixes the IP login lockout and the activity log on servers that report table names in lower case, adds a daily limit to wrong two factor codes, saves old browser versions in the User-Agent blacklist again and uses SAMEORIGIN in the Maximum preset.
 
@@ -627,30 +645,12 @@ Security Check tells a firewall verification screen, a stale cache and headers s
 * Fix: the Run Scan Now button deleted the previous result before scanning, so a scan stopped halfway left the tab empty, and it ran with the memory limit of php.ini instead of the one WordPress gives the dashboard.
 * Fix: the scan did not take the time limit of PHP into account, so on hosting that gives a request 30 seconds a scan could be stopped halfway. It now asks for more time and, when the hosting does not allow it, stops in time to save its result, measuring the time as PHP counts it on that server, and says so in the list of what it did not check.
 
-= 3.0.7 =
-Scheduled tasks run again when a cron job calls wp-cron.php by its address. Saving WP Hardening no longer breaks a wp-config.php with a define over several lines, and PHP in uploads can no longer be reached in three ways that bypassed the rule.
-
-* Improved: the Security Check row about wp-cron.php is informational and no longer scores. A request to that file only runs the scheduled tasks that are already due, so a reachable wp-cron.php is normal. When the server refuses it, the row says that a cron job calling its address gets the same answer. A report stored before the update shows that row without points until the next scan. With it, the total of Security Check is one point lower.
-* Fix: Protect wp-cron.php denied every request to wp-cron.php, including the cron job of a server that calls its address with wget, curl or the cron of a hosting panel, and the scheduled tasks stopped running. The option is retired, and Vigilant takes its rule out of .htaccess when it rewrites its rules after the update; if the file cannot be rewritten, the Security Check row about wp-cron.php says that the server refuses it. A cron job that runs wp-cron.php with PHP was never affected, and on those sites wp-cron.php can be reached again, which only lets anybody run the tasks that are already due.
-* Fix: Block Bad Bots turned away a cron job that calls wp-cron.php with wget (in .htaccess) or with curl, so on a server set up that way the scheduled tasks did not run. That list now lets requests to wp-cron.php through. Every other firewall rule still applies to them.
-* Fix: with the Firewall module switched off, the Vigilant block of .htaccess kept the firewall rules in force: bad bots, bad query strings, HTTP methods, wp-config.php, sensitive files, directory listing and PHP in uploads, wp-includes, plugins and themes. It now carries only the Server Identity rules of the Security Headers tab while they are on, and goes away when both are off. Sites with the module off get the block rewritten on update.
-* Fix: importing settings with the Firewall module off removed that .htaccess block even when Server Signature or Remove Fingerprinting Headers asked for it, and deactivating and activating Vigilant left it out in the same case. The refresh after an update now also takes out a block that nothing asks for, as saving does.
-* Fix: in a WordPress installed in a subfolder, or on a network by subdirectories, a restrictive Content Security Policy also reached the admin, because the exception for it only matched /wp-admin at the root of the domain. It now matches /wp-admin as a folder anywhere in the address, and no longer covers root addresses that merely start with /wp-admin, such as /wp-admin-tips/.
-* Fix: on PHP 8, with Under Attack on, a visitor could cause a fatal error on the challenge page by sending its redirect field as a list, and the same happened with redirect_to when a login with two-factor authentication started. Both are now read only as text.
-* Fix: when the WordPress block of .htaccess had lost its END line, the notice and the log entry said that a Vigilant block was broken. They now name the WordPress block.
-* Fix: saving the WP Hardening tab with a define() of wp-config.php written over several lines, such as WP_DEBUG, commented out only its first line and left the file with a syntax error that took the site down. Every line of it is commented now, a define() that shares its line with other code is left alone, and Vigilant never writes wp-config.php unless the result is valid PHP.
-* Fix: saving WP Hardening commented out the constants of the owner that Vigilant manages, such as DISALLOW_FILE_MODS, DISABLE_WP_CRON, FORCE_SSL_ADMIN or WP_DEBUG_LOG, even when their setting was off, so they stopped applying with nothing in their place. Only the constants that the Vigilant block defines are commented now. Where this already happened, they come back the next time that tab is saved.
-* Fix: Vigilant wrote wp-config.php up to four times in a row to apply those settings, so a failure halfway left it changed. It now prepares the whole change, writes the file once with a lock and reads it back, and if the write is cut short it puts the previous content back.
-* Fix: the rule that blocks PHP in uploads could be bypassed in three ways: a path after the file name (file.php/anything) ran the file, another letter case (file.PHP) served its source code or ran it, depending on the server, and an .htaccess with rewrite rules of its own in a folder of uploads, which image plugins write, switched the rule off below it. On Apache 2.4 it now holds in the three cases, and it also covers .php7, .php8 and .phps. The File Integrity finding about such an .htaccess now says that it only switches the rule off outside Apache 2.4.
-* Fix: each time Vigilant wrote its .htaccess rules it deleted the blocks named # BEGIN SECURITY HEADERS, # BEGIN 8G FIREWALL and # BEGIN ADDITIONAL PROTECTIONS, taking them for leftovers of an old version. No version of Vigilant wrote them: they are usually rules pasted from a guide or written by another plugin, and they now stay.
-* Fix: switching Under Attack on or off showed in File Integrity as a change to .htaccess, and its block was not checked for a missing marker before Vigilant wrote that file.
-
 For older changelog entries, please check the [changelog.txt](https://plugins.svn.wordpress.org/vigilante/trunk/changelog.txt) file
 
 == Upgrade Notice ==
 
-= 3.0.12 =
-Fixes the IP login lockout and the activity log on servers that report table names in lower case, adds a daily limit to wrong two factor codes, saves old browser versions in the User-Agent blacklist again and uses SAMEORIGIN in the Maximum preset.
+= 3.0.13 =
+Closes wp-content/upgrade, where WordPress unpacks updates, to web requests and checks it in Security Check. Watches the secrets.php drop-in, logs changes to WordPress secrets and explains two factor errors after new security keys.
 
 == Support ==
 

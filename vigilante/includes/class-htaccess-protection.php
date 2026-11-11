@@ -205,6 +205,7 @@ class Vigilante_Htaccess_Protection {
      * - "Protect wp-config.php"   -> protect_wp_config           -> Files wp-config.php
      * - "Protect wp-includes"     -> protect_wp_includes         -> RewriteRule wp-includes
      * - "PHP in Uploads"          -> protect_uploads_php         -> RewriteRule uploads/*.php
+     * - "Update Folders"          -> protect_upgrade_folders     -> RewriteRule + RedirectMatch wp-content/upgrade
      * - "Sensitive Files"         -> protect_sensitive_files     -> FilesMatch extensions
      * - "Limit HTTP Methods"      -> limit_http_methods          -> RewriteCond REQUEST_METHOD
      * 
@@ -430,6 +431,45 @@ class Vigilante_Htaccess_Protection {
             $rules[] = '';
         }
 
+        // Option: protect_upgrade_folders
+        // UI: "Update Folders" checkbox
+        //
+        // WordPress unpacks every update into wp-content/upgrade/ and, since
+        // 6.3, moves the copy it replaces into wp-content/upgrade-temp-backup/.
+        // Both are served by the web server like any other folder, so for as
+        // long as an update lasts its files can be requested by their address,
+        // and CVE-2026-119977 was exactly that: the setup-config.php of the
+        // copy being unpacked, called before WordPress moved it. 7.1.4 makes
+        // the folder name hard to guess, but the update to 7.1.4 is unpacked by
+        // the code it replaces, and a firewall inside WordPress never sees that
+        // request, because it runs a file of its own. A rule of the server does.
+        //
+        // Two rules, measured with the Apache of Local on 11 Nov 2026 (18
+        // addresses each). The rewrite rule alone is switched off by any
+        // .htaccess below it with RewriteEngine On, in wp-content or inside the
+        // package itself, and then every address was served; the alias rule is
+        // inherited whatever the folders below say. The alias rule alone let
+        // /wp-content/UPGRADE/ through on a file system that ignores case and
+        // /wp-content//upgrade/ with MergeSlashes Off; it now ignores case and
+        // accepts repeated slashes. Nothing is ever written inside
+        // wp-content/upgrade/: WordPress empties that folder before every
+        // update (only from 7.1.4 does it keep the index.php there).
+        if ( $firewall && ! empty( $this->options['protect_upgrade_folders'] ) ) {
+            $location = self::upgrade_folders_location();
+
+            if ( null !== $location ) {
+                $rules[] = '# Block web access to the folders where WordPress unpacks updates';
+                $rules[] = '<IfModule mod_rewrite.c>';
+                $rules[] = '    RewriteEngine On';
+                $rules[] = '    RewriteRule ^' . $location['relative'] . '/+upgrade(-temp-backup)?/ - [F,L,NC]';
+                $rules[] = '</IfModule>';
+                $rules[] = '<IfModule mod_alias.c>';
+                $rules[] = '    RedirectMatch 403 (?i)^' . $location['address'] . '/+upgrade(-temp-backup)?/';
+                $rules[] = '</IfModule>';
+                $rules[] = '';
+            }
+        }
+
         // Option: protect_wp_includes
         // UI: "Protect wp-includes" checkbox
         if ( $firewall && ! empty( $this->options['protect_wp_includes'] ) ) {
@@ -489,6 +529,75 @@ class Vigilante_Htaccess_Protection {
     }
 
     /**
+     * Where the update folders are, as the rules of this block see them
+     *
+     * The block lives in the .htaccess of ABSPATH (Vigilante_Htaccess_Manager),
+     * so the rewrite rule names the content folder relative to ABSPATH, and the
+     * alias rule, which matches the whole address of the request, adds the path
+     * of site_url(), which is the address of ABSPATH. Both come from
+     * WP_CONTENT_DIR, the folder WordPress unpacks into
+     * (WP_Upgrader::unpack_package(), wp-admin/includes/class-wp-upgrader.php:382
+     * in 7.1.4), because a site may rename it.
+     *
+     * The alias rule is anchored to that address rather than left to match
+     * anywhere, as a hand-written rule usually is: with a renamed content
+     * folder such as "content", an unanchored /content/upgrade/ would also
+     * deny a page of the site at that address.
+     *
+     * Null when the rules cannot reach the folder: when it is not inside
+     * ABSPATH (Bedrock keeps it beside WordPress, and the .htaccess of ABSPATH
+     * does not govern it), or when a part of either path is not a plain name,
+     * because that part would have to be written into a regular expression and
+     * an Apache directive.
+     *
+     * @since 3.0.13
+     *
+     * @param string|null $root     ABSPATH, or another for the harness.
+     * @param string|null $content  WP_CONTENT_DIR, or another.
+     * @param string|null $site_url site_url(), or another.
+     * @return array{relative:string,address:string}|null Both as regular
+     *         expressions, slashes repeated allowed: 'relative' for the rewrite
+     *         rule, 'address' for the alias rule, which starts with a slash.
+     */
+    public static function upgrade_folders_location( $root = null, $content = null, $site_url = null ) {
+        if ( null === $content && ! defined( 'WP_CONTENT_DIR' ) ) {
+            return null;
+        }
+
+        $root    = untrailingslashit( wp_normalize_path( null === $root ? ABSPATH : (string) $root ) );
+        $content = untrailingslashit( wp_normalize_path( null === $content ? WP_CONTENT_DIR : (string) $content ) );
+
+        if ( '' === $root || 0 !== strpos( $content, $root . '/' ) ) {
+            return null;
+        }
+
+        $inside    = explode( '/', substr( $content, strlen( $root ) + 1 ) );
+        $site_path = (string) wp_parse_url( null === $site_url ? site_url() : (string) $site_url, PHP_URL_PATH );
+        $above     = '' === trim( $site_path, '/' ) ? array() : explode( '/', trim( $site_path, '/' ) );
+
+        // \z and not $, which also matches before a final line break: a path
+        // ending in one would write a loose line into .htaccess and every page
+        // would answer 500 (the first blind review of 3.0.13).
+        foreach ( array_merge( $above, $inside ) as $part ) {
+            if ( '.' === $part || '..' === $part || 1 !== preg_match( '/^[A-Za-z0-9._~-]+\z/', $part ) ) {
+                return null;
+            }
+        }
+
+        // Of the characters let through above only the dot means something in a
+        // regular expression; escaping it alone keeps the rule as readable as
+        // the one people copy by hand (wp-content, not wp\-content).
+        $quote = static function ( $parts ) {
+            return implode( '/+', str_replace( '.', '\\.', $parts ) );
+        };
+
+        return array(
+            'relative' => $quote( $inside ),
+            'address'  => '/+' . $quote( array_merge( $above, $inside ) ),
+        );
+    }
+
+    /**
      * Generate rules for display/preview
      *
      * @return string
@@ -539,6 +648,10 @@ class Vigilante_Htaccess_Protection {
 
         if ( ! empty( $this->options['protect_uploads_php'] ) ) {
             $preview[] = __( 'Block PHP execution in uploads', 'vigilante' );
+        }
+
+        if ( ! empty( $this->options['protect_upgrade_folders'] ) ) {
+            $preview[] = __( 'Block web access to the folders where WordPress unpacks updates', 'vigilante' );
         }
 
         if ( ! empty( $this->options['protect_wp_includes'] ) ) {

@@ -109,6 +109,9 @@ class Vigilante_Settings {
                 'protect_wp_config'          => true,
                 'protect_wp_includes'        => true,
                 'protect_uploads_php'        => true,
+                // Since 3.0.13: wp-content/upgrade and upgrade-temp-backup, where
+                // WordPress unpacks updates (Vigilante_Htaccess_Protection).
+                'protect_upgrade_folders'    => true,
                 'protect_sensitive_files'    => true,
                 // There was a protect_wp_cron here until 3.0.6. It denied every
                 // HTTP request to wp-cron.php, including the cron job of a server
@@ -897,7 +900,7 @@ class Vigilante_Settings {
         return array(
             'security_headers' => true,
             'wp_hardening'     => array( 'disallow_file_edit', 'disallow_file_mods', 'force_ssl_admin', 'force_ssl_login', 'wp_debug', 'disable_wp_cron' ),
-            'firewall'         => array( 'disable_directory_browsing', 'protect_wp_config', 'protect_wp_includes', 'protect_uploads_php', 'protect_sensitive_files', 'limit_http_methods', 'block_php_in_plugins', 'block_php_in_themes' ),
+            'firewall'         => array( 'disable_directory_browsing', 'protect_wp_config', 'protect_wp_includes', 'protect_uploads_php', 'protect_upgrade_folders', 'protect_sensitive_files', 'limit_http_methods', 'block_php_in_plugins', 'block_php_in_themes' ),
             'advanced'         => array( 'remove_readme', 'remove_license' ),
         );
     }

@@ -1729,6 +1729,7 @@ class Vigilante_Admin {
             array( 'tab' => 'firewall', 'tab_label' => __( 'Firewall', 'vigilante' ), 'section' => __( 'Server Protection', 'vigilante' ), 'anchor' => 'vigilante-section-firewall-server', 'label' => __( 'Protect wp-config.php', 'vigilante' ), 'label_en' => 'Protect wp-config.php', 'keywords' => _x( 'protect wp-config php protection secure lock', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'firewall', 'tab_label' => __( 'Firewall', 'vigilante' ), 'section' => __( 'Server Protection', 'vigilante' ), 'anchor' => 'vigilante-section-firewall-server', 'label' => __( 'Protect wp-includes', 'vigilante' ), 'label_en' => 'Protect wp-includes', 'keywords' => _x( 'protect wp-includes protection secure lock', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'firewall', 'tab_label' => __( 'Firewall', 'vigilante' ), 'section' => __( 'Server Protection', 'vigilante' ), 'anchor' => 'vigilante-section-firewall-server', 'label' => __( 'PHP in Uploads', 'vigilante' ), 'label_en' => 'PHP in Uploads', 'keywords' => _x( 'php in uploads media upload', 'settings search keywords', 'vigilante' ) ),
+            array( 'tab' => 'firewall', 'tab_label' => __( 'Firewall', 'vigilante' ), 'section' => __( 'Server Protection', 'vigilante' ), 'anchor' => 'vigilante-section-firewall-server', 'label' => __( 'Update Folders', 'vigilante' ), 'label_en' => 'Update Folders', 'keywords' => _x( 'update upgrade folder upgrade-temp-backup temp backup setup-config core', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'firewall', 'tab_label' => __( 'Firewall', 'vigilante' ), 'section' => __( 'Server Protection', 'vigilante' ), 'anchor' => 'vigilante-section-firewall-server', 'label' => __( 'Sensitive Files', 'vigilante' ), 'label_en' => 'Sensitive Files', 'keywords' => _x( 'sensitive files private secret file log', 'settings search keywords', 'vigilante' ) ),
             array( 'tab' => 'firewall', 'tab_label' => __( 'Firewall', 'vigilante' ), 'section' => __( 'Server Protection', 'vigilante' ), 'anchor' => 'vigilante-section-firewall-server', 'label' => __( 'Limit HTTP Methods', 'vigilante' ), 'label_en' => 'Limit HTTP Methods', 'keywords' => _x( 'limit http methods', 'settings search keywords', 'vigilante' ) ),
             // Security Headers
@@ -2007,7 +2008,8 @@ class Vigilante_Admin {
                 /* translators: %d: number of files on the ignore list, two or more. */
                 'clearIgnoredMany'    => __( 'Stop ignoring all %d files', 'vigilante' ),
                 'ignoredSummaryNone'  => __( 'None', 'vigilante' ),
-                'ignoredReloadToSee'  => __( 'Reload the page to see the files ignored since it was opened.', 'vigilante' ),
+                'stopIgnoring'        => __( 'Stop ignoring', 'vigilante' ),
+                'stopIgnoringSelected' => __( 'Stop ignoring selected', 'vigilante' ),
                 'ignoredSummaryOne'   => __( '1 file', 'vigilante' ),
                 /* translators: %d: number of files being ignored, two or more. */
                 'ignoredSummaryMany'  => __( '%d files', 'vigilante' ),
@@ -2041,6 +2043,14 @@ class Vigilante_Admin {
                 'diffNetwork'         => __( 'This file belongs to the whole network, so its line changes are only shown to network administrators, on the main site.', 'vigilante' ),
                 'diffRescan'          => __( 'Run a new scan to see the line changes of this file.', 'vigilante' ),
                 'diffRedaction'       => __( 'The line changes of this file are not shown because a value in it could not be hidden safely. The change itself is still detected.', 'vigilante' ),
+                // The Secrets API drop-in (3.0.13), from its single source.
+                'dropinAppeared'      => Vigilante_File_Integrity::secrets_dropin_texts()['appeared'],
+                'dropinChanged'       => Vigilante_File_Integrity::secrets_dropin_texts()['changed'],
+                'dropinRekeyed'       => Vigilante_File_Integrity::secrets_dropin_texts()['rekeyed'],
+                'dropinRemoved'       => Vigilante_File_Integrity::secrets_dropin_texts()['removed'],
+                'dropinLoaded'        => Vigilante_File_Integrity::secrets_dropin_texts()['loaded'],
+                'dropinNotLoaded'     => Vigilante_File_Integrity::secrets_dropin_texts()['not_loaded'],
+                'dropinNotKept'       => Vigilante_File_Integrity::secrets_dropin_texts()['not_kept'],
                 'diffEmpty'           => __( 'No line-level changes detected (may be whitespace or reordering).', 'vigilante' ),
                 'diffLines'           => __( 'lines', 'vigilante' ),
                 // Under Attack mode strings
@@ -4895,6 +4905,22 @@ class Vigilante_Admin {
                                 <input type="checkbox" name="firewall[protect_uploads_php]" value="1" <?php checked( ! empty( $options['protect_uploads_php'] ) ); ?>>
                                 <?php esc_html_e( 'Block PHP execution in wp-content/uploads', 'vigilante' ); ?>
                             </label>
+                        </td>
+                    </tr>
+                    <tr id="field-protect-upgrade-folders">
+                        <th scope="row"><?php esc_html_e( 'Update Folders', 'vigilante' ); ?></th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="firewall[protect_upgrade_folders]" value="1" <?php checked( ! empty( $options['protect_upgrade_folders'] ) ); ?>>
+                                <?php esc_html_e( 'Block web access to wp-content/upgrade and wp-content/upgrade-temp-backup', 'vigilante' ); ?>
+                            </label>
+                            <p class="description"><?php esc_html_e( 'WordPress unpacks every update in these folders before moving it into place. Nobody needs to open them from a browser, and closing them stops attacks that call a file of an update while it is being installed.', 'vigilante' ); ?></p>
+                            <?php
+                            require_once VIGILANTE_INCLUDES_DIR . 'class-htaccess-protection.php';
+                            if ( null === Vigilante_Htaccess_Protection::upgrade_folders_location() ) :
+                                ?>
+                                <p class="description"><?php esc_html_e( 'On this site the content folder is outside the WordPress folder, or its address has characters this rule cannot use, so Vigilant does not write it. Block those folders in the server configuration instead.', 'vigilante' ); ?></p>
+                            <?php endif; ?>
                         </td>
                     </tr>
                     <tr>
@@ -8632,6 +8658,7 @@ class Vigilante_Admin {
                                     $diff_network     = ( is_array( $crit_diff ) && ! empty( $crit_diff['network'] ) ) || $this->critical_approval_locked();
                                     $diff_rescan      = is_array( $crit_diff ) && ! empty( $crit_diff['rescan'] );
                                     $diff_redaction   = is_array( $crit_diff ) && ! empty( $crit_diff['redaction'] );
+                                    $diff_not_kept    = is_array( $crit_diff ) && ! empty( $crit_diff['not_kept'] );
                                     $diff_unavailable = $diff_network || ( is_array( $crit_diff ) && ! empty( $crit_diff['unavailable'] ) );
                                 ?>
                                 <tr>
@@ -8662,7 +8689,7 @@ class Vigilante_Admin {
                                                 <?php echo esc_html( $this->critical_approval_notice() ); ?>
                                             </span>
                                         <?php else : ?>
-                                            <button type="button" class="button button-small button-primary vigilante-approve-critical-file" data-file="<?php echo esc_attr( $crit_file ); ?>">
+                                            <button type="button" class="button button-small button-primary vigilante-approve-critical-file" data-file="<?php echo esc_attr( $crit_file ); ?>" data-seen="<?php echo esc_attr( (string) ( $crit_item['actual_hash'] ?? '' ) ); ?>">
                                                 <?php esc_html_e( 'Approve', 'vigilante' ); ?>
                                             </button>
                                         <?php endif; ?>
@@ -8682,6 +8709,14 @@ class Vigilante_Admin {
                                             <?php elseif ( $diff_redaction ) : ?>
                                                 <p style="color: #50575e; font-style: italic; margin: 0;">
                                                     <?php esc_html_e( 'The line changes of this file are not shown because a value in it could not be hidden safely. The change itself is still detected.', 'vigilante' ); ?>
+                                                </p>
+                                            <?php elseif ( $diff_not_kept ) : ?>
+                                                <?php
+                                                $vg_dropin       = Vigilante_File_Integrity::secrets_dropin_texts();
+                                                $vg_dropin_event = (string) ( $crit_diff['event'] ?? 'changed' );
+                                                ?>
+                                                <p style="color: #50575e; font-style: italic; margin: 0;">
+                                                    <?php echo esc_html( ( $vg_dropin[ $vg_dropin_event ] ?? $vg_dropin['changed'] ) . ' ' . ( empty( $crit_diff['loaded'] ) ? $vg_dropin['not_loaded'] : $vg_dropin['loaded'] ) . ' ' . $vg_dropin['not_kept'] ); ?>
                                                 </p>
                                             <?php elseif ( $diff_unavailable ) : ?>
                                                 <p style="color: #50575e; font-style: italic; margin: 0;">
@@ -10568,7 +10603,9 @@ class Vigilante_Admin {
 
         // A change to a shared file is closed by approving it, and approving it
         // takes the network. Ignoring it would close the same warning without.
-        if ( $this->critical_approval_locked() && in_array( $file, array( 'wp-config.php', '.htaccess' ), true ) ) {
+        // The Secrets API drop-in is one of them since 3.0.13: it lives in the
+        // wp-content the whole network shares.
+        if ( $this->critical_approval_locked() && in_array( $file, array( 'wp-config.php', '.htaccess', Vigilante_File_Integrity::SECRETS_DROPIN ), true ) ) {
             wp_send_json_error( $this->critical_approval_notice() );
         }
 
@@ -10607,7 +10644,15 @@ class Vigilante_Admin {
 
         $this->log_ignore_list_change( 'ignored', array( $file ) );
 
-        wp_send_json_success( __( 'File added to ignored list.', 'vigilante' ) );
+        // The path as stored, so the script can add its row to the table of
+        // ignored files (B135). Until 3.0.12 data was the message alone; the
+        // script of a page opened before updating never read it.
+        wp_send_json_success(
+            array(
+                'message' => __( 'File added to ignored list.', 'vigilante' ),
+                'file'    => $file,
+            )
+        );
     }
 
     /**
@@ -10657,7 +10702,7 @@ class Vigilante_Admin {
 
         $files  = array();
         $locked = $this->critical_approval_locked();
-        $shared = $locked ? array( 'wp-config.php', '.htaccess' ) : array();
+        $shared = $locked ? array( 'wp-config.php', '.htaccess', Vigilante_File_Integrity::SECRETS_DROPIN ) : array();
         foreach ( $raw_files as $f ) {
             $clean = is_string( $f ) ? wp_strip_all_tags( $f ) : '';
             // Same rule as ajax_ignore_file(): the two shared files when the
@@ -10714,6 +10759,8 @@ class Vigilante_Admin {
         wp_send_json_success(
             array(
                 'count'   => $count,
+                // The paths as stored, for the rows of the ignored table (B135).
+                'files'   => array_values( $files ),
                 'message' => sprintf(
                     /* translators: %d: number of files added to the ignored list */
                     _n( '%d file added to ignored list.', '%d files added to ignored list.', $count, 'vigilante' ),
