@@ -64,6 +64,19 @@
                 self.sendNotification($(this));
             });
 
+            // The rest of the list of accounts without the app, past the first ten (3.0.14)
+            $(document).on('click', '.vigilante-totp-pending-all', function(e) {
+                e.preventDefault();
+                $(this).closest('.vigilante-totp-pending-details').find('.vigilante-totp-pending-extra').prop('hidden', false);
+                $(this).closest('p').remove();
+            });
+
+            // Send reminder, one account of the list of accounts without the app (3.0.14)
+            $(document).on('click', '.vigilante-totp-remind', function(e) {
+                e.preventDefault();
+                self.sendReminder($(this));
+            });
+
             // TOTP reset search
             $(document).on('input', '#vigilante_totp_reset_search', function() {
                 self.handleResetSearch($(this));
@@ -257,12 +270,36 @@
             });
         },
 
+        sendReminder: function($btn) {
+            var self = this;
+            var $status = $btn.siblings('.vigilante-totp-remind-status');
+
+            $btn.prop('disabled', true);
+            $status.removeClass('success error').text(self.str('sending'));
+
+            $.post(self.ajaxUrl(), {
+                action: 'vigilante_send_totp_reminder',
+                nonce: self.nonce(),
+                user_id: String($btn.attr('data-user') || '')
+            }).done(function(response) {
+                if (response && response.success) {
+                    $status.addClass('success').text(self.str('reminderSent'));
+                    return;
+                }
+                $btn.prop('disabled', false);
+                $status.addClass('error').text(response && typeof response.data === 'string' && response.data ? response.data : self.str('reminderFailed'));
+            }).fail(function() {
+                $btn.prop('disabled', false);
+                $status.addClass('error').text(self.str('reminderFailed'));
+            });
+        },
+
         // Helpers
         ajaxUrl: function() { return typeof vigilanteAdmin !== 'undefined' ? vigilanteAdmin.ajaxUrl : ajaxurl; },
         nonce: function() { return typeof vigilanteAdmin !== 'undefined' ? vigilanteAdmin.nonce : ''; },
         str: function(key) {
             if (typeof vigilanteAdmin !== 'undefined' && vigilanteAdmin.strings && vigilanteAdmin.strings[key]) return vigilanteAdmin.strings[key];
-            var fallback = { searching: 'Searching...', noUsersFound: 'No users found', sending: 'Sending...', sendNotification: 'Send notification now', notificationsSent: 'sent', skipped: 'skipped', failed: 'failed' };
+            var fallback = { searching: 'Searching...', noUsersFound: 'No users found', sending: 'Sending...', sendNotification: 'Send notification now', notificationsSent: 'sent', skipped: 'skipped', failed: 'failed', reminderSent: 'Sent', reminderFailed: 'It could not be sent.' };
             return fallback[key] || key;
         },
         esc: function(text) {

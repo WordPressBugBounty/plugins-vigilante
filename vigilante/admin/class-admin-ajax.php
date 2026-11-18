@@ -578,6 +578,55 @@ trait Vigilante_Admin_Ajax {
     }
 
     /**
+     * AJAX: Email the setup instructions of the authenticator app to one account (#89)
+     *
+     * The Send reminder button of the list of accounts without the app. It sends
+     * the same email as Send notification now, to one account, and only to an
+     * account that list would show (totp_setup_state()). Another person's
+     * account, so edit_user on that account and not only manage_options: on a
+     * network, map_meta_cap refuses an account that is not on this site and a
+     * super administrator to anybody who is not one (rule 3).
+     *
+     * @since 3.0.14
+     */
+    public function ajax_send_totp_reminder() {
+        check_ajax_referer( 'vigilante_admin_nonce', 'nonce' );
+
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
+        }
+
+        $user_id = isset( $_POST['user_id'] ) ? absint( $_POST['user_id'] ) : 0;
+        if ( ! $user_id || ! current_user_can( 'edit_user', $user_id ) ) {
+            wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
+        }
+
+        $login_security = $this->settings->get_section( 'login_security' );
+        $two_factor     = isset( $login_security['two_factor'] ) ? $login_security['two_factor'] : array();
+        $user           = get_userdata( $user_id );
+
+        if ( 'totp' !== ( $two_factor['method'] ?? 'email' ) || null === $this->totp_setup_state( $user ) ) {
+            wp_send_json_error( __( 'This account does not have to set up the app, or has already set it up.', 'vigilante' ) );
+        }
+
+        if ( ! class_exists( 'Vigilante_Two_Factor_TOTP' ) ) {
+            require_once VIGILANTE_INCLUDES_DIR . 'class-two-factor-totp.php';
+        }
+
+        $totp      = new Vigilante_Two_Factor_TOTP( $this->settings, $this->database, $this->activity_log );
+        $site_name = get_bloginfo( 'name' );
+        $from_name = ! empty( $two_factor['email_from_name'] ) ? $two_factor['email_from_name'] : $site_name;
+
+        if ( ! $totp->send_activation_email( $user, $site_name, $from_name ) ) {
+            wp_send_json_error( __( 'The email could not be sent.', 'vigilante' ) );
+        }
+
+        $this->database->mark_2fa_notified( $user->ID );
+
+        wp_send_json_success();
+    }
+
+    /**
      * AJAX: Search users with TOTP configured (for admin reset)
      */
     public function ajax_search_totp_users() {

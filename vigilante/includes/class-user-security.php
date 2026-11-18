@@ -27,6 +27,41 @@ class Vigilante_User_Security {
     const AUTHOR_SCAN_PRIORITY = -10000;
 
     /**
+     * Transient that holds the fingerprint of the token of a running probe (B139)
+     *
+     * Security Check asks the site for ?author=1 to see whether the block
+     * works, and until 3.0.13 every pass left an "Author enumeration attempt
+     * blocked" warning in the activity log, from the address of the server
+     * itself. The probe now carries a random token, of which only the SHA-256
+     * is kept here, for AUTHOR_PROBE_TTL seconds at most, and a request that
+     * brings it is blocked exactly the same way, only not logged as an attack.
+     *
+     * @since 3.0.14
+     */
+    const AUTHOR_PROBE_TRANSIENT = 'vigilante_author_probe';
+
+    /**
+     * Seconds the token of a probe is valid at most
+     *
+     * The probe makes two requests at most, of three seconds each, and ends
+     * the token when it returns. If the process dies before (a fatal error,
+     * the time limit of PHP), this is how long the token stays valid for
+     * whoever saw it on its way, a proxy in front of the site for instance:
+     * long enough to take their own ?author=N out of the log, never to get
+     * past the block. Two minutes until the first blind review of 3.0.14.
+     *
+     * @since 3.0.14
+     */
+    const AUTHOR_PROBE_TTL = 30;
+
+    /**
+     * Request header the probe sends its token in
+     *
+     * @since 3.0.14
+     */
+    const AUTHOR_PROBE_HEADER = 'X-Vigilant-Probe';
+
+    /**
      * Settings instance
      *
      * @var Vigilante_Settings
@@ -452,13 +487,77 @@ class Vigilante_User_Security {
     }
 
     /**
+     * Start a probe of Security Check: a new token, its fingerprint stored for AUTHOR_PROBE_TTL seconds
+     *
+     * The request that carries the token is answered by another PHP process,
+     * so the token cannot live in memory. Only its SHA-256 is stored, in one
+     * slot: a second probe started meanwhile replaces the first one, whose
+     * request is then logged as in 3.0.13, which is the safe side. Where the
+     * process that answers does not share the object cache with this one
+     * (APCu, one cache per machine), it does not see the token and the probe is
+     * logged too, with no effect on the block.
+     *
+     * @since 3.0.14
+     *
+     * @return string The token, to send in AUTHOR_PROBE_HEADER.
+     */
+    public static function start_author_probe() {
+        $token = wp_generate_password( 32, false, false );
+        set_transient( self::AUTHOR_PROBE_TRANSIENT, hash( 'sha256', $token ), self::AUTHOR_PROBE_TTL );
+
+        return $token;
+    }
+
+    /**
+     * End the probe: its token stops being valid at once
+     *
+     * So does the token of any other probe running at the same time, which is
+     * then logged: the safe side (see start_author_probe()).
+     *
+     * @since 3.0.14
+     */
+    public static function end_author_probe() {
+        delete_transient( self::AUTHOR_PROBE_TRANSIENT );
+    }
+
+    /**
+     * Whether this request is the probe of Security Check that is running now
+     *
+     * The header is chosen by whoever sends the request (rule 21), so it is
+     * never trusted for what it says: it only counts when it brings the token
+     * of the last probe this site started, less than AUTHOR_PROBE_TTL seconds
+     * ago and not ended, compared in constant time. And it only decides whether the block
+     * is logged, never whether the request is blocked. Not the User-Agent of
+     * the probe, which anybody can copy to take their scans out of the log.
+     *
+     * @since 3.0.14
+     *
+     * @return bool
+     */
+    public static function is_own_author_probe() {
+        if ( ! isset( $_SERVER['HTTP_X_VIGILANT_PROBE'] ) || ! is_string( $_SERVER['HTTP_X_VIGILANT_PROBE'] ) ) {
+            return false;
+        }
+
+        $given  = sanitize_text_field( wp_unslash( $_SERVER['HTTP_X_VIGILANT_PROBE'] ) );
+        $stored = get_transient( self::AUTHOR_PROBE_TRANSIENT );
+
+        if ( 32 !== strlen( $given ) || ! is_string( $stored ) || 64 !== strlen( $stored ) ) {
+            return false;
+        }
+
+        return hash_equals( $stored, hash( 'sha256', $given ) );
+    }
+
+    /**
      * Block author scanning via URL
      */
     public function block_author_scan() {
         // phpcs:ignore WordPress.Security.NonceVerification.Recommended
         if ( isset( $_GET['author'] ) && is_numeric( $_GET['author'] ) ) {
-            // Log the attempt
-            if ( $this->activity_log ) {
+            // Log the attempt, unless it is the probe of Security Check (B139),
+            // which is blocked and redirected all the same.
+            if ( $this->activity_log && ! self::is_own_author_probe() ) {
                 $this->activity_log->log(
                     'user',
                     'author_scan_blocked',

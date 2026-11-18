@@ -784,6 +784,237 @@ class Vigilante_IP_Utils {
     }
 
     /**
+     * The public addresses of a forwarded chain, in the order they were written
+     *
+     * An address of the site's own network is left out (see is_own_network()),
+     * and so is anything that is not an address. Used to tell whether a chain
+     * holds more than one public address, the shape in which the last one may
+     * belong to a CDN or a load balancer rather than to the visitor.
+     *
+     * @since 3.0.14
+     *
+     * @param string $chain Header value.
+     * @return string[]
+     */
+    public static function chain_public_entries( $chain ) {
+        $public = array();
+
+        foreach ( explode( ',', (string) $chain ) as $entry ) {
+            $address = self::unmap_ipv4( self::strip_port( trim( $entry ) ) );
+
+            if ( filter_var( $address, FILTER_VALIDATE_IP ) && ! self::is_own_network( $address ) ) {
+                $public[] = $address;
+            }
+        }
+
+        return $public;
+    }
+
+    /**
+     * Headers a proxy, a CDN or a load balancer writes the visitor address in
+     *
+     * The keys of $_SERVER for the headers of rule 21 of the release rules and
+     * a few more that CDNs and load balancers use. Their presence is all that
+     * whitelist_offer_blocker() looks at.
+     *
+     * @since 3.0.14
+     *
+     * @return string[]
+     */
+    public static function forwarded_header_keys() {
+        return array(
+            'HTTP_X_FORWARDED_FOR',
+            'HTTP_X_REAL_IP',
+            'HTTP_CF_CONNECTING_IP',
+            'HTTP_FORWARDED',
+            'HTTP_TRUE_CLIENT_IP',
+            'HTTP_CLIENT_IP',
+            'HTTP_X_CLUSTER_CLIENT_IP',
+            'HTTP_FASTLY_CLIENT_IP',
+            'HTTP_X_SUCURI_CLIENTIP',
+            // Added after the cross review of 3.0.14: headers some proxies,
+            // CDNs and load balancers write without X-Forwarded-For.
+            'HTTP_X_CLIENT_IP',
+            'HTTP_X_AZURE_CLIENTIP',
+            'HTTP_CLOUDFRONT_VIEWER_ADDRESS',
+            'HTTP_X_FORWARDED',
+            'HTTP_FORWARDED_FOR',
+            'HTTP_VIA',
+        );
+    }
+
+    /**
+     * The public addresses a forwarded header names, as far as they can be read
+     *
+     * A list separated by commas, with ports, or the for= parameters of the
+     * standard Forwarded header. What is not an address, such as the proxies
+     * of a Via header, is left out.
+     *
+     * @since 3.0.14
+     *
+     * @param string $key   Key of the header in $_SERVER.
+     * @param string $value Its value.
+     * @return string[]
+     */
+    private static function header_public_addresses( $key, $value ) {
+        if ( 'HTTP_FORWARDED' !== $key ) {
+            return self::chain_public_entries( (string) $value );
+        }
+
+        $public = array();
+        if ( preg_match_all( '/for\s*=\s*"?\[?([0-9a-f:.]+)\]?(?::\d+)?"?/i', (string) $value, $found ) ) {
+            foreach ( $found[1] as $address ) {
+                $address = self::unmap_ipv4( $address );
+                if ( filter_var( $address, FILTER_VALIDATE_IP ) && ! self::is_own_network( $address ) ) {
+                    $public[] = $address;
+                }
+            }
+        }
+
+        return $public;
+    }
+
+    /**
+     * Why the address of a request cannot be offered for the IP whitelist
+     *
+     * The Firewall tab offers to write the administrator's own address into
+     * the whitelist, and a whitelisted address skips every firewall check,
+     * rate limiting included. When the address Vigilant sees is not the
+     * administrator's but that of a proxy, a CDN or a load balancer in front
+     * of the site, whitelisting it lets every visitor who comes through it
+     * skip the firewall. So the offer is only made when nothing says the
+     * address may be somebody else's:
+     *
+     * - it is not a private, loopback or shared address (is_own_network()),
+     *   which nobody reaches the site from on the internet, nor one of the
+     *   site's own addresses (own_site_addresses()), the shape of a proxy on
+     *   the same server;
+     * - it is not a Cloudflare edge address, nor one in the trusted proxies
+     *   list;
+     * - when it is the connection address, because no forwarded header was
+     *   honoured, the request carries no forwarded header at all: one that is
+     *   there and was not honoured means something in front of PHP wrote it,
+     *   and the connection address is then probably that proxy's. This covers
+     *   every case of the proxy detection notice of the dashboard
+     *   (Vigilante_Admin::show_admin_notices()), and still holds after that
+     *   notice is dismissed;
+     * - when X-Forwarded-For was honoured, the header holds one public address
+     *   at most, since with more the one Vigilant reads may be a CDN's (the
+     *   Firewall tab warns about that shape).
+     *
+     * This decides a button on the administrator's own screen, never a
+     * request, and what is saved still goes through the normal save of the
+     * tab. The headers are chosen by whoever sends the request and whatever
+     * sits in front of the site; one that is present only ever hides the
+     * button. A proxy that writes no header at all cannot be told apart from
+     * a direct connection, which is why the confirmation says what
+     * whitelisting does.
+     *
+     * @since 3.0.14
+     *
+     * @param string   $ip              The address Vigilant resolved for the request.
+     * @param array    $server          A $_SERVER-like array: REMOTE_ADDR and the keys of forwarded_header_keys().
+     * @param string   $trusted_header  One of the keys of trusted_header_map(), or ''.
+     * @param string[] $trusted_proxies Configured proxy IPs and ranges.
+     * @param string[] $own_addresses   The site's own addresses.
+     * @return string '' when it can be offered; otherwise 'invalid', 'private', 'own_site', 'proxy' or 'forwarded'.
+     */
+    public static function whitelist_offer_blocker( $ip, $server, $trusted_header, $trusted_proxies, $own_addresses ) {
+        $ip = self::unmap_ipv4( trim( (string) $ip ) );
+
+        if ( ! filter_var( $ip, FILTER_VALIDATE_IP ) || '0.0.0.0' === $ip || '::' === $ip ) {
+            return 'invalid';
+        }
+
+        if ( self::is_own_network( $ip ) ) {
+            return 'private';
+        }
+
+        foreach ( (array) $own_addresses as $own ) {
+            $own = self::unmap_ipv4( (string) $own );
+            if ( filter_var( $own, FILTER_VALIDATE_IP ) && self::same_address( $ip, $own ) ) {
+                return 'own_site';
+            }
+        }
+
+        if ( self::in_list_ip_or_cidr( $ip, self::cloudflare_ranges() ) ) {
+            return 'proxy';
+        }
+
+        $trusted_proxies = (array) $trusted_proxies;
+        if ( ! empty( $trusted_proxies ) && self::in_list_ip_or_cidr( $ip, $trusted_proxies ) ) {
+            return 'proxy';
+        }
+
+        $server = (array) $server;
+        $remote = isset( $server['REMOTE_ADDR'] ) ? self::unmap_ipv4( trim( (string) $server['REMOTE_ADDR'] ) ) : '';
+
+        // The connection address, or nothing to compare with: then no header
+        // may be there, honoured or not.
+        if ( '' === $remote || ! filter_var( $remote, FILTER_VALIDATE_IP ) || self::same_address( $ip, $remote ) ) {
+            foreach ( self::forwarded_header_keys() as $key ) {
+                if ( isset( $server[ $key ] ) && '' !== trim( (string) $server[ $key ] ) ) {
+                    return 'forwarded';
+                }
+            }
+
+            return '';
+        }
+
+        // The address came from the trusted header. If a forwarded header,
+        // that one or another, names another public address, there is one more
+        // hop in front: two public addresses in an honoured X-Forwarded-For
+        // (the last one can be a CDN), or a CDN that is not Cloudflare in front
+        // of a proxy that writes its address into X-Real-IP. A header that names
+        // the same address, the X-Forwarded-For a local nginx writes next to
+        // X-Real-IP, says nothing against it.
+        foreach ( self::forwarded_header_keys() as $key ) {
+            if ( ! isset( $server[ $key ] ) ) {
+                continue;
+            }
+            foreach ( self::header_public_addresses( $key, (string) $server[ $key ] ) as $named ) {
+                if ( ! self::same_address( $ip, $named ) ) {
+                    return 'forwarded';
+                }
+            }
+        }
+
+        return '';
+    }
+
+    /**
+     * whitelist_offer_blocker() for the request being served
+     *
+     * @since 3.0.14
+     *
+     * @return string See whitelist_offer_blocker().
+     */
+    public static function whitelist_offer_blocker_for_request() {
+        $server = array();
+
+        foreach ( array_merge( array( 'REMOTE_ADDR' ), self::forwarded_header_keys() ) as $key ) {
+            if ( isset( $_SERVER[ $key ] ) && is_string( $_SERVER[ $key ] ) ) {
+                $server[ $key ] = sanitize_text_field( wp_unslash( $_SERVER[ $key ] ) );
+                // Only whether it is there counts for most of them, and
+                // sanitizing can empty a value that was there (a tag, a %XX):
+                // such a header still counts as present. sanitize_key() keeps
+                // its letters and digits, and a value with none is no address.
+                if ( '' === $server[ $key ] && '' !== sanitize_key( wp_unslash( $_SERVER[ $key ] ) ) ) {
+                    $server[ $key ] = '-';
+                }
+            }
+        }
+
+        return self::whitelist_offer_blocker(
+            self::get_client_ip(),
+            $server,
+            self::trusted_proxy_header(),
+            self::trusted_proxies(),
+            self::own_site_addresses()
+        );
+    }
+
+    /**
      * Whether an address belongs to a network no visitor comes from
      *
      * Private, loopback, link-local and the shared address space providers use

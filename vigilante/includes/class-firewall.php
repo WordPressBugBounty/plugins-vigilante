@@ -356,6 +356,29 @@ class Vigilante_Firewall {
                 '_content',      // Various content fields
             );
 
+            /**
+             * Filters the POST fields the SQL injection rules leave out (B99)
+             *
+             * Top-level keys of $_POST, by exact name. A field left out here
+             * skips every SQL injection rule, not only the one that blocked it,
+             * and these are the only firewall rules that read POST fields, so
+             * the firewall no longer looks at it at all. Its name is chosen by
+             * whoever sends the form: add the field of one form you know, never
+             * a pattern. A value that is not an array keeps the list, and an
+             * entry that is not a string is left out ('123', not 123). The name
+             * is the one PHP leaves (a.b arrives as a_b), and the firewall runs
+             * early on init: hook this from a plugin or from functions.php, not
+             * from inside an init callback.
+             *
+             * @since 3.0.14
+             *
+             * @param string[] $excluded_fields Names of the POST fields left out.
+             */
+            $filtered = apply_filters( 'vigilante_firewall_excluded_fields', $excluded_fields );
+            if ( is_array( $filtered ) ) {
+                $excluded_fields = array_values( array_filter( $filtered, 'is_string' ) );
+            }
+
             foreach ( $excluded_fields as $field ) {
                 unset( $post_data[ $field ] );
             }
@@ -381,9 +404,6 @@ class Vigilante_Firewall {
             // More specific pattern to reduce false positives
             '/[\'\"]\s*(;|--|#)\s*(select|insert|update|delete|drop|truncate|alter|create)/i' => __( 'SQL command injection attempt', 'vigilante' ),
             
-            // Hex encoding of SQL - typically used in attacks
-            '/0x[0-9a-f]{16,}/i' => __( 'Hex encoding detected', 'vigilante' ),
-            
             // Benchmark/sleep attacks - time-based SQL injection
             '/(benchmark|sleep)\s*\(\s*\d/i' => __( 'Time-based injection attempt', 'vigilante' ),
             
@@ -406,7 +426,87 @@ class Vigilante_Firewall {
             }
         }
 
+        // Hex encoding of SQL, decoded first (B99, 3.0.14).
+        if ( self::has_text_hex_literal( $combined ) ) {
+            return __( 'Hex encoding detected', 'vigilante' );
+        }
+
         return false;
+    }
+
+    /**
+     * Whether the text holds a hexadecimal literal that decodes to text (B99)
+     *
+     * A hex literal in an injection is there to slip text past the quotes
+     * (0x61646d696e is admin), so decoded it is text. A token, a hash or a
+     * wallet address is random bytes, and until 3.0.13 the rule blocked every
+     * 0x followed by 16 hexadecimal digits, the Ethereum address of a form
+     * included. Each literal of 16 digits or more is decoded the way MySQL
+     * reads it (an odd number of digits takes a leading 0), and it only counts
+     * when every byte is printable ASCII, a tab or a line break. Random bytes
+     * are about 38% printable, so a random literal passes for text about once
+     * in 2,200 at 8 bytes, the shortest one looked at, once in 15,000 at 10,
+     * and practically never from 16 bytes on: a 20-byte wallet address or a
+     * 32-byte hash.
+     *
+     * All of it and not most of it, decided by Fernando on 18 Nov 2026: a
+     * Prosopo Procaptcha token is a structure of strings in hexadecimal that
+     * decodes to about 97% text, and with a threshold of 90% it was still
+     * blocked. The bytes that mark its optional fields are never text. Both
+     * thresholds are as easy to dodge, with a padding byte at an edge of the
+     * text, and the other SQL rules do not depend on this one. A field can
+     * still be left out by name with the vigilante_firewall_excluded_fields
+     * filter.
+     *
+     * The prefix is matched as MySQL reads it, 0x in lower case: 0X is not a
+     * hexadecimal literal for MySQL, and until 3.0.13 matching it only
+     * blocked more.
+     *
+     * When PCRE gives up the answer is yes: a search that could not finish is
+     * not read as clean. Until 3.0.13 the rule read it as nothing found.
+     *
+     * One literal at a time, from where the last one ended. With
+     * preg_match_all() every match was kept in memory before the first one was
+     * looked at, about seven times the size of the request, and a POST of
+     * 16 MB made of literals that are not text ended in a fatal error with a
+     * memory limit of 128 MB (first blind review of 3.0.14).
+     *
+     * @since 3.0.14
+     *
+     * @param string $text Request text, as the SQL injection rules see it.
+     * @return bool
+     */
+    public static function has_text_hex_literal( $text ) {
+        $text   = (string) $text;
+        $offset = 0;
+
+        while ( true ) {
+            $found = preg_match( '/0x([0-9a-fA-F]{16,})/', $text, $match, PREG_OFFSET_CAPTURE, $offset );
+
+            if ( false === $found ) {
+                return true;
+            }
+            if ( 0 === $found ) {
+                return false;
+            }
+
+            $digits = $match[1][0];
+            $offset = $match[1][1] + strlen( $digits );
+
+            if ( 1 === strlen( $digits ) % 2 ) {
+                $digits = '0' . $digits;
+            }
+
+            $bytes = hex2bin( $digits );
+            if ( false === $bytes || '' === $bytes ) {
+                continue;
+            }
+
+            // What is left once the text is taken out: nothing, for text.
+            if ( '' === (string) preg_replace( '/[\x20-\x7e\t\n\r]/', '', $bytes ) ) {
+                return true;
+            }
+        }
     }
 
     /**

@@ -168,6 +168,9 @@ class Vigilante_Two_Factor_TOTP {
         // Intercept authentication
         add_filter( 'authenticate', array( $this, 'check_2fa_requirement' ), 100, 3 );
 
+        // The grace period starts at the first login that completes (B134).
+        add_action( 'wp_login', array( $this, 'start_grace_period' ), 10, 2 );
+
         // Handle TOTP verification form
         add_action( 'login_form_vigilante_2fa', array( $this, 'handle_2fa_form' ) );
 
@@ -267,6 +270,7 @@ class Vigilante_Two_Factor_TOTP {
 
         // And whether this class is the one that must ask. Both are registered on
         // a network; the election is per account (see two_factor_handler_for()).
+        // Since 3.0.14 it is this class only for an account with its app set up.
         if ( ! $this->handles_second_factor( $user, 'totp' ) ) {
             return $user;
         }
@@ -280,19 +284,18 @@ class Vigilante_Two_Factor_TOTP {
         $totp_data = $this->database->get_totp_data( $user->ID );
 
         if ( ! $totp_data || empty( $totp_data['is_configured'] ) ) {
-            // TOTP not yet set up - always allow login
-            // Enforcement happens inside admin via force_totp_setup_redirect()
-
-            if ( ! $totp_data ) {
-                // First time - create grace period placeholder
-                $grace_days    = absint( $this->policy()['grace_period_days'] ?? 3 );
-                $grace_expires = ( $grace_days > 0 )
-                    ? gmdate( 'Y-m-d H:i:s', time() + ( $grace_days * DAY_IN_SECONDS ) )
-                    : gmdate( 'Y-m-d H:i:s', time() );
-                $this->database->create_totp_placeholder( $user->ID, $grace_expires );
-            }
-
-            return $user;
+            /*
+             * Until 3.0.13 this branch let the login through with the password
+             * alone, to be pushed to the profile later from inside the dashboard,
+             * which neither the REST API nor other login forms go through (B134).
+             * The election above only hands this class an account whose app is
+             * set up, read from this same row, so this is not reached. If it ever
+             * is, the login is refused, not let through.
+             */
+            return new WP_Error(
+                'vigilante_2fa_required',
+                __( 'Your authenticator app could not be read. Ask an administrator to reset two-factor authentication for your account.', 'vigilante' )
+            );
         }
 
         // TOTP is configured - require verification. REST and XML-RPC have no
@@ -329,6 +332,41 @@ class Vigilante_Two_Factor_TOTP {
             'vigilante_2fa_required',
             __( 'Please enter the verification code from your authenticator app.', 'vigilante' )
         );
+    }
+
+    /**
+     * Start the grace period of an account that has to set up an app, at its first login
+     *
+     * Until 3.0.13 the row that starts it was written by the authenticate
+     * filter of this class, in the branch that let the login through without
+     * a second factor. Since 3.0.14 that login is asked for a code by email
+     * until the app is set up (B134), so the election hands it to the email
+     * class, and the grace starts when the login completes: after the emailed
+     * code, or straight away from a device trusted before.
+     *
+     * @since 3.0.14
+     *
+     * @param string  $user_login Login name.
+     * @param WP_User $user       The account that has just logged in.
+     */
+    public function start_grace_period( $user_login, $user = null ) {
+        if ( ! ( $user instanceof WP_User ) || ! $user->ID ) {
+            return;
+        }
+
+        if ( ! $this->user_requires_2fa( $user ) || ! Vigilante_Settings::two_factor_app_setup_due( $user ) ) {
+            return;
+        }
+
+        if ( $this->database->get_totp_data( $user->ID ) ) {
+            return;
+        }
+
+        $grace_days    = absint( $this->policy()['grace_period_days'] ?? 3 );
+        $grace_expires = ( $grace_days > 0 )
+            ? gmdate( 'Y-m-d H:i:s', time() + ( $grace_days * DAY_IN_SECONDS ) )
+            : gmdate( 'Y-m-d H:i:s', time() );
+        $this->database->create_totp_placeholder( $user->ID, $grace_expires );
     }
 
     /**
@@ -1092,7 +1130,11 @@ class Vigilante_Two_Factor_TOTP {
          * there does not lead to a new QR code, because nothing asks for one, so
          * that button says what it does instead of "Set up new authenticator".
          */
-        $in_use = $this->handles_second_factor( $user, 'totp', $configured );
+        // With no app set up, the section shows when one is due: since 3.0.14
+        // the login of that account is asked by email meanwhile (B134).
+        $in_use = $configured
+            ? $this->handles_second_factor( $user, 'totp', true )
+            : Vigilante_Settings::two_factor_app_setup_due( $user );
 
         if ( ! $configured && ! $in_use ) {
             return;
@@ -1392,6 +1434,15 @@ class Vigilante_Two_Factor_TOTP {
 
         $this->database->save_totp_data( $user_id, $encrypted );
 
+        /*
+         * Devices trusted before this enrolment were trusted with a code sent by
+         * email, the factor of the account while its app was not set up (B134),
+         * and they skip the factor the account has from now on, the app, for as
+         * long as they last. They go, as they do when the app is reset (first
+         * blind review of B134).
+         */
+        $this->database->revoke_trusted_devices( $user_id );
+
         // Generate backup codes
         $backup_codes = $this->generate_backup_codes( $user_id );
 
@@ -1452,6 +1503,13 @@ class Vigilante_Two_Factor_TOTP {
             wp_send_json_error( __( 'Permission denied.', 'vigilante' ) );
         }
 
+        // With no app set up there is nothing to remove, and resetting started a
+        // new grace period, or with a grace of 0 deleted the row the redirect to
+        // the profile reads (first blind review of B134).
+        if ( ! $this->database->has_totp_enrolment( $user_id ) ) {
+            wp_send_json_error( __( 'There is no authenticator app set up to remove.', 'vigilante' ) );
+        }
+
         $this->reset_user_totp( $user_id );
 
         wp_send_json_success( array(
@@ -1479,24 +1537,22 @@ class Vigilante_Two_Factor_TOTP {
         $user = wp_get_current_user();
 
         /*
-         * Only an account this class asks for its app: the same election as the
-         * login and the profile section. Asking only whether some second factor
+         * Only an account that has to set up an app (two_factor_app_setup_due(),
+         * asked apart from who asks at login since 3.0.14, see B134). Asking only whether some second factor
          * is required was enough while this class registered only on sites set to
          * an app; since 2.11.10 it registers wherever two factor is on, and an
          * account verified by email with a leftover row from a grace period was
          * sent to profile.php from every screen of the dashboard, where the setup
          * section is not shown to it, so nothing let it out.
          *
-         * Asked first, and as if the account had no enrolment, because the row
-         * read below is the expensive part: on a network, for an account with no
-         * enrolment, it searches the table of every site the account can reach,
-         * and most accounts verified by email have none. Assuming no enrolment
-         * changes nothing here: with one, the answer can only move to the app,
-         * and an enrolled account leaves at "already configured" anyway. This
-         * also answers no when nothing is required, so it replaces
-         * user_requires_2fa().
+         * Asked first because the row read below is the expensive part: on a
+         * network, for an account with no enrolment, it searches the table of
+         * every site the account can reach, and most accounts verified by email
+         * have none. The question does not read the row at all: an account that
+         * has its app leaves at "already configured" below. It also answers no
+         * when nothing is required, so it replaces user_requires_2fa().
          */
-        if ( ! $user->ID || ! $this->handles_second_factor( $user, 'totp', false ) ) {
+        if ( ! $user->ID || ! Vigilante_Settings::two_factor_app_setup_due( $user ) ) {
             return;
         }
 
@@ -1552,10 +1608,10 @@ class Vigilante_Two_Factor_TOTP {
     public function show_grace_period_notice() {
         $user = wp_get_current_user();
 
-        // Same election, in the same order and for the same reasons, as
+        // Same question, in the same order and for the same reasons, as
         // force_totp_setup_redirect(): since 2.11.10 an account verified by email
         // was told on every screen to set up an app.
-        if ( ! $user->ID || ! $this->handles_second_factor( $user, 'totp', false ) ) {
+        if ( ! $user->ID || ! Vigilante_Settings::two_factor_app_setup_due( $user ) ) {
             return;
         }
 
@@ -1621,7 +1677,14 @@ class Vigilante_Two_Factor_TOTP {
         // Revoke trusted devices
         $this->database->revoke_trusted_devices( $user_id );
 
-        $this->log_event( 'totp_reset', $user_id, __( 'TOTP configuration reset by administrator', 'vigilante' ), 'warning' );
+        $this->log_event(
+            'totp_reset',
+            $user_id,
+            get_current_user_id() === (int) $user_id
+                ? __( 'TOTP configuration removed by the account holder', 'vigilante' )
+                : __( 'TOTP configuration reset by administrator', 'vigilante' ),
+            'warning'
+        );
 
         return true;
     }
@@ -1699,6 +1762,9 @@ class Vigilante_Two_Factor_TOTP {
             $body .= Vigilante_Email_Template::alert_box( __( 'You must configure your authenticator app on your next login.', 'vigilante' ) );
         }
 
+        // Since 3.0.14 the login of an account without its app is asked for a
+        // code by email (B134): the account holder is told why it comes.
+        $body .= Vigilante_Email_Template::p( __( 'Until your app is set up, every login asks for a code sent to this email address.', 'vigilante' ) );
         $body .= Vigilante_Email_Template::button( $profile_url, __( 'Set up now', 'vigilante' ) );
 
         // Pass from_name via header (avoids filter contamination)

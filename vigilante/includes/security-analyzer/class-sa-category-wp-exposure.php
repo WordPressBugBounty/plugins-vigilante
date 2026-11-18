@@ -28,6 +28,13 @@ class Vigilante_SA_Category_WP_Exposure {
      */
     private $settings;
 
+    /**
+     * Token of the author probe while it runs, '' otherwise (B139).
+     *
+     * @var string
+     */
+    private $author_probe = '';
+
     public function __construct( Vigilante_Settings $settings ) {
         $this->settings = $settings;
     }
@@ -301,7 +308,58 @@ class Vigilante_SA_Category_WP_Exposure {
         return Vigilante_SA_Check_Result::warn( $args );
     }
 
+    /**
+     * ?author=N, with the token that keeps the probe out of the activity log
+     *
+     * Every pass of Security Check, the button and the weekly scan, left a
+     * warning "Author enumeration attempt blocked" from the address of the
+     * server until 3.0.13 (B139). The block itself is the same for the probe.
+     *
+     * Vigilante_User_Security, which starts and ends the token here and checks
+     * it in the request that the probe makes, loads with the plugin, and this
+     * class loads later: in the cron run in which WordPress updates Vigilant,
+     * the old one is the one in memory. So everything this uses of it is asked
+     * for first, and without it the probe goes without a token, as in 3.0.13.
+     *
+     * @return Vigilante_SA_Check_Result
+     */
     private function check_author_scanning() {
+        $with_token = method_exists( 'Vigilante_User_Security', 'start_author_probe' )
+            && method_exists( 'Vigilante_User_Security', 'end_author_probe' )
+            && defined( 'Vigilante_User_Security::AUTHOR_PROBE_HEADER' );
+
+        $this->author_probe = $with_token ? Vigilante_User_Security::start_author_probe() : '';
+
+        try {
+            return $this->check_author_scanning_probe();
+        } finally {
+            if ( '' !== $this->author_probe ) {
+                Vigilante_User_Security::end_author_probe();
+            }
+            $this->author_probe = '';
+        }
+    }
+
+    /**
+     * The arguments of a request of the author probe.
+     *
+     * @return array
+     */
+    private function author_probe_args() {
+        $extra = array( 'redirection' => 0 );
+        if ( '' !== $this->author_probe ) {
+            $extra['headers'] = array( Vigilante_User_Security::AUTHOR_PROBE_HEADER => $this->author_probe );
+        }
+
+        return $extra;
+    }
+
+    /**
+     * The probe itself: ?author=1 on the home page, and why it leaks if it does
+     *
+     * @return Vigilante_SA_Check_Result
+     */
+    private function check_author_scanning_probe() {
         $args = array(
             'id'       => 'author_scanning',
             'category' => self::SLUG,
@@ -319,7 +377,7 @@ class Vigilante_SA_Category_WP_Exposure {
         $setting_on = $module_on && $sub_on;
 
         $url      = add_query_arg( 'author', 1, home_url( '/' ) );
-        $response = Vigilante_SA_Helpers::get( $url, array( 'redirection' => 0 ) );
+        $response = Vigilante_SA_Helpers::get( $url, $this->author_probe_args() );
 
         if ( is_wp_error( $response ) ) {
             $args['detail'] = Vigilante_SA_Helpers::with_challenge( __( 'Could not probe ?author=1.', 'vigilante' ) );
@@ -436,7 +494,7 @@ class Vigilante_SA_Category_WP_Exposure {
      * @return string 'cache', 'site' or 'unknown'.
      */
     private function author_leak_cause( $url ) {
-        $fresh = Vigilante_SA_Helpers::get( add_query_arg( 'vigilante-nocache', (string) time(), $url ), array( 'redirection' => 0 ) );
+        $fresh = Vigilante_SA_Helpers::get( add_query_arg( 'vigilante-nocache', (string) time(), $url ), $this->author_probe_args() );
         if ( is_wp_error( $fresh ) ) {
             return 'unknown';
         }

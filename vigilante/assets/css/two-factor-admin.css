@@ -629,3 +629,80 @@
     border-radius: 3px;
     letter-spacing: 1px;
 }
+
+/* Accounts that have to use the app and have not set it up (3.0.14) */
+.vigilante-totp-pending {
+    max-width: 760px;
+    margin-bottom: 8px;
+}
+
+/* The list sits inside a .form-table, whose th and td rules (200px wide, no left
+   padding on th, 15px on td) would also reach its cells: these win over them. */
+.form-table .vigilante-totp-pending th,
+.form-table .vigilante-totp-pending td {
+    width: auto;
+    margin: 0;
+    padding: 8px 10px;
+    line-height: 1.5;
+    vertical-align: middle;
+}
+
+.form-table .vigilante-totp-pending thead th {
+    font-weight: 600;
+}
+
+.form-table .vigilante-totp-pending td:last-child {
+    white-space: nowrap;
+    text-align: right;
+}
+
+.vigilante-totp-state {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.vigilante-totp-state-expired {
+    background: #fcf0f1;
+    color: #8a2424;
+}
+
+.vigilante-totp-state-grace {
+    background: #fcf9e8;
+    color: #6d4d00;
+}
+
+.vigilante-totp-state-not-started {
+    padding-left: 0;
+    color: #646970;
+    white-space: normal;
+}
+
+.vigilante-totp-remind-status {
+    margin-left: 6px;
+}
+
+.vigilante-totp-remind-status.success {
+    color: #007017;
+}
+
+.vigilante-totp-remind-status.error {
+    color: #b32d2e;
+}
+
+.vigilante-totp-pending-summary {
+    margin-top: 0;
+}
+
+.vigilante-totp-pending-details > summary {
+    margin-bottom: 8px;
+    cursor: pointer;
+    color: #2271b1;
+}
+
+/* A row hidden by class must not get its display back from the table rules. */
+.vigilante-totp-pending tr[hidden] {
+    display: none;
+}

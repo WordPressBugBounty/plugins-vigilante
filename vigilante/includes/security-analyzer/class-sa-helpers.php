@@ -384,6 +384,11 @@ class Vigilante_SA_Helpers {
      * @return array|WP_Error
      */
     public static function get( $url, array $extra = array() ) {
+        // Headers asked for are added to the User-Agent of the probes, not put
+        // in its place (B139, 3.0.14: the author probe sends its token).
+        if ( isset( $extra['headers'] ) && is_array( $extra['headers'] ) ) {
+            $extra['headers'] = array_merge( array( 'User-Agent' => 'Vigilant-Security-Analyzer/1.0' ), $extra['headers'] );
+        }
         $args = array_merge(
             array(
                 'timeout'     => 3,

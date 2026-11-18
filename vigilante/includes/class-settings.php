@@ -1058,8 +1058,14 @@ class Vigilante_Settings {
      * 2. Otherwise, if any site asking for a second factor asks for email, email
      *    handles it. Email needs no enrolment, so it can never fall into the
      *    branch that lets a login through for lack of one.
-     * 3. Only when every site asking wants an authenticator app does TOTP handle
-     *    it, which is the case the grace period was written for.
+     * 3. Everything else goes to email too, an account that must use an app and
+     *    has not set one up included. Until 3.0.13 TOTP handled that account and
+     *    its "not set up yet" branch let the login through with the password
+     *    alone, during the grace period and after it, also over the REST API and
+     *    from other login forms, and whoever had the password could then set up
+     *    their own app and lock the owner out (B134). The emailed code is what
+     *    the password alone does not give. Pushing the account to set up its app
+     *    is a separate question, see two_factor_app_setup_due().
      *
      * The condition on the first step came in 2.11.11. Without it an enrolment
      * left from a time when the site asked for an app outranked the method the
@@ -1070,6 +1076,7 @@ class Vigilante_Settings {
      *
      * @since 2.11.10
      * @since 2.11.11 An enrolment only wins while an authenticator app is asked for.
+     * @since 3.0.14  An account with no enrolment is always asked by email (B134).
      *
      * @param WP_User $user       User being authenticated.
      * @param bool    $enrolled   Whether the account has a TOTP enrolment anywhere.
@@ -1086,7 +1093,72 @@ class Vigilante_Settings {
             return 'totp';
         }
 
-        return in_array( 'email', $methods, true ) ? 'email' : 'totp';
+        return 'email';
+    }
+
+    /**
+     * The second factor elected for each account in this request (B134)
+     *
+     * @since 3.0.14
+     * @var string[]
+     */
+    private static $login_elections = array();
+
+    /**
+     * The election already made for this account in this request, or null
+     *
+     * See Vigilante_Two_Factor_Session::handles_second_factor().
+     *
+     * @since 3.0.14
+     *
+     * @param int $user_id User ID.
+     * @return string|null
+     */
+    public static function remembered_login_handler( $user_id ) {
+        return isset( self::$login_elections[ (int) $user_id ] ) ? self::$login_elections[ (int) $user_id ] : null;
+    }
+
+    /**
+     * Keep the election made for this account for the rest of the request
+     *
+     * @since 3.0.14
+     *
+     * @param int    $user_id User ID.
+     * @param string $handler 'email', 'totp' or ''.
+     */
+    public static function remember_login_handler( $user_id, $handler ) {
+        self::$login_elections[ (int) $user_id ] = (string) $handler;
+    }
+
+    /**
+     * Forget the elections of this request (for code that runs several logins in one process)
+     *
+     * @since 3.0.14
+     */
+    public static function forget_login_elections() {
+        self::$login_elections = array();
+    }
+
+    /**
+     * Whether this account has to set up an authenticator app
+     *
+     * True when every site that asks it for a second factor asks for an app:
+     * the case the grace period, the notice, the redirect to the profile and
+     * the setup section are for. Until 3.0.13 this was the same question as
+     * who asks at login (two_factor_handler_for() without an enrolment), and
+     * since 3.0.14 the login of such an account is asked by email until the app
+     * is set up (B134), so the two are asked apart. A site that asks for email
+     * keeps the account on email, as before.
+     *
+     * @since 3.0.14
+     *
+     * @param WP_User $user User to check.
+     * @return bool
+     */
+    public static function two_factor_app_setup_due( $user ) {
+        $methods = self::two_factor_methods_for( $user );
+
+        return ! empty( $methods ) && ! in_array( 'email', $methods, true ) && in_array( 'totp', $methods, true );
     }
 
     /**

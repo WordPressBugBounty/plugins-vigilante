@@ -4468,3 +4468,52 @@
     margin: 0;
     color: #646970;
 }
+
+/* Copy the administrator's own IP and write it into the whitelist (3.0.14) */
+.vigilante-own-ip .vigilante-icon-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    margin: 0 0 0 4px;
+    padding: 0;
+    border: 0;
+    border-radius: 2px;
+    background: none;
+    box-shadow: none;
+    color: var(--wp-admin-theme-color, #2271b1);
+    line-height: 1;
+    vertical-align: middle;
+    cursor: pointer;
+}
+
+.vigilante-own-ip .vigilante-icon-button:hover {
+    color: var(--wp-admin-theme-color-darker-10, #135e96);
+}
+
+.vigilante-own-ip .vigilante-icon-button:focus-visible {
+    outline: 2px solid var(--wp-admin-theme-color, #2271b1);
+    outline-offset: 1px;
+}
+
+.vigilante-own-ip .vigilante-icon-button:disabled {
+    color: #a7aaad;
+    cursor: default;
+}
+
+.vigilante-own-ip .vigilante-icon-button .dashicons {
+    width: 16px;
+    height: 16px;
+    font-size: 16px;
+    vertical-align: middle;
+}
+
+.vigilante-own-ip-feedback {
+    margin-left: 6px;
+    font-style: normal;
+}
+
+.vigilante-own-ip-pending {
+    margin: 8px 0 0;
+}

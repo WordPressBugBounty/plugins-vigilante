@@ -4,11 +4,11 @@ Tags: security, firewall, 2fa, malware, scanner
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.0.13
+Stable tag: 3.0.14
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Premium WordPress Security - 100% FREE: Firewall, 2FA, Security Headers, Login and Malware Protection, File Monitor, Security Audit & more
+FREE WordPress Security: firewall, two factor authentication (2FA), security headers, login, malware and password protection, scanner, activity log
 
 == Description ==
 
@@ -446,7 +446,7 @@ Previous versions kept a copy of wp-config.php in an option, with the database p
 
 * Replace the eight keys and salts in wp-config.php with fresh ones from the WordPress.org secret-key service. Everybody is signed out, you included, which is the point. If File Integrity watches a wp-content/secrets.php, approve it once more afterwards.
 * Have a backup code at hand first if you use an authenticator app with Vigilant: new keys stop the app codes from working. A backup code still lets you in, and you can set the app up again from your profile.
-* Do not replace WP_SECRETS_KEY with them, if your wp-config.php has it: it is not one of the eight, and a new one makes every secret kept with the WordPress Secrets API unreadable.
+* Do not replace WP_SECRETS_KEY with them, if your wp-config.php has it: it is not one of the eight, and a new one makes every secret kept with the WordPress Secrets API unreadable. If it was already in wp-config.php while that copy was stored, treat the secrets as exposed: create new credentials at each service, then change WP_SECRETS_KEY and delete the Secrets API root key before you enter them again.
 * Change the database password if your host lets you.
 
 = Does a scan always check the whole site? =
@@ -536,6 +536,18 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
     return $recipients;
 } );`
 
+= A form is blocked with "Hex encoding detected". How do I let one field through? =
+
+Tokens, hashes and wallet addresses almost always pass: the rule only blocks a `0x...` value that decodes to plain text, and random bytes very rarely do. If a field of one of your forms is still blocked, add the field by name with the `vigilante_firewall_excluded_fields` filter, in a plugin or in your theme's functions.php:
+
+`add_filter( 'vigilante_firewall_excluded_fields', function( $fields ) {
+    $fields[] = 'my_field';
+    return $fields;
+} );`
+
+* The firewall then stops looking at that field, because only its SQL injection rules read form fields.
+* Add only fields of forms you know. Anyone can send a field with that name.
+
 == Screenshots ==
 
 1. Security Dashboard - Security score, module controls, and preset selection
@@ -550,6 +562,18 @@ Yes. Use the `vigilante_notification_recipients` filter. It receives and returns
 10. Security Check - On-demand audit widget with score, per-category breakdown, and fix links
 
 == Changelog ==
+
+= 3.0.14 =
+Accounts that must use an authenticator app and have not set it up now get a code by email at login, instead of logging in with the password alone. Also adds buttons to copy and whitelist your IP, and the hex rule no longer blocks tokens.
+
+* Improved: the Firewall tab has two small buttons next to your current IP address. One copies it, and the other writes it into the IP Whitelist, after a confirmation that explains what a whitelisted address skips. It is only offered when the address can be yours: not a private or local address, not the server itself, not Cloudflare or a trusted proxy, and not an address seen through a proxy header the firewall does not trust. The address applies once you save, and a notice says so until then.
+* Improved: the two factor section lists the accounts that have to use the authenticator app and have not set it up, with their role and when their grace period ends, and a button to email one of them the setup instructions again. An administrator in that situation is told so on the same screen. Suggested by Marco in the support forum.
+* Improved: a new vigilante_firewall_excluded_fields filter leaves a form field out of the SQL injection rules by its exact name. The FAQ has an example.
+* Fix: an account that had to use an authenticator app and had not set it up yet could log in with its password alone, during the grace period and after it, also from other login forms such as the WooCommerce account page, and could then set up an app of its own. Until it sets up its app, that account is now asked for a code sent by email, and once the grace period ends the dashboard still sends it to its profile to set the app up. Setting up the app removes the devices it trusted meanwhile, and on the update the sessions those accounts had, which could have been opened with the password alone, are closed once (the administrator running the update keeps the one in use); review their application passwords. Logins with its main password over XML-RPC are refused, as for any account with two factor; application passwords keep working. If the site cannot send email, such an account cannot log in until the site sends email again, another administrator adds it to the excluded users, or the plugin folder is renamed by FTP as the FAQ explains.
+* Fix: the hex encoding rule of the firewall blocked every 0x followed by 16 hexadecimal digits, so a form with a captcha token such as the one of Prosopo Procaptcha, a wallet address or a transaction hash was refused with Hex encoding detected. It now decodes each value the way MySQL reads it and blocks it only when it decodes to plain text. An uppercase 0X, which MySQL does not read as hexadecimal, is no longer looked at, and very large requests no longer take several times their size in memory.
+* Fix: each run of Security Check, from the button or the weekly scan, left an Author enumeration attempt blocked warning in the activity log with the address of the server, because Security Check asks the site for ?author=1 to test the block. That request now carries a single-use token and is blocked the same way, but it is no longer logged as an attack. Any other ?author request is logged as before.
+* Fix: when Run Scan Now could not finish, because a server firewall refused the request, the request timed out or another scan was running, the error went away after five seconds and the previous results came back, so it looked like a finished scan. The error now stays and says that the results below are from the previous scan, with its date.
+* Fix: the File integrity scan row of Security Check said a different thing for one modified file than for several.
 
 = 3.0.13 =
 Closes wp-content/upgrade, where WordPress unpacks updates, to web requests and checks it in Security Check. Watches the secrets.php drop-in, logs changes to WordPress secrets and explains two factor errors after new security keys.
@@ -623,34 +647,12 @@ Security Check now says when the PHP of the server lacks the fixes of PHP2Shell,
 * Fix: with the wp-includes folder linked from another place on the server, the alert about self-protection switched off by a filter could name a file of WordPress itself again.
 * Fix: with Content-Security-Policy in report-only mode, the Test Headers button said so twice.
 
-= 3.0.8 =
-Security Check tells a firewall verification screen, a stale cache and headers set only on files apart from a missing header. A File Integrity scan stopped by the server is now reported, and the scan fits the time limit of PHP.
-
-* Improved: when a security header arrives more than once, Security Check says so in its row, because it is being sent from more than one place and only one should be left. The policy that Vigilant itself sends from PHP with upgrade-insecure-requests alone does not count as a repetition.
-* Improved: Security Check also asks for the home page as it is generated now, and says when the copy that visitors get comes from a cache and does not carry the same security headers, so that the cache can be emptied.
-* Improved: when a File Integrity scan is stopped before it can save its result, because PHP runs out of time or memory or the server cuts the request, the tab and Security Check say so, with the cause when PHP gives it, and the Security Audit records it. Until now such a scan left no trace.
-* Improved: in the Security Audit, Escape closes the details popup, and the actions for the IP and for the User Agent are now in two separate blocks, each with its value and buttons that say what they act on, so that a User Agent is not blacklisted by mistake instead of the IP.
-* Fix: Security Check took the verification screen of a firewall or an anti-bot service for the site. A challenge answered with 403 passed as a protected user list, a refused wp-cron.php or a protected file, and one answered with 202 as the home page. Those checks now say that they could not measure and whose screen it was, for the screens that can be told apart: the challenges of SiteGround, Cloudflare and AWS WAF, the block pages of Cloudflare, Sucuri, Imperva, DataDome and Wordfence, and the challenge of the Under Attack mode of Vigilant itself. A file or a page served with 2xx is never taken for a screen. The Test Headers button says the same.
-* Fix: on a server that applies the header rules of .htaccess to files and not to the pages PHP generates, as some hosting with PHP as CGI does, Security Check said that mod_headers was not enabled. It now checks an image of WordPress and says what happens. A copy kept by a cache is told apart in the same way, and the policy that Vigilant sends from PHP no longer counts as a header of its .htaccess block that arrives.
-* Fix: X-Content-Type-Options and Cross-Origin-Opener-Policy with a value other than the expected one were reported as missing. The row now says which value arrives and which one is expected.
-* Fix: a blacklist that does not answer this server was reported as not listing the site. When the answer is empty, each list is now asked about the test entry it keeps listed on purpose, and an answer that is not a blacklist code, which some DNS providers give to every name, is no longer read as a listing.
-* Fix: the Limit HTTP Methods option and the description of Under Attack promised to block TRACE. Apache answers TRACE before it reads .htaccess, so only the hosting can switch it off, and the option now says so.
-* Fix: with self-protection switched off by a filter that returns __return_false, as in the example of SECURITY.md, the email and File Integrity named wp-includes/functions.php as the file that switched it off. A function or a method of WordPress itself, such as __return_false or is_admin, is no longer named, also when it is passed as a closure, and the steps say how to find the filter. A callback written as Class::method or an object that can be called is now traced to its file, and when something hooks the filter that cannot be traced to a file, the screens say so.
-* Fix: in the Security Audit, a scheduled task created for the first time was explained as one that had disappeared, a critical entry listed every task restored in that pass instead of the ones that keep disappearing, and the entries about self-protection switched off or about its hooks removed had no explanation.
-* Fix: a Content-Security-Policy with upgrade-insecure-requests alone, the one Vigilant sends from PHP, scored in Security Check as a full policy, and with CSP off in Vigilant it read as delivered by something other than Vigilant. It restricts nothing, so it no longer counts as a policy, and a site whose only CSP is that one loses those points.
-* Fix: a Content-Security-Policy-Report-Only scored in Security Check as a policy in force. In that mode the browser reports what the policy would block and blocks nothing, so the row is now a warning with half the points, and when the policy is the one of Vigilant it says how to put it in force. The strictest preset sets CSP to report-only, so a site that applied it gets half the points of that row until the mode is turned off.
-* Fix: the attempt to open the hidden wp-admin logged before translations load showed in English in a translated log. It is now translated when it is shown, older entries included.
-* Fix: with WPML active, the hidden wp-admin answered a visitor with no session with a server error instead of a not found page, and left a fatal error in the PHP log on every visit. The page is now written without the template of WordPress, with the same text and the same 404, and always as an HTML page, where a request that asked for JSON or XML got the error in that format.
-* Fix: the File Integrity scan saved its result only after asking WordPress.org about every installed plugin, so a server that stopped the request at that point lost a scan that had finished. It is now saved as soon as the files are checked, and when little time is left the closed plugins check is left to its daily run.
-* Fix: the Run Scan Now button deleted the previous result before scanning, so a scan stopped halfway left the tab empty, and it ran with the memory limit of php.ini instead of the one WordPress gives the dashboard.
-* Fix: the scan did not take the time limit of PHP into account, so on hosting that gives a request 30 seconds a scan could be stopped halfway. It now asks for more time and, when the hosting does not allow it, stops in time to save its result, measuring the time as PHP counts it on that server, and says so in the list of what it did not check.
-
 For older changelog entries, please check the [changelog.txt](https://plugins.svn.wordpress.org/vigilante/trunk/changelog.txt) file
 
 == Upgrade Notice ==
 
-= 3.0.13 =
-Closes wp-content/upgrade, where WordPress unpacks updates, to web requests and checks it in Security Check. Watches the secrets.php drop-in, logs changes to WordPress secrets and explains two factor errors after new security keys.
+= 3.0.14 =
+Accounts that must use an authenticator app and have not set it up now get a code by email at login, instead of logging in with the password alone. Also adds buttons to copy and whitelist your IP, and the hex rule no longer blocks tokens.
 
 == Support ==
 

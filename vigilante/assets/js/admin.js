@@ -45,6 +45,10 @@
             // Unblock firewall rate-limited IPs
             $(document).on('click', '.vigilante-unblock-firewall-ip', this.handleUnblockFirewallIp.bind(this));
 
+            // Copy the administrator's own IP, or write it into the whitelist field (3.0.14)
+            $(document).on('click', '.vigilante-copy-own-ip', this.handleCopyOwnIp.bind(this));
+            $(document).on('click', '.vigilante-add-own-ip', this.handleAddOwnIp.bind(this));
+
             // Clear logs
             $(document).on('click', '.vigilante-clear-logs', this.handleClearLogs.bind(this));
 
@@ -276,6 +280,8 @@
                 },
                 success: function(response) {
                     if (response.success) {
+                        // The administrator's IP written into the whitelist field is saved now.
+                        $form.find('.vigilante-own-ip-pending').remove();
                         var msg = response.data && response.data.message ? response.data.message : (response.data || vigilanteAdmin.strings.saved);
                         // The notice of the wp-config.php section as it stands
                         // after this save, painted by the server.
@@ -673,20 +679,42 @@
                         Vigilante_Admin.showNotice('success', vigilanteAdmin.strings.scanComplete);
                         setTimeout(function() { location.reload(); }, 600);
                     } else {
-                        Vigilante_Admin.showNotice('error', response.data || vigilanteAdmin.strings.scanFailed || 'Scan failed');
+                        Vigilante_Admin.scanNotFinishedNotice(typeof response.data === 'string' && response.data ? response.data : (vigilanteAdmin.strings.scanFailed || 'Scan failed'));
                         $btn.prop('disabled', false).text(vigilanteAdmin.strings.runScanNow || 'Run Scan Now');
                         // The previous result is still saved: it was only hidden while scanning.
                         $lastResults.show();
                     }
                 },
                 error: function(xhr, status, error) {
-                    Vigilante_Admin.showNotice('error', (vigilanteAdmin.strings.scanError || 'Scan error: %s').replace('%s', error));
+                    // The status text is chosen by whoever answers (a server
+                    // firewall, a proxy), so it is escaped like any other text.
+                    Vigilante_Admin.scanNotFinishedNotice((vigilanteAdmin.strings.scanError || 'Scan error: %s').replace('%s', error || status || ''));
                     $btn.prop('disabled', false).text(vigilanteAdmin.strings.runScanNow || 'Run Scan Now');
                     // A scan the server stopped leaves the previous result saved, and
                     // since 3.0.8 the button no longer deletes it first: it shows again.
                     $lastResults.show();
                 }
             });
+        },
+
+        /**
+         * The notice of a scan the button could not finish (B140, 3.0.14).
+         *
+         * Until 3.0.13 it went away after five seconds and the previous results
+         * came back, so a scan that failed looked like a scan that had finished
+         * with the same findings. It now stays, and says that what is below is
+         * the previous scan, with its date. Everything in it is escaped: the
+         * text of an HTTP error comes from whoever answered the request.
+         *
+         * @param {string} text What went wrong, as plain text.
+         */
+        scanNotFinishedNotice: function(text) {
+            var strings = vigilanteAdmin.strings || {};
+            var last = $('#vigilante-section-fi-last-scan').attr('data-vigilante-last-scan') || '';
+            var note = last
+                ? (strings.scanKeptPrevious || 'What you see below is still the previous scan, from %s.').replace('%s', last)
+                : (strings.scanKeptNone || 'No scan has finished on this site yet.');
+            Vigilante_Admin.showNotice('error', Vigilante_Admin.escapeHtml(text) + ' ' + Vigilante_Admin.escapeHtml(note), true);
         },
 
         /**
@@ -3006,6 +3034,129 @@
                     $btn.prop('disabled', false).text(vigilanteAdmin.strings.unblock || 'Unblock');
                 }
             });
+        },
+
+        /**
+         * Copy the administrator's own IP address
+         *
+         * The Clipboard API only exists on a secure origin (https or
+         * localhost), so a copy through a hidden field covers the rest.
+         */
+        handleCopyOwnIp: function(e) {
+            var $btn = $(e.currentTarget);
+            var ip = String($btn.attr('data-ip') || '');
+            var $feedback = $btn.closest('.vigilante-own-ip').find('.vigilante-own-ip-feedback');
+            var strings = vigilanteAdmin.strings;
+
+            var done = function(ok) {
+                $feedback.text(ok ? strings.ownIpCopied : strings.ownIpCopyFailed);
+                clearTimeout(Vigilante_Admin.ownIpFeedbackTimer);
+                Vigilante_Admin.ownIpFeedbackTimer = setTimeout(function() {
+                    $feedback.text('');
+                }, ok ? 2000 : 6000);
+            };
+
+            if (!ip) {
+                return;
+            }
+
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(ip).then(function() {
+                    done(true);
+                }, function() {
+                    done(Vigilante_Admin.copyThroughField(ip));
+                });
+                return;
+            }
+
+            done(this.copyThroughField(ip));
+        },
+
+        /**
+         * Copy a text with a hidden field, for origins without the Clipboard API
+         *
+         * @return {boolean} Whether the browser says it copied.
+         */
+        copyThroughField: function(text) {
+            var $field = $('<textarea readonly></textarea>')
+                .val(text)
+                .css({ position: 'fixed', top: 0, left: 0, width: '1px', height: '1px', opacity: 0 });
+            var ok = false;
+
+            $('body').append($field);
+            $field[0].select();
+
+            try {
+                ok = document.execCommand('copy');
+            } catch (err) {
+                ok = false;
+            }
+
+            $field.remove();
+            return !!ok;
+        },
+
+        /**
+         * Write the administrator's own IP into the whitelist field, unsaved
+         *
+         * Nothing is stored here: the address goes through the normal save of
+         * the tab and its checks, and a notice says so until it is saved
+         * (decided by Fernando on 11 Nov 2026).
+         */
+        handleAddOwnIp: function(e) {
+            var $btn = $(e.currentTarget);
+            var ip = String($btn.attr('data-ip') || '');
+            var $field = $('#vigilante-f-firewall-ip-whitelist');
+            var strings = vigilanteAdmin.strings;
+            var $feedback = $btn.closest('.vigilante-own-ip').find('.vigilante-own-ip-feedback');
+
+            if (!ip || !$field.length || $field.prop('disabled')) {
+                return;
+            }
+
+            var lines = String($field.val() || '').split(/\r?\n/).map(function(line) {
+                return $.trim(line);
+            });
+
+            if (lines.indexOf(ip) !== -1) {
+                clearTimeout(Vigilante_Admin.ownIpFeedbackTimer);
+                $feedback.text(strings.ownIpAlreadyListed);
+                return;
+            }
+
+            if (!window.confirm(String(strings.ownIpConfirmAdd || '').replace('%s', ip))) {
+                return;
+            }
+
+            var current = String($field.val() || '').replace(/\s+$/, '');
+            $field.val(current === '' ? ip : current + '\n' + ip).trigger('input').trigger('change');
+            $btn.prop('disabled', true);
+
+            // One notice under the field, as text: it stays until the save goes through.
+            var $notice = $field.closest('td').find('.vigilante-own-ip-pending');
+            if (!$notice.length) {
+                $notice = $('<div class="notice notice-warning inline vigilante-own-ip-pending"><p></p></div>');
+                $field.after($notice);
+            }
+            $notice.find('p').text(strings.ownIpPendingSave);
+
+            // If the address is taken out of the field again, the notice would
+            // say something false: it goes, and the button comes back.
+            $field.off('input.vigilanteOwnIp').on('input.vigilanteOwnIp', function() {
+                var now = String($field.val() || '').split(/\r?\n/).map(function(line) {
+                    return $.trim(line);
+                });
+                if (now.indexOf(ip) === -1) {
+                    $field.off('input.vigilanteOwnIp');
+                    $notice.remove();
+                    $btn.prop('disabled', false);
+                }
+            });
+
+            $('html, body').animate({
+                scrollTop: $field.offset().top - 120
+            }, 300);
+            $field.trigger('focus');
         },
 
         /**

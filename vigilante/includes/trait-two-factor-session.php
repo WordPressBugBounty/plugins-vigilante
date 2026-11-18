@@ -67,9 +67,27 @@ trait Vigilante_Two_Factor_Session {
      */
     protected function handles_second_factor( $user, $method, $enrolled = null ) {
         if ( null === $enrolled ) {
-            $enrolled = $this->database && method_exists( $this->database, 'has_totp_enrolment' )
-                ? $this->database->has_totp_enrolment( $user->ID )
-                : false;
+            /*
+             * One election per account and request when the enrolment is read
+             * here (the login filters and the pending session). Each of the two
+             * classes used to read it again, and since 3.0.14 the election moves
+             * between them with it: an enrolment removed between the filter of
+             * the email class (it saw one, so not its login) and the one of the
+             * TOTP class (it saw none, so not its login either) let the login
+             * through with the password alone (first blind review of B134). Read
+             * once, the TOTP class keeps that login and refuses it, because its
+             * row is gone.
+             */
+            $elected = Vigilante_Settings::remembered_login_handler( $user->ID );
+            if ( null === $elected ) {
+                $enrolled = $this->database && method_exists( $this->database, 'has_totp_enrolment' )
+                    ? $this->database->has_totp_enrolment( $user->ID )
+                    : false;
+                $elected  = Vigilante_Settings::two_factor_handler_for( $user, $enrolled );
+                Vigilante_Settings::remember_login_handler( $user->ID, $elected );
+            }
+
+            return ( $method === $elected );
         }
 
         return ( $method === Vigilante_Settings::two_factor_handler_for( $user, $enrolled ) );

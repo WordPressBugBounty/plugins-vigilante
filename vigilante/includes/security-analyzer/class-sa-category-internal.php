@@ -1335,7 +1335,7 @@ class Vigilante_SA_Category_Internal {
 
         $args['detail'] = sprintf(
             /* translators: %d: count */
-            _n( '%d modified file recorded by the last integrity scan — review in File Integrity.', '%d modified files recorded by the last integrity scan.', $modified, 'vigilante' ),
+            _n( '%d modified file recorded by the last integrity scan.', '%d modified files recorded by the last integrity scan.', $modified, 'vigilante' ),
             $modified
         ) . $partial_note;
         return Vigilante_SA_Check_Result::warn( $args );

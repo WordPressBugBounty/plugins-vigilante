@@ -31,6 +31,27 @@ class Vigilante_Admin {
     use Vigilante_Admin_Recovery_Ajax;
 
     /**
+     * Accounts of the enforced roles looked at for the list of accounts without the app (#89)
+     *
+     * @since 3.0.14
+     */
+    const TOTP_PENDING_SCAN = 300;
+
+    /**
+     * Accounts without the app shown in that list at most
+     *
+     * @since 3.0.14
+     */
+    const TOTP_PENDING_SHOWN = 50;
+
+    /**
+     * Accounts looked at, at most, by the one-time closing of sessions of 3.0.14 (B134)
+     *
+     * @since 3.0.14
+     */
+    const TOTP_SESSION_CLOSE_MAX = 2000;
+
+    /**
      * Settings instance
      *
      * @var Vigilante_Settings
@@ -160,6 +181,7 @@ class Vigilante_Admin {
         // 2FA AJAX handlers
         add_action( 'wp_ajax_vigilante_search_users_2fa', array( $this, 'ajax_search_users_2fa' ) );
         add_action( 'wp_ajax_vigilante_send_2fa_notification', array( $this, 'ajax_send_2fa_notification' ) );
+        add_action( 'wp_ajax_vigilante_send_totp_reminder', array( $this, 'ajax_send_totp_reminder' ) );
         add_action( 'wp_ajax_vigilante_search_totp_users', array( $this, 'ajax_search_totp_users' ) );
         add_action( 'wp_ajax_vigilante_reset_totp_users', array( $this, 'ajax_reset_totp_users' ) );
         add_action( 'wp_ajax_vigilante_totp_get_setup', array( $this, 'ajax_totp_get_setup' ) );
@@ -617,6 +639,114 @@ class Vigilante_Admin {
 
             update_option( 'vigilante_db_version', '3.0.0' );
         }
+
+        // 3.0.14: sessions opened with the password alone by accounts that had to
+        // use an authenticator app and had not set it up (B134).
+        if ( version_compare( $db_version, '3.0.14', '<' ) ) {
+            // Marked before the work, not after: on a site with many accounts a
+            // request that dies halfway would run it again on every screen and
+            // close again the sessions of whoever had already logged in with
+            // the emailed code (cross review of 3.0.14). Run once, even if short.
+            update_option( 'vigilante_db_version', '3.0.14' );
+            $this->migrate_close_sessions_without_app();
+        }
+    }
+
+    /**
+     * Close, once, the sessions of the accounts that have to use the app and have not set it up (B134)
+     *
+     * Until 3.0.13 those accounts logged in with their password alone, so any
+     * session they have may have been opened by whoever had the password. From
+     * 3.0.14 they log in with a code sent by email, and this closes what they
+     * had, once, on the update (decided by Fernando on 18 Nov 2026, after the
+     * first blind review of B134). The administrator whose page load runs it
+     * keeps the session they are using, or updating could leave them out right
+     * away on a site that cannot send email; their other sessions are closed.
+     *
+     * On a network sessions belong to the account, not to a site, and each site
+     * runs its migrations once: an account that is a member of several sites is
+     * looked at by each of them, and only while it still has no app.
+     *
+     * @since 3.0.14
+     *
+     * @return int Accounts whose sessions were closed.
+     */
+    private function migrate_close_sessions_without_app() {
+        $login_security = $this->settings->get_section( 'login_security' );
+        $two_factor     = isset( $login_security['two_factor'] ) && is_array( $login_security['two_factor'] ) ? $login_security['two_factor'] : array();
+
+        if ( empty( $two_factor['enabled'] ) || 'totp' !== ( $two_factor['method'] ?? 'email' ) ) {
+            return 0;
+        }
+
+        $roles = $this->totp_enforced_roles( $two_factor );
+        if ( empty( $roles ) ) {
+            return 0;
+        }
+
+        $current = get_current_user_id();
+        $keep    = wp_get_session_token();
+        $closed  = 0;
+        $query   = new WP_User_Query(
+            array(
+                'role__in'    => $roles,
+                'fields'      => 'ID',
+                'number'      => self::TOTP_SESSION_CLOSE_MAX,
+                'orderby'     => 'ID',
+                'count_total' => true,
+            )
+        );
+        $short   = (int) $query->get_total() > self::TOTP_SESSION_CLOSE_MAX;
+
+        foreach ( $query->get_results() as $user_id ) {
+            $user_id = (int) $user_id;
+            if ( null === $this->totp_setup_state( get_userdata( $user_id ) ) ) {
+                continue;
+            }
+
+            $sessions = WP_Session_Tokens::get_instance( $user_id );
+            if ( $user_id === $current && '' !== $keep ) {
+                $sessions->destroy_others( $keep );
+            } else {
+                $sessions->destroy_all();
+            }
+            $closed++;
+        }
+
+        if ( $short && $this->activity_log ) {
+            $this->activity_log->log(
+                'system',
+                'sessions_closed_without_app_short',
+                sprintf(
+                    /* translators: %d: number of accounts looked at */
+                    __( 'Only the first %d accounts of the roles that have to use the authenticator app were looked at to close their sessions on the update. Accounts beyond them that have not set up the app keep the sessions they had.', 'vigilante' ),
+                    self::TOTP_SESSION_CLOSE_MAX
+                ),
+                array( 'looked_at' => self::TOTP_SESSION_CLOSE_MAX ),
+                'warning'
+            );
+        }
+
+        if ( $closed && $this->activity_log ) {
+            $this->activity_log->log(
+                'system',
+                'sessions_closed_without_app',
+                sprintf(
+                    /* translators: %d: number of accounts */
+                    _n(
+                        'The sessions of %d account that has to use the authenticator app and has not set it up were closed once on the update: it now logs in with a code sent by email.',
+                        'The sessions of %d accounts that have to use the authenticator app and have not set it up were closed once on the update: they now log in with a code sent by email.',
+                        $closed,
+                        'vigilante'
+                    ),
+                    $closed
+                ),
+                array( 'accounts' => $closed ),
+                'warning'
+            );
+        }
+
+        return $closed;
     }
 
     /**
@@ -1953,6 +2083,14 @@ class Vigilante_Admin {
                 'saved'               => __( 'Settings saved', 'vigilante' ),
                 'error'               => __( 'Error saving settings', 'vigilante' ),
                 'confirm'             => __( 'Are you sure?', 'vigilante' ),
+                'ownIpCopied'         => __( 'Copied', 'vigilante' ),
+                'ownIpCopyFailed'     => __( 'It could not be copied: select the address and copy it by hand.', 'vigilante' ),
+                /* translators: %s: the IP address of the current administrator */
+                'ownIpConfirmAdd'     => __( 'Add %s to the IP Whitelist? A whitelisted address skips every firewall check, rate limiting included, and the address of a home or mobile connection usually changes from time to time. It is written in the list below and only applies once you save.', 'vigilante' ),
+                'ownIpPendingSave'    => __( 'Your IP address is in the IP Whitelist above, but it is not saved yet: click Save Settings to apply it.', 'vigilante' ),
+                'ownIpAlreadyListed'  => __( 'Your IP address is already in the IP Whitelist.', 'vigilante' ),
+                'reminderSent'        => __( 'Sent', 'vigilante' ),
+                'reminderFailed'      => __( 'It could not be sent.', 'vigilante' ),
                 'scanning'            => __( 'Scanning...', 'vigilante' ),
                 'scanComplete'        => __( 'Scan complete', 'vigilante' ),
                 'loading'             => __( 'Loading...', 'vigilante' ),
@@ -2093,6 +2231,11 @@ class Vigilante_Admin {
                 'scanFailed'                   => __( 'Scan failed', 'vigilante' ),
                 /* translators: %s: error message */
                 'scanError'                    => __( 'Scan error: %s', 'vigilante' ),
+                // B140 (3.0.14): a scan the button could not finish leaves the
+                // previous result on screen, so the notice stays and says so.
+                /* translators: %s: date and time of the last scan that finished. */
+                'scanKeptPrevious'             => __( 'What you see below is still the previous scan, from %s.', 'vigilante' ),
+                'scanKeptNone'                 => __( 'No scan has finished on this site yet.', 'vigilante' ),
                 'runScanNow'                   => __( 'Run Scan Now', 'vigilante' ),
                 'confirmClearScan'             => __( 'Are you sure you want to clear all scan results?', 'vigilante' ),
                 'clearing'                     => __( 'Clearing...', 'vigilante' ),
@@ -2692,6 +2835,158 @@ class Vigilante_Admin {
      */
     private function main_site_files_locked() {
         return $this->shared_files_locked() && Vigilante_Settings::owns_shared_files();
+    }
+
+    /**
+     * The roles this site asks for a second factor, read the way the login reads them
+     *
+     * Vigilante_Settings::two_factor_site_requires(): administrator and editor
+     * when the setting is missing, and nobody when it is an empty list. The list
+     * of accounts without the app and the closing of sessions used to start from
+     * administrator alone in both cases (cross review of 3.0.14).
+     *
+     * @since 3.0.14
+     *
+     * @param array $two_factor The two_factor settings of this site.
+     * @return string[]
+     */
+    private function totp_enforced_roles( $two_factor ) {
+        if ( ! isset( $two_factor['enforced_roles'] ) ) {
+            return array( 'administrator', 'editor' );
+        }
+
+        return array_values( array_filter( (array) $two_factor['enforced_roles'], 'is_string' ) );
+    }
+
+    /**
+     * Where an account stands with the authenticator app it has to set up, or null when it does not have to
+     *
+     * Asked the way the login asks: a second factor is required of the account,
+     * every site that asks wants an app (Vigilante_Settings::two_factor_app_setup_due())
+     * and it has no enrolment. Shared by the list of the 2FA tab and by the
+     * handler of its Send reminder button, so the button can only reach an
+     * account the list would show (#89, 3.0.14).
+     *
+     * @since 3.0.14
+     *
+     * @param WP_User|false|null $user The account.
+     * @return array|null { string state: expired, grace or not_started; int ends: end of the grace period, 0 when it has not started }
+     */
+    private function totp_setup_state( $user ) {
+        if ( ! ( $user instanceof WP_User ) || ! $user->ID ) {
+            return null;
+        }
+
+        if ( ! Vigilante_Settings::two_factor_required_for( $user ) || ! Vigilante_Settings::two_factor_app_setup_due( $user ) ) {
+            return null;
+        }
+
+        $row = $this->database->get_totp_data( $user->ID );
+        if ( $row && ! empty( $row['is_configured'] ) ) {
+            return null;
+        }
+
+        // The grace period starts at the first login that completes.
+        if ( ! $row || empty( $row['grace_period_expires'] ) ) {
+            return array(
+                'state' => 'not_started',
+                'ends'  => 0,
+            );
+        }
+
+        $ends = (int) strtotime( $row['grace_period_expires'] );
+
+        return array(
+            'state' => $ends > time() ? 'grace' : 'expired',
+            'ends'  => $ends,
+        );
+    }
+
+    /**
+     * The accounts that have to use the authenticator app and have not set it up (#89)
+     *
+     * Asked by Marco in the support forum: the administrator could not see which
+     * accounts were in that situation, nor when their grace period ended. The
+     * accounts of the enforced roles of this site are looked at, the first
+     * TOTP_PENDING_SCAN of them by login. All the ones found are put in order,
+     * the ones whose grace period has ended first, then the ones still in it by
+     * the date it ends, then the ones that have not logged in yet, and the first
+     * TOTP_PENDING_SHOWN are listed: the most urgent, whatever their login.
+     * Measured on 18 Nov 2026 with 300 such editors: 33 ms and 305 queries on a
+     * single site.
+     *
+     * @since 3.0.14
+     *
+     * @param array $two_factor The two_factor settings of this site.
+     * @return array { array rows, int more: not shown, array counts by state, bool capped: not every account was looked at, int checked }
+     */
+    private function totp_accounts_without_app( $two_factor ) {
+        $result = array(
+            'rows'    => array(),
+            'more'    => 0,
+            'counts'  => array(
+                'expired'     => 0,
+                'grace'       => 0,
+                'not_started' => 0,
+            ),
+            'capped'  => false,
+            'checked' => 0,
+        );
+
+        $roles = $this->totp_enforced_roles( $two_factor );
+        if ( empty( $roles ) ) {
+            return $result;
+        }
+        $excluded = isset( $two_factor['excluded_users'] ) ? array_filter( array_map( 'absint', (array) $two_factor['excluded_users'] ) ) : array();
+
+        $args = array(
+            'role__in'    => $roles,
+            'number'      => self::TOTP_PENDING_SCAN,
+            'orderby'     => 'login',
+            'count_total' => true,
+        );
+        if ( ! empty( $excluded ) ) {
+            // phpcs:ignore WordPressVIPMinimum.Performance.WPQueryParams.PostNotIn_exclude -- Small excluded users list from settings.
+            $args['exclude'] = $excluded;
+        }
+
+        $query             = new WP_User_Query( $args );
+        $users             = $query->get_results();
+        $result['checked'] = count( $users );
+        $result['capped']  = (int) $query->get_total() > count( $users );
+
+        foreach ( $users as $user ) {
+            $state = $this->totp_setup_state( $user );
+            if ( null === $state ) {
+                continue;
+            }
+            $result['counts'][ $state['state'] ]++;
+            $result['rows'][] = array(
+                'user'  => $user,
+                'state' => $state['state'],
+                'ends'  => $state['ends'],
+            );
+        }
+
+        $order = array(
+            'expired'     => 0,
+            'grace'       => 1,
+            'not_started' => 2,
+        );
+        usort(
+            $result['rows'],
+            static function ( $a, $b ) use ( $order ) {
+                if ( $order[ $a['state'] ] !== $order[ $b['state'] ] ) {
+                    return $order[ $a['state'] ] - $order[ $b['state'] ];
+                }
+                return $a['ends'] - $b['ends'];
+            }
+        );
+
+        $result['more'] = max( 0, count( $result['rows'] ) - self::TOTP_PENDING_SHOWN );
+        $result['rows'] = array_slice( $result['rows'], 0, self::TOTP_PENDING_SHOWN );
+
+        return $result;
     }
 
     /**
@@ -3323,15 +3618,9 @@ class Vigilante_Admin {
             return array();
         }
 
-        $public = array();
-
-        foreach ( explode( ',', $chain ) as $entry ) {
-            $address = Vigilante_IP_Utils::unmap_ipv4( Vigilante_IP_Utils::strip_port( $entry ) );
-
-            if ( filter_var( $address, FILTER_VALIDATE_IP ) && ! Vigilante_IP_Utils::is_own_network( $address ) ) {
-                $public[] = $address;
-            }
-        }
+        // The same count decides whether the tab offers the administrator's
+        // address for the whitelist (Vigilante_IP_Utils::whitelist_offer_blocker()).
+        $public = Vigilante_IP_Utils::chain_public_entries( $chain );
 
         if ( count( $public ) < 2 ) {
             return array();
@@ -4754,15 +5043,45 @@ class Vigilante_Admin {
                 <?php endif; ?>
 
                 <h3><?php esc_html_e( 'IP Lists', 'vigilante' ); ?></h3>
-                <p class="description">
+                <?php
+                // Copy the address, and write it into the whitelist field without
+                // saving, only where it can be the administrator's own: the save
+                // of the tab still decides what is stored (3.0.14).
+                $vg_own_ip      = $this->database->get_client_ip();
+                $vg_own_ip_veto = Vigilante_IP_Utils::whitelist_offer_blocker_for_request();
+                $vg_own_ip_in   = '' === $vg_own_ip_veto && Vigilante_IP_Utils::in_list( $vg_own_ip, $options['ip_whitelist'] ?? array() );
+                ?>
+                <p class="description vigilante-own-ip">
                     <?php
                     printf(
                         /* translators: %s: Current visitor IP address */
                         esc_html__( 'Your current IP address: %s', 'vigilante' ),
-                        '<code>' . esc_html( $this->database->get_client_ip() ) . '</code>'
+                        '<code>' . esc_html( $vg_own_ip ) . '</code>'
                     );
                     ?>
+                    <?php if ( 'invalid' !== $vg_own_ip_veto ) : ?>
+                        <button type="button" class="vigilante-icon-button vigilante-copy-own-ip" data-ip="<?php echo esc_attr( $vg_own_ip ); ?>" title="<?php esc_attr_e( 'Copy your IP address', 'vigilante' ); ?>">
+                            <span class="dashicons dashicons-admin-page" aria-hidden="true"></span>
+                            <span class="screen-reader-text"><?php esc_html_e( 'Copy your IP address', 'vigilante' ); ?></span>
+                        </button>
+                    <?php endif; ?>
+                    <?php if ( '' === $vg_own_ip_veto && ! $vg_own_ip_in && ! $vg_main_locked ) : ?>
+                        <button type="button" class="vigilante-icon-button vigilante-add-own-ip" data-ip="<?php echo esc_attr( $vg_own_ip ); ?>" title="<?php esc_attr_e( 'Add your IP address to the IP Whitelist', 'vigilante' ); ?>">
+                            <span class="dashicons dashicons-plus-alt2" aria-hidden="true"></span>
+                            <span class="screen-reader-text"><?php esc_html_e( 'Add your IP address to the IP Whitelist', 'vigilante' ); ?></span>
+                        </button>
+                    <?php endif; ?>
+                    <span class="vigilante-own-ip-feedback" role="status" aria-live="polite"></span>
                 </p>
+                <?php if ( ! $vg_main_locked ) : ?>
+                    <?php if ( $vg_own_ip_in ) : ?>
+                        <p class="description"><?php esc_html_e( 'Your IP address is already covered by the IP Whitelist.', 'vigilante' ); ?></p>
+                    <?php elseif ( in_array( $vg_own_ip_veto, array( 'private', 'own_site' ), true ) ) : ?>
+                        <p class="description"><?php esc_html_e( 'This is a local, private or server address, not the one you have on the internet, so it is not offered for the IP Whitelist.', 'vigilante' ); ?></p>
+                    <?php elseif ( in_array( $vg_own_ip_veto, array( 'proxy', 'forwarded' ), true ) ) : ?>
+                        <p class="description"><?php esc_html_e( 'This address may belong to a proxy, a CDN or a load balancer in front of the site rather than to you, so it is not offered for the IP Whitelist: listed, it would let everybody who comes through it skip the firewall.', 'vigilante' ); ?></p>
+                    <?php endif; ?>
+                <?php endif; ?>
                 <table class="form-table">
                     <tr>
                         <th scope="row"><label for="vigilante-f-firewall-trusted-proxy-header"><?php esc_html_e( 'Visitor IP detection', 'vigilante' ); ?></label></th>
@@ -5429,7 +5748,7 @@ class Vigilante_Admin {
                                value="<?php echo esc_attr( $grace_days ); ?>" 
                                min="0" max="30" class="small-text">
                         <?php esc_html_e( 'days', 'vigilante' ); ?>
-                        <p class="description"><?php esc_html_e( 'Days users have to set up their authenticator app. During this period they can log in without TOTP. Set to 0 for immediate enforcement.', 'vigilante' ); ?></p>
+                        <p class="description"><?php esc_html_e( 'Days users have to set up their authenticator app. Until they do, they log in with a code sent by email, and once this period ends the dashboard sends them to their profile to set the app up. Set to 0 to require it from the first login.', 'vigilante' ); ?></p>
                     </td>
                 </tr>
 
@@ -5466,6 +5785,166 @@ class Vigilante_Admin {
                             <span class="vigilante-totp-reset-status"></span>
                         </div>
                         <p class="description"><?php esc_html_e( 'Reset TOTP for users who lost access to their authenticator app. They will need to set up again.', 'vigilante' ); ?></p>
+                    </td>
+                </tr>
+
+                <?php
+                // Accounts that have to use the app and have not set it up (#89, 3.0.14).
+                $vg_pending = ( ! empty( $two_factor['enabled'] ) && 'totp' === $method ) ? $this->totp_accounts_without_app( $two_factor ) : null;
+                $vg_date    = get_option( 'date_format' );
+                ?>
+                <tr class="vigilante-2fa-totp-only" id="vigilante-2fa-without-app" <?php echo 'totp' !== $method ? 'style="display:none;"' : ''; ?>>
+                    <th scope="row"><?php esc_html_e( 'Accounts without the app', 'vigilante' ); ?></th>
+                    <td>
+                        <?php
+                        // The administrator looking at this screen may be one of them, and on a
+                        // site that cannot send email that locks them out (first blind review of B134).
+                        if ( null !== $vg_pending && null !== $this->totp_setup_state( wp_get_current_user() ) ) :
+                            ?>
+                            <div class="notice notice-warning inline">
+                                <p>
+                                    <?php esc_html_e( 'Your own account has to use the app and has not set it up: until you do, you log in with a code sent by email, so make sure this site sends email.', 'vigilante' ); ?>
+                                    <a href="<?php echo esc_url( admin_url( 'profile.php#vigilante-totp-setup' ) ); ?>"><?php esc_html_e( 'Set it up now', 'vigilante' ); ?></a>
+                                </p>
+                            </div>
+                        <?php endif; ?>
+                        <?php if ( null === $vg_pending ) : ?>
+                            <p class="description"><?php esc_html_e( 'Save the settings with two-factor authentication on and the authenticator app as the method to see which accounts have not set it up.', 'vigilante' ); ?></p>
+                        <?php elseif ( empty( $vg_pending['rows'] ) ) : ?>
+                            <p><?php esc_html_e( 'Every account that has to use the app has set it up.', 'vigilante' ); ?></p>
+                        <?php else : ?>
+                            <?php
+                            // One line always in sight, the list folded below it: on a large
+                            // site it can be fifty rows (Fernando, 18 Nov 2026).
+                            $vg_total = array_sum( $vg_pending['counts'] );
+                            $vg_parts = array();
+                            if ( $vg_pending['counts']['expired'] ) {
+                                /* translators: %d: number of accounts */
+                                $vg_parts[] = sprintf( _n( '%d with the grace period over', '%d with the grace period over', $vg_pending['counts']['expired'], 'vigilante' ), $vg_pending['counts']['expired'] );
+                            }
+                            if ( $vg_pending['counts']['grace'] ) {
+                                /* translators: %d: number of accounts */
+                                $vg_parts[] = sprintf( _n( '%d in the grace period', '%d in the grace period', $vg_pending['counts']['grace'], 'vigilante' ), $vg_pending['counts']['grace'] );
+                            }
+                            if ( $vg_pending['counts']['not_started'] ) {
+                                /* translators: %d: number of accounts */
+                                $vg_parts[] = sprintf( _n( '%d that has not logged in yet', '%d that have not logged in yet', $vg_pending['counts']['not_started'], 'vigilante' ), $vg_pending['counts']['not_started'] );
+                            }
+                            ?>
+                            <p class="vigilante-totp-pending-summary">
+                                <strong>
+                                    <?php
+                                    printf(
+                                        /* translators: %d: number of accounts */
+                                        esc_html( _n( '%d account has not set up the app', '%d accounts have not set up the app', $vg_total, 'vigilante' ) ),
+                                        absint( $vg_total )
+                                    );
+                                    ?>
+                                </strong>
+                                <?php echo esc_html( ': ' . implode( ', ', $vg_parts ) . '.' ); ?>
+                            </p>
+                            <details class="vigilante-totp-pending-details">
+                                <summary><?php esc_html_e( 'Show the accounts', 'vigilante' ); ?></summary>
+                            <table class="widefat striped vigilante-totp-pending">
+                                <thead>
+                                    <tr>
+                                        <th scope="col"><?php esc_html_e( 'User', 'vigilante' ); ?></th>
+                                        <th scope="col"><?php esc_html_e( 'Role', 'vigilante' ); ?></th>
+                                        <th scope="col"><?php esc_html_e( 'Grace period', 'vigilante' ); ?></th>
+                                        <th scope="col"><span class="screen-reader-text"><?php esc_html_e( 'Actions', 'vigilante' ); ?></span></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ( $vg_pending['rows'] as $vg_index => $vg_row ) : ?>
+                                        <?php
+                                        $vg_user  = $vg_row['user'];
+                                        $vg_roles = array();
+                                        foreach ( (array) $vg_user->roles as $vg_role ) {
+                                            $vg_names   = wp_roles()->get_names();
+                                            $vg_roles[] = isset( $vg_names[ $vg_role ] ) ? translate_user_role( $vg_names[ $vg_role ] ) : $vg_role;
+                                        }
+                                        $vg_link = get_edit_user_link( $vg_user->ID );
+                                        ?>
+                                        <tr<?php echo $vg_index >= 10 ? ' class="vigilante-totp-pending-extra" hidden' : ''; ?>>
+                                            <td>
+                                                <?php if ( $vg_link ) : ?>
+                                                    <a href="<?php echo esc_url( $vg_link ); ?>"><?php echo esc_html( $vg_user->user_login ); ?></a>
+                                                <?php else : ?>
+                                                    <?php echo esc_html( $vg_user->user_login ); ?>
+                                                <?php endif; ?>
+                                            </td>
+                                            <td><?php echo esc_html( implode( ', ', $vg_roles ) ); ?></td>
+                                            <td>
+                                                <?php if ( 'expired' === $vg_row['state'] ) : ?>
+                                                    <span class="vigilante-totp-state vigilante-totp-state-expired">
+                                                        <?php
+                                                        /* translators: %s: date the grace period ended */
+                                                        printf( esc_html__( 'Expired on %s', 'vigilante' ), esc_html( wp_date( $vg_date, $vg_row['ends'] ) ) );
+                                                        ?>
+                                                    </span>
+                                                <?php elseif ( 'grace' === $vg_row['state'] ) : ?>
+                                                    <span class="vigilante-totp-state vigilante-totp-state-grace">
+                                                        <?php
+                                                        /* translators: %s: date the grace period ends */
+                                                        printf( esc_html__( 'Until %s', 'vigilante' ), esc_html( wp_date( $vg_date, $vg_row['ends'] ) ) );
+                                                        ?>
+                                                    </span>
+                                                <?php else : ?>
+                                                    <span class="vigilante-totp-state vigilante-totp-state-not-started"><?php esc_html_e( 'Has not logged in yet: it starts at the first login', 'vigilante' ); ?></span>
+                                                <?php endif; ?>
+                                            </td>
+                                            <td>
+                                                <?php
+                                                // Only where it can work: on a network an administrator of a
+                                                // subsite cannot edit other accounts (cross review of 3.0.14).
+                                                if ( current_user_can( 'edit_user', $vg_user->ID ) ) :
+                                                    ?>
+                                                    <button type="button" class="button button-small vigilante-totp-remind" data-user="<?php echo esc_attr( (string) $vg_user->ID ); ?>"><?php esc_html_e( 'Send reminder', 'vigilante' ); ?></button>
+                                                    <span class="vigilante-totp-remind-status" role="status" aria-live="polite"></span>
+                                                <?php endif; ?>
+                                            </td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                            <?php if ( count( $vg_pending['rows'] ) > 10 ) : ?>
+                                <p>
+                                    <button type="button" class="button-link vigilante-totp-pending-all">
+                                        <?php
+                                        printf(
+                                            /* translators: %d: number of accounts listed */
+                                            esc_html( _n( 'Show all %d', 'Show all %d', count( $vg_pending['rows'] ), 'vigilante' ) ),
+                                            absint( count( $vg_pending['rows'] ) )
+                                        );
+                                        ?>
+                                    </button>
+                                </p>
+                            <?php endif; ?>
+                            <?php if ( $vg_pending['more'] > 0 ) : ?>
+                                <p class="description">
+                                    <?php
+                                    printf(
+                                        /* translators: %d: number of accounts not listed */
+                                        esc_html( _n( '%d more account is not listed.', '%d more accounts are not listed.', $vg_pending['more'], 'vigilante' ) ),
+                                        absint( $vg_pending['more'] )
+                                    );
+                                    ?>
+                                </p>
+                            <?php endif; ?>
+                            </details>
+                        <?php endif; ?>
+                        <?php if ( null !== $vg_pending && $vg_pending['capped'] ) : ?>
+                            <p class="description">
+                                <?php
+                                printf(
+                                    /* translators: %d: number of accounts looked at */
+                                    esc_html( _n( 'Only the first %d account of the enforced roles was looked at.', 'Only the first %d accounts of the enforced roles were looked at.', $vg_pending['checked'], 'vigilante' ) ),
+                                    absint( $vg_pending['checked'] )
+                                );
+                                ?>
+                            </p>
+                        <?php endif; ?>
+                        <p class="description"><?php esc_html_e( 'Until they set up the app, these accounts log in with a code sent by email. Once their grace period ends, the dashboard only lets them into their profile to set it up. Send reminder emails them the setup instructions again.', 'vigilante' ); ?></p>
                     </td>
                 </tr>
             </table>
@@ -8272,7 +8751,7 @@ class Vigilante_Admin {
             $vg_scan_summary = '';
         }
         ?>
-        <div id="vigilante-section-fi-last-scan" class="vigilante-settings-section" data-vigilante-summary="<?php echo esc_attr( $vg_scan_summary ); ?>">
+        <div id="vigilante-section-fi-last-scan" class="vigilante-settings-section" data-vigilante-summary="<?php echo esc_attr( $vg_scan_summary ); ?>" data-vigilante-last-scan="<?php echo esc_attr( $last_scan ? wp_date( $datetime_format, $last_scan ) : '' ); ?>">
             <h2><?php esc_html_e( 'Last Scan Results', 'vigilante' ); ?></h2>
             <p class="vigilante-scan-actions">
                 <button type="button" class="button button-primary vigilante-run-scan" <?php disabled( (bool) $is_disabled ); ?>>
